@@ -21,10 +21,35 @@ export interface ActionMessage {
    */
 }
 
-export function handleCommand(command: string): void {
-  if (command !== TOGGLE_COMMAND) return;
+/**
+ * Map a `chrome.commands` command name to the canonical `ActionId` that
+ * gets dispatched to the active tab. Keyboard commands intentionally
+ * default to the most useful variant of their action family — the
+ * remaining variants are only reachable via the context menu in v0.2.
+ */
+const COMMAND_TO_ACTION: Record<string, ActionId> = {
+  ask_about_selection: 'ask_about_selection',
+  rewrite_selection: 'rewrite_improve',
+  translate_selection: 'translate_en',
+};
+
+function sendToActiveTab(message: unknown): void {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const id = tabs[0]?.id;
-    if (id != null) chrome.tabs.sendMessage(id, TOGGLE_MESSAGE);
+    if (id != null) chrome.tabs.sendMessage(id, message);
   });
+}
+
+export function handleCommand(command: string): void {
+  if (command === TOGGLE_COMMAND) {
+    sendToActiveTab(TOGGLE_MESSAGE);
+    return;
+  }
+  const actionId = COMMAND_TO_ACTION[command];
+  if (actionId) {
+    const msg: ActionMessage = { a: ACTION_MESSAGE_KIND, id: actionId };
+    sendToActiveTab(msg);
+    return;
+  }
+  // Unknown command — ignore.
 }
