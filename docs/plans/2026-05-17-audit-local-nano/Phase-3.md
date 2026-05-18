@@ -437,21 +437,21 @@ polyfill boundary.
 
 **Verification Checklist:**
 
-- [ ] `src/session.ts` exports `LanguageModelSession`, `SessionDeps`, `initSession`
-- [ ] `content.ts` is ≤ 160 lines
-- [ ] `content.ts` does not contain `heavyLoadPromise`, `ensureSession`, `send`,
+- [x] `src/session.ts` exports `LanguageModelSession`, `SessionDeps`, `initSession`
+- [x] `content.ts` is ≤ 160 lines
+- [x] `content.ts` does not contain `heavyLoadPromise`, `ensureSession`, `send`,
   `activeAbort`, `isFirstTurn`, `creating`, `persist`, `addMessage`, `restore`
-- [ ] `content.ts` does not contain `let s:` or `let session:`
-- [ ] `content.ts` does not contain the raw string `'toggle'` in a message check
-- [ ] `content.ts` does not contain the hardcoded hex `#0a5fa3` for the button
+- [x] `content.ts` does not contain `let s:` or `let session:`
+- [x] `content.ts` does not contain the raw string `'toggle'` in a message check
+- [x] `content.ts` does not contain the hardcoded hex `#0a5fa3` for the button
   (it imports `IDLE_BG` from `src/ui/state.ts`)
-- [ ] `src/session.ts` contains the `isFirstTurn` comment documenting M7 behavior
-- [ ] `heavyLoadPromise = null` is inside the `catch` block in `ensureSession`
+- [x] `src/session.ts` contains the `isFirstTurn` comment documenting M7 behavior
+- [x] `heavyLoadPromise = null` is inside the `catch` block in `ensureSession`
   (H1 fix — irrecoverable rejected promise)
-- [ ] `i.disabled = true` is set before loading and `i.disabled = false` is set
+- [x] `i.disabled = true` is set before loading and `i.disabled = false` is set
   in both success and catch paths (H2 fix — silent drop during load)
-- [ ] `npm run typecheck` passes
-- [ ] All 30 existing tests pass
+- [x] `npm run typecheck` passes
+- [x] All 30 existing tests pass
 
 **Testing Instructions:**
 
