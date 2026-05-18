@@ -293,13 +293,13 @@ but kept linear).
 
 **Verification Checklist:**
 
-- [ ] `src/transform-prompts.ts` exists with all 11 `ActionId` values
-- [ ] All transform prompts emit text-only (verified by unit test)
-- [ ] `actionToPrompt` and `actionToDescriptor` behave per the table
-- [ ] `tests/transform-prompts.test.ts` has at least 7 tests, all passing
+- [x] `src/transform-prompts.ts` exists with all 11 `ActionId` values
+- [x] All transform prompts emit text-only (verified by unit test)
+- [x] `actionToPrompt` and `actionToDescriptor` behave per the table
+- [x] `tests/transform-prompts.test.ts` has at least 7 tests, all passing
       (the schema sweep plus the new label/parentLabel regression test)
-- [ ] `npm run lint:ci` exits 0
-- [ ] `npm run typecheck` exits 0
+- [x] `npm run lint:ci` exits 0
+- [x] `npm run typecheck` exits 0
 
 **Testing Instructions:**
 
