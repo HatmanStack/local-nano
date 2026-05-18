@@ -1,0 +1,21 @@
+/**
+ * Copyright 2026 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Default model versions for each backend.
+ */
+export const DEFAULT_MODELS = {
+  firebase: { modelName: 'gemini-2.5-flash-lite' },
+  gemini: { modelName: 'gemini-2.5-flash-lite' },
+  openai: { modelName: 'gpt-4o' },
+  transformers: {
+    modelName: 'onnx-community/gemma-3-1b-it-ONNX-GQA',
+    device: 'webgpu',
+    dtype: 'q4f16',
+  },
+  webllm: {
+    modelName: 'Llama-3.2-3B-Instruct-q4f32_1-MLC',
+  },
+};

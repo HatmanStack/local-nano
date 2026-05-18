@@ -1,0 +1,427 @@
+/**
+ * Copyright 2026 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+export default class MultimodalConverter {
+  static async convert(type, value) {
+    if (type === 'image') {
+      return this.processImage(value);
+    }
+    if (type === 'audio') {
+      return this.processAudio(value);
+    }
+    throw new DOMException(
+      `Unsupported media type: ${type}`,
+      'NotSupportedError'
+    );
+  }
+
+  static async processImage(source) {
+    // Blob
+    const isBlob =
+      source instanceof Blob ||
+      (source &&
+        typeof source === 'object' &&
+        source.constructor &&
+        source.constructor.name === 'Blob');
+
+    if (isBlob) {
+      if (source.type === 'image/png' || source.type === 'image/jpeg') {
+        return this.blobToInlineData(source);
+      }
+      return this.#convertToPngPart(source);
+    }
+
+    // BufferSource (ArrayBuffer/View) -> Sniff or Default
+    const isArrayBuffer =
+      source instanceof ArrayBuffer ||
+      (source &&
+        source.constructor &&
+        source.constructor.name === 'ArrayBuffer');
+    const isView =
+      ArrayBuffer.isView(source) ||
+      (source &&
+        source.buffer &&
+        (source.buffer instanceof ArrayBuffer ||
+          source.buffer.constructor.name === 'ArrayBuffer'));
+
+    if (isArrayBuffer || isView) {
+      const u8 = isArrayBuffer
+        ? new Uint8Array(source)
+        : new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+      const buffer = u8.buffer.slice(
+        u8.byteOffset,
+        u8.byteOffset + u8.byteLength
+      );
+      const mimeType = this.#sniffImageMimeType(u8);
+      if (!mimeType) {
+        throw new DOMException('Invalid image data', 'InvalidStateError');
+      }
+
+      if (mimeType === 'image/png' || mimeType === 'image/jpeg') {
+        const base64 = await this.arrayBufferToBase64(buffer);
+        return { inlineData: { data: base64, mimeType } };
+      }
+
+      const blob = new Blob([buffer], { type: mimeType });
+      return this.#convertToPngPart(blob);
+    }
+
+    // ImageBitmap/ImageDataSource (Canvas, Image, VideoFrame, etc.)
+    // We draw to a canvas to standardize to PNG
+    return this.canvasSourceToInlineData(source);
+  }
+
+  static async #convertToPngPart(blob) {
+    const url = URL.createObjectURL(blob);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode().catch((e) => {
+        throw new DOMException(
+          `The source image cannot be decoded: ${e.message}`,
+          'InvalidStateError'
+        );
+      });
+      return await this.canvasSourceToInlineData(img);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  static #sniffImageMimeType(u8) {
+    const len = u8.length;
+    if (len < 4) {
+      return null;
+    }
+
+    // JPEG: FF D8 FF
+    if (u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) {
+      return 'image/jpeg';
+    }
+
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (
+      u8[0] === 0x89 &&
+      u8[1] === 0x50 &&
+      u8[2] === 0x4e &&
+      u8[3] === 0x47 &&
+      u8[4] === 0x0d &&
+      u8[5] === 0x0a &&
+      u8[6] === 0x1a &&
+      u8[7] === 0x0a
+    ) {
+      return 'image/png';
+    }
+
+    // SVG: Check for <svg or <?xml (heuristics)
+    const preview = String.fromCharCode(...u8.slice(0, 100)).toLowerCase();
+    if (preview.includes('<svg') || preview.includes('<?xml')) {
+      return 'image/svg+xml';
+    }
+
+    // Common web formats to help decoding
+    if (u8[0] === 0x47 && u8[1] === 0x49 && u8[2] === 0x46) {
+      return 'image/gif';
+    }
+    if (u8[0] === 0x52 && u8[1] === 0x49 && u8[2] === 0x46 && u8[3] === 0x46) {
+      return 'image/webp';
+    }
+    if (u8[4] === 0x66 && u8[5] === 0x74 && u8[6] === 0x79 && u8[7] === 0x70) {
+      return 'image/avif';
+    } // simplified
+
+    return null;
+  }
+
+  static async processAudio(source) {
+    // Blob
+    const isBlob =
+      source instanceof Blob ||
+      (source &&
+        typeof source === 'object' &&
+        source.constructor &&
+        source.constructor.name === 'Blob');
+
+    if (isBlob) {
+      if (
+        source.type &&
+        !source.type.startsWith('audio/') &&
+        source.type !== 'application/ogg'
+      ) {
+        throw new DOMException('Invalid audio mime type', 'DataError');
+      }
+      return this.blobToInlineData(source);
+    }
+
+    // AudioBuffer -> WAV
+    const isAudioBuffer =
+      source instanceof AudioBuffer ||
+      (source &&
+        source.constructor &&
+        source.constructor.name === 'AudioBuffer');
+
+    if (isAudioBuffer) {
+      const wavBuffer = this.audioBufferToWav(source);
+      const base64 = await this.arrayBufferToBase64(wavBuffer);
+      return { inlineData: { data: base64, mimeType: 'audio/wav' } };
+    }
+
+    // BufferSource -> Assume it's already an audio file (mp3/wav)
+    const isArrayBuffer =
+      source instanceof ArrayBuffer ||
+      (source &&
+        source.constructor &&
+        source.constructor.name === 'ArrayBuffer');
+    const isView =
+      ArrayBuffer.isView(source) ||
+      (source &&
+        source.buffer &&
+        (source.buffer instanceof ArrayBuffer ||
+          source.buffer.constructor.name === 'ArrayBuffer'));
+
+    if (isArrayBuffer || isView) {
+      const buffer = isArrayBuffer ? source : source.buffer;
+      return {
+        inlineData: {
+          data: await this.arrayBufferToBase64(buffer),
+          mimeType: 'audio/wav', // Fallback assumption
+        },
+      };
+    }
+
+    throw new DOMException('Unsupported audio source', 'NotSupportedError');
+  }
+
+  // Low Level Converters
+
+  static blobToInlineData(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        if (reader.error) {
+          reject(reader.error);
+        } else {
+          resolve({
+            inlineData: {
+              data: reader.result.split(',')[1],
+              mimeType: blob.type,
+            },
+          });
+        }
+      };
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  static async canvasSourceToInlineData(source) {
+    if (!source) {
+      throw new DOMException('Invalid image source', 'InvalidStateError');
+    }
+
+    if (
+      typeof HTMLImageElement !== 'undefined' &&
+      source instanceof HTMLImageElement &&
+      !source.complete
+    ) {
+      await source.decode().catch(() => {});
+    }
+
+    if (
+      typeof HTMLVideoElement !== 'undefined' &&
+      source instanceof HTMLVideoElement &&
+      source.readyState < 2
+    ) {
+      await new Promise((resolve) => {
+        source.addEventListener('loadeddata', resolve, { once: true });
+        // Fallback for already loaded or error
+        if (source.readyState >= 2) {
+          resolve();
+        }
+        setTimeout(resolve, 1000);
+      });
+    }
+
+    const getDimension = (name) => {
+      const val = source[name];
+      if (typeof val === 'number') {
+        return val;
+      }
+      if (typeof val === 'object' && val !== null && 'baseVal' in val) {
+        return val.baseVal.value;
+      }
+      return 0;
+    };
+
+    let w =
+      source.displayWidth ||
+      source.naturalWidth ||
+      source.videoWidth ||
+      getDimension('width');
+    let h =
+      source.displayHeight ||
+      source.naturalHeight ||
+      source.videoHeight ||
+      getDimension('height');
+
+    // Fallback for SVG elements (like SVGImageElement in DOM)
+    if ((!w || !h) && typeof source.getBBox === 'function') {
+      try {
+        const box = source.getBBox();
+        w = w || box.width;
+        h = h || box.height;
+      } catch {
+        // SVG might not be in DOM or not ready
+      }
+    }
+
+    // Last resort fallback for any element in the DOM
+    if ((!w || !h) && typeof source.getBoundingClientRect === 'function') {
+      try {
+        const rect = source.getBoundingClientRect();
+        w = w || rect.width;
+        h = h || rect.height;
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!w || !h) {
+      const typeStr =
+        source.constructor && source.constructor.name
+          ? source.constructor.name
+          : typeof source;
+      throw new DOMException(
+        `Invalid image dimensions (${w}x${h}) for source type ${typeStr}`,
+        'InvalidStateError'
+      );
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+
+    const ctx = canvas.getContext('2d');
+    // More robust ImageData check for cross-context objects
+    const isImageData =
+      (typeof ImageData !== 'undefined' && source instanceof ImageData) ||
+      (source &&
+        source.constructor &&
+        source.constructor.name === 'ImageData') ||
+      (source &&
+        typeof source.width === 'number' &&
+        typeof source.height === 'number' &&
+        source.data &&
+        source.data.buffer);
+
+    if (isImageData) {
+      ctx.putImageData(source, 0, 0);
+    } else {
+      ctx.drawImage(source, 0, 0);
+    }
+
+    const dataUrl = canvas.toDataURL('image/png');
+    return {
+      inlineData: {
+        data: dataUrl.split(',')[1],
+        mimeType: 'image/png',
+      },
+    };
+  }
+
+  static async arrayBufferToBase64(buffer) {
+    const blob = new Blob([buffer]);
+    const reader = new FileReader();
+    return new Promise((resolve, reject) => {
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  // Simple WAV Encoder for AudioBuffer
+  static audioBufferToWav(buffer) {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+
+    let result;
+    if (numChannels === 2) {
+      result = this.interleave(
+        buffer.getChannelData(0),
+        buffer.getChannelData(1)
+      );
+    } else {
+      result = buffer.getChannelData(0);
+    }
+
+    return this.encodeWAV(result, format, sampleRate, numChannels, bitDepth);
+  }
+
+  static interleave(inputL, inputR) {
+    const length = inputL.length + inputR.length;
+    const result = new Float32Array(length);
+    let index = 0;
+    let inputIndex = 0;
+    while (index < length) {
+      result[index++] = inputL[inputIndex];
+      result[index++] = inputR[inputIndex];
+      inputIndex++;
+    }
+    return result;
+  }
+
+  static encodeWAV(samples, format, sampleRate, numChannels, bitDepth) {
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = numChannels * bytesPerSample;
+
+    const buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
+    const view = new DataView(buffer);
+
+    /* RIFF identifier */
+    this.writeString(view, 0, 'RIFF');
+    /* RIFF chunk length */
+    view.setUint32(4, 36 + samples.length * bytesPerSample, true);
+    /* RIFF type */
+    this.writeString(view, 8, 'WAVE');
+    /* format chunk identifier */
+    this.writeString(view, 12, 'fmt ');
+    /* format chunk length */
+    view.setUint32(16, 16, true);
+    /* sample format (raw) */
+    view.setUint16(20, format, true);
+    /* channel count */
+    view.setUint16(22, numChannels, true);
+    /* sample rate */
+    view.setUint32(24, sampleRate, true);
+    /* byte rate (sample rate * block align) */
+    view.setUint32(28, sampleRate * blockAlign, true);
+    /* block align (channel count * bytes per sample) */
+    view.setUint16(32, blockAlign, true);
+    /* bits per sample */
+    view.setUint16(34, bitDepth, true);
+    /* data chunk identifier */
+    this.writeString(view, 36, 'data');
+    /* data chunk length */
+    view.setUint32(40, samples.length * bytesPerSample, true);
+
+    this.floatTo16BitPCM(view, 44, samples);
+
+    return buffer;
+  }
+
+  static floatTo16BitPCM(output, offset, input) {
+    for (let i = 0; i < input.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+  }
+
+  static writeString(view, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  }
+}
