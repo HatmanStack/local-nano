@@ -109,6 +109,13 @@ describe('ACTION_DESCRIPTORS schema', () => {
   it('exports SELECTION_LIMIT === 1500', () => {
     expect(SELECTION_LIMIT).toBe(1500);
   });
+
+  it('deep-freezes every descriptor so callers cannot mutate systemPrompt', () => {
+    expect(Object.isFrozen(ACTION_DESCRIPTORS)).toBe(true);
+    for (const descriptor of ACTION_DESCRIPTORS) {
+      expect(Object.isFrozen(descriptor)).toBe(true);
+    }
+  });
 });
 
 describe('actionToPrompt', () => {
@@ -138,9 +145,11 @@ describe('actionToPrompt', () => {
     }
   });
 
-  it('throws for chat-kind actions (systemPrompt is null)', () => {
+  it('throws for chat-kind actions (systemPrompt is null) with a descriptive message', () => {
     for (const id of CHAT_IDS) {
-      expect(() => actionToPrompt(id)).toThrow(/Unknown action/);
+      // The error mentions the action id AND the kind so debugging a
+      // misrouted call doesn't read like a typo in the action id.
+      expect(() => actionToPrompt(id)).toThrow(new RegExp(`'${id}'.*no system prompt`));
     }
   });
 

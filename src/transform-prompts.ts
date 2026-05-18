@@ -93,89 +93,90 @@ const REWRITE_PARENT = 'Rewrite';
 const TRANSFORM_PARENT = 'Translate / Simplify / Summarize in place';
 
 /**
- * The canonical action table. Frozen at module load so accidental
- * mutation in callers shows up as a runtime TypeError instead of
- * silent corruption.
+ * The canonical action table. Each descriptor is deep-frozen so
+ * accidental mutation in callers (e.g. overwriting `systemPrompt` at
+ * runtime) shows up as a TypeError in strict mode rather than silently
+ * corrupting every later transform.
  */
 export const ACTION_DESCRIPTORS: readonly ActionDescriptor[] = Object.freeze([
   // Read-side actions — top-level menu entries.
-  {
+  Object.freeze({
     id: 'ask_about_selection',
     kind: 'chat',
     label: 'Ask local-nano about this',
     systemPrompt: null,
-  },
-  {
+  }),
+  Object.freeze({
     id: 'summarize_page',
     kind: 'page-chat',
     label: 'Summarize this page',
     systemPrompt: null,
-  },
+  }),
   // Rewrite submenu (editable targets).
-  {
+  Object.freeze({
     id: 'rewrite_improve',
     kind: 'transform-editable',
     label: 'Improve writing',
     parentLabel: REWRITE_PARENT,
     systemPrompt: REWRITE_IMPROVE_PROMPT,
-  },
-  {
+  }),
+  Object.freeze({
     id: 'rewrite_shorter',
     kind: 'transform-editable',
     label: 'Make shorter',
     parentLabel: REWRITE_PARENT,
     systemPrompt: REWRITE_SHORTER_PROMPT,
-  },
-  {
+  }),
+  Object.freeze({
     id: 'rewrite_formal',
     kind: 'transform-editable',
     label: 'Make formal',
     parentLabel: REWRITE_PARENT,
     systemPrompt: REWRITE_FORMAL_PROMPT,
-  },
-  {
+  }),
+  Object.freeze({
     id: 'rewrite_grammar',
     kind: 'transform-editable',
     label: 'Fix grammar',
     parentLabel: REWRITE_PARENT,
     systemPrompt: REWRITE_GRAMMAR_PROMPT,
-  },
+  }),
   // Read-only transform submenu.
-  {
+  Object.freeze({
     id: 'translate_en',
     kind: 'transform-readonly',
     label: 'To English',
     parentLabel: TRANSFORM_PARENT,
     systemPrompt: TRANSLATE_EN_PROMPT,
-  },
-  {
+  }),
+  Object.freeze({
     id: 'translate_es',
     kind: 'transform-readonly',
     label: 'To Spanish',
     parentLabel: TRANSFORM_PARENT,
     systemPrompt: TRANSLATE_ES_PROMPT,
-  },
-  {
+  }),
+  Object.freeze({
     id: 'translate_fr',
     kind: 'transform-readonly',
     label: 'To French',
     parentLabel: TRANSFORM_PARENT,
     systemPrompt: TRANSLATE_FR_PROMPT,
-  },
-  {
+  }),
+  Object.freeze({
     id: 'simplify_in_place',
     kind: 'transform-readonly',
     label: 'Simplify',
     parentLabel: TRANSFORM_PARENT,
     systemPrompt: SIMPLIFY_PROMPT,
-  },
-  {
+  }),
+  Object.freeze({
     id: 'summarize_in_place',
     kind: 'transform-readonly',
     label: 'Summarize',
     parentLabel: TRANSFORM_PARENT,
     systemPrompt: SUMMARIZE_IN_PLACE_PROMPT,
-  },
+  }),
 ]);
 
 /**
@@ -198,7 +199,9 @@ export function actionToDescriptor(actionId: ActionId): ActionDescriptor {
 export function actionToPrompt(actionId: ActionId): string {
   const descriptor = actionToDescriptor(actionId);
   if (descriptor.systemPrompt === null) {
-    throw new Error(`Unknown action: ${actionId}`);
+    throw new Error(
+      `Action '${actionId}' is a ${descriptor.kind}-kind action and has no system prompt`,
+    );
   }
   return descriptor.systemPrompt;
 }
