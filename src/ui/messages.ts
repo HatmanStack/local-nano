@@ -2,8 +2,11 @@ import type { Role } from '../history.js';
 
 export function makeTypingIndicator(doc: Document = document): HTMLElement {
   const wrap = doc.createElement('span');
-  wrap.innerHTML =
-    '<span class="ln-dot"></span><span class="ln-dot"></span><span class="ln-dot"></span>';
+  for (let idx = 0; idx < 3; idx++) {
+    const dot = doc.createElement('span');
+    dot.className = 'ln-dot';
+    wrap.appendChild(dot);
+  }
   return wrap;
 }
 
