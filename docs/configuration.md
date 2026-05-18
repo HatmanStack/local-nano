@@ -11,7 +11,7 @@ cp .env.example.json .env.json
   "apiKey": "dummy",
   "device": "webgpu",
   "dtype": "q4",
-  "modelName": "onnx-community/Qwen3.5-0.8B-ONNX"
+  "modelName": "onnx-community/gemma-4-E2B-it-ONNX"
 }
 ```
 
@@ -25,8 +25,8 @@ A Hugging Face model identifier in `org/repo` form. The model must be an ONNX-fo
 
 Smaller models load faster and are kinder to your GPU memory; bigger ones are smarter but take longer to download and to respond. Some practical picks:
 
-- `onnx-community/Qwen3.5-0.8B-ONNX` — small, fast, decent for short answers (the default).
-- `onnx-community/gemma-4-E2B-it-ONNX` — bigger, smarter; needs WebGPU.
+- `onnx-community/gemma-4-E2B-it-ONNX` — bigger, smarter; needs WebGPU (the default).
+- `onnx-community/Qwen3.5-0.8B-ONNX` — small, fast, decent for short answers; needs WebGPU.
 - `onnx-community/Qwen2.5-0.5B-Instruct` — proven safe pick when you're stuck on WASM.
 
 Picking the right model for your hardware is its own topic — see [`docs/models.md`](models.md) for a field guide covering which models we've tried, what fails, and how to run without WebGPU.

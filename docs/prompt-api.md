@@ -51,7 +51,7 @@ Every user turn calls `session.promptStreaming(input, { signal })`, returning a 
 
 ## When native lands
 
-The polyfill installs over the native binding when both exist, so today the extension behaves identically on Chromebook Plus and on every other Chrome. That's deliberate — a consistent model across machines is more valuable for now than a marginal performance win on a narrow hardware tier.
+The polyfill's install guard skips globalThis assignment when a native `LanguageModel` is already present. This extension bypasses that guard entirely — `content.ts` imports and uses the module-exported `LanguageModel` directly, so behavior is identical on Chromebook Plus and on every other Chrome. That's deliberate — a consistent model across machines is more valuable for now than a marginal performance win on a narrow hardware tier.
 
 Once native is widely available, the natural change is to gate the polyfill load behind a real availability check:
 

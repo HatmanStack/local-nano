@@ -25,8 +25,9 @@ From `manifest.json`:
 | `activeTab`                              | So the toggle hotkey can reach the current tab.                   |
 | `scripting`                              | Standard MV3 plumbing for content-script injection.               |
 | `storage`                                | Persist conversation history in `chrome.storage.local`.           |
-| `host_permissions` for `huggingface.co`  | Download model weights.                                           |
-| `host_permissions` for `cdn.jsdelivr.net`| Fallback CDN used by Transformers.js (rarely hit — the ORT wasm files are bundled in `dist/ort/` to avoid this). |
+| `host_permissions` for `huggingface.co` and `*.huggingface.co` | Download model weights from Hugging Face and its CDN subdomains. |
+| `host_permissions` for `cdn-lfs.huggingface.co` | Download large model files from Hugging Face's LFS CDN. |
+| `host_permissions` for `cdn.jsdelivr.net` | Fallback CDN used by Transformers.js (rarely hit — the ORT wasm files are bundled in `dist/ort/` to avoid this). |
 
 The content script declares `matches: ["<all_urls>"]`. That is required for the assistant to be available on any page, but it also means the extension can read DOM on every page. If that matters to you, narrow it before publishing.
 
