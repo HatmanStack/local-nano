@@ -566,10 +566,10 @@ retry the full load sequence.
 
 **Verification Checklist:**
 
-- [ ] `docs/architecture.md` has a "Session Lifecycle (post-extraction)" section
-- [ ] The session variable table is present
-- [ ] ADR-001 through ADR-004 are present
-- [ ] M7 lifecycle limitation is documented
+- [x] `docs/architecture.md` has a "Session Lifecycle (post-extraction)" section
+- [x] The session variable table is present
+- [x] ADR-001 through ADR-004 are present
+- [x] M7 lifecycle limitation is documented
 
 **Commit Message Template:**
 
