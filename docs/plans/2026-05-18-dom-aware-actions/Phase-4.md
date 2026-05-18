@@ -150,10 +150,10 @@ implications, and how to add a new action in the future.
 
 **Verification Checklist:**
 
-- [ ] `docs/dom-actions.md` exists
-- [ ] `npx markdownlint-cli2 "docs/dom-actions.md"` exits 0
-- [ ] All internal links resolve (run `npx lychee --config .lychee.toml docs/dom-actions.md`)
-- [ ] No emojis (project convention)
+- [x] `docs/dom-actions.md` exists
+- [x] `npx markdownlint-cli2 "docs/dom-actions.md"` exits 0
+- [x] All internal links resolve (run `npx lychee --config .lychee.toml docs/dom-actions.md`)
+- [x] No emojis (project convention)
 
 **Testing Instructions:**
 
@@ -244,9 +244,9 @@ link to).
 
 **Verification Checklist:**
 
-- [ ] All three files updated
-- [ ] `npx markdownlint-cli2 "docs/*.md" "README.md"` exits 0
-- [ ] `docs/dom-actions.md` link from README and architecture resolves
+- [x] All three files updated
+- [x] `npx markdownlint-cli2 "docs/*.md" "README.md"` exits 0
+- [x] `docs/dom-actions.md` link from README and architecture resolves
 
 **Testing Instructions:**
 
@@ -383,11 +383,11 @@ main and tags + publishes — so the CHANGELOG entry has to be precise.
 
 **Verification Checklist:**
 
-- [ ] `manifest.json` version is `0.2.0`
-- [ ] `package.json` version is `0.2.0`
-- [ ] `CHANGELOG.md` has a populated `[0.2.0]` section above `[0.1.1]`
-- [ ] `npx markdownlint-cli2 "CHANGELOG.md"` exits 0
-- [ ] `npm run build` exits 0; reload the extension and confirm
+- [x] `manifest.json` version is `0.2.0`
+- [x] `package.json` version is `0.2.0`
+- [x] `CHANGELOG.md` has a populated `[0.2.0]` section above `[0.1.1]`
+- [x] `npx markdownlint-cli2 "CHANGELOG.md"` exits 0
+- [x] `npm run build` exits 0; reload the extension and confirm
       `chrome://extensions` shows version 0.2.0
 
 **Testing Instructions:**
