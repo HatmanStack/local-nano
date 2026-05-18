@@ -38,9 +38,7 @@ describe('renderMessage', () => {
     const user = renderMessage(container, 'user', 'u');
     const model = renderMessage(container, 'model', 'm');
     const sys = renderMessage(container, 'system', 's');
-    const bgs = new Set(
-      [user, model, sys].map((e) => e.style.background.toLowerCase()),
-    );
+    const bgs = new Set([user, model, sys].map((e) => e.style.background.toLowerCase()));
     expect(bgs.size).toBe(3);
   });
 

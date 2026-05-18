@@ -1,0 +1,19 @@
+# Lychee link checker configuration
+
+# Exclude HuggingFace model URLs (require login for some)
+exclude = [
+  "https://huggingface.co/onnx-community/.*",
+  "https://webgpureport.org",
+]
+
+# GitHub rate-limits unauthenticated requests; cache for 1 day
+cache = true
+max_cache_age = "1d"
+
+# Do not fail on timeouts (transient network issues in CI)
+timeout = 15
+
+# Skip links that appear inside verbatim/code blocks. Example snippets
+# (URLs in fenced code, regex examples, manifest globs) are not real
+# hyperlinks and shouldn't be probed.
+include_verbatim = false

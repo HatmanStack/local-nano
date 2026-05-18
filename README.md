@@ -12,7 +12,14 @@
 </p>
 
 <p align="center">
-  <a href="docs/architecture.md">Architecture</a> · <a href="docs/configuration.md">Configuration</a> · <a href="docs/models.md">Models</a> · <a href="docs/privacy.md">Privacy</a>
+  <a href="docs/architecture.md">Architecture</a> ·
+  <a href="docs/configuration.md">Configuration</a> ·
+  <a href="docs/models.md">Models</a> ·
+  <a href="docs/privacy.md">Privacy</a> ·
+  <a href="docs/development.md">Development</a> ·
+  <a href="docs/prompt-api.md">Prompt API</a> ·
+  <a href="docs/testing.md">Testing</a> ·
+  <a href="docs/contributing.md">Contributing</a>
 </p>
 
 A Chrome extension that puts a small, **fully local** AI assistant on every page you visit. Press a keyboard shortcut, a chat panel slides in, and an in-browser language model answers questions about the page you're reading — no API keys, no servers, no data leaving your machine after the model is downloaded.
@@ -22,7 +29,7 @@ A Chrome extension that puts a small, **fully local** AI assistant on every page
 ## Highlights
 
 - **Runs in the browser, not the cloud.** Inference happens on-device via [Transformers.js](https://huggingface.co/docs/transformers.js) and the [ONNX Runtime Web](https://onnxruntime.ai/) WebAssembly/WebGPU backend.
-- **Built on the proposed Prompt API.** Uses Google's [`prompt-api-polyfill`](https://github.com/webmachinelearning/prompt-api) so the same code can target a native `LanguageModel` once browsers ship it.
+- **Built on the proposed Prompt API.** Uses Google's [`prompt-api-polyfill`](https://github.com/GoogleChromeLabs/web-ai-demos/tree/main/prompt-api-polyfill) so the same code can target a native `LanguageModel` once browsers ship it.
 - **Per-tab chat history.** Conversations are scoped per URL and persisted in `chrome.storage.local`.
 - **Streaming + stop.** Tokens stream in as they're generated; you can interrupt mid-response.
 - **Page-aware first turn.** The model gets the page's title, URL, and a body excerpt on the first question of a conversation.

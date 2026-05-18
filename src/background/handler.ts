@@ -1,5 +1,6 @@
 export const TOGGLE_COMMAND = 'toggle_ai_palette';
 export const TOGGLE_MESSAGE = { a: 'toggle' } as const;
+export type ToggleMessage = typeof TOGGLE_MESSAGE;
 
 export function handleCommand(command: string): void {
   if (command !== TOGGLE_COMMAND) return;

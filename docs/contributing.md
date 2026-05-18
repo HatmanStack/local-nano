@@ -7,17 +7,21 @@ Thanks for taking the time. This is a small experimental project — the bar for
 1. Fork & branch off `main`.
 2. Make your change.
 3. Run the checks locally:
+
+   The `coverage` command runs the full test suite (implicitly `npm test`) and then enforces the coverage thresholds from `vitest.config.ts`. You do not need to run `npm test` separately.
+
    ```bash
    npm run typecheck
    npm run coverage
    npm run build
    ```
+
 4. Open a PR. CI runs the same three commands; the coverage step enforces the thresholds in `vitest.config.ts`.
 
 ## Code style
 
 - TypeScript, ES2022, no transpilation for downlevel targets (we ship to Chrome 120+).
-- Strict mode is off — feel free to lean on `any` where the prompt-api polyfill or Transformers.js types aren't pulling their weight.
+- Strict mode is on. Use `any` only at explicit polyfill or Transformers.js boundaries where no types exist — document why with a comment. Do not propagate `any` into application logic.
 - Keep the bundle small. `content.ts` is loaded into every page. The heavy modules (`@huggingface/transformers`, the polyfill) are dynamically imported via `loadHeavy()` — don't move them back to top-level imports.
 - One short comment when WHY isn't obvious; otherwise let the code speak.
 - Prefer small pure helpers in `src/` over inline logic in `content.ts`. Helpers are testable; content-script side effects aren't.
@@ -44,3 +48,10 @@ Open a GitHub issue with:
 ## Releases
 
 Bump `version` in `manifest.json` and `package.json`, run `npm run build`, zip the repo (without `node_modules/` and `dist/ort/*.wasm.map`), and upload to the Chrome Web Store dashboard. There's no automated release pipeline yet.
+
+## Dependency updates
+
+Dependabot is configured to open PRs for non-major version bumps in
+`devDependencies`. A separate CI workflow (`dependabot-auto-merge.yml`)
+waits for all CI checks to pass and then auto-squash-merges the PR.
+Major version bumps require manual review and are never auto-merged.

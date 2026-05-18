@@ -1,5 +1,5 @@
-import * as esbuild from 'esbuild';
 import { cp, mkdir } from 'node:fs/promises';
+import * as esbuild from 'esbuild';
 
 const watch = process.argv.includes('--watch');
 

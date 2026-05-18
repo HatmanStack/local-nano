@@ -26,7 +26,7 @@ What's still viable:
 
 - **Stick to ≤1B-parameter models.** Qwen2.5-0.5B-Instruct is the sweet spot in our testing — it runs without tripping the heap, gives coherent answers, and finishes prompts in tens of seconds rather than minutes.
 - **Prefer `q8` or `fp16` dtypes.** Both avoid `GatherBlockQuantized`. q8 is smaller (~500 MB for a 0.5B model); fp16 is bigger (~1 GB) but slightly more numerically stable.
-- **Expect 1–3 tokens/second.** Real-world. The first token of a response also has a long prefill cost — for ~1500 chars of page context that's roughly 30–60 seconds of work before output starts. The `Thinking…` indicator exists for this.
+- **Expect 1–3 tokens/second.** Real-world. The first token of a response also has a long prefill cost — for ~1500 chars of page context that's roughly 30–60 seconds of work before output starts. The panel shows a three-dot animation while generating and `Loading model… NN%` during weight download.
 
 Configure it as:
 
@@ -44,7 +44,7 @@ Configure it as:
 ChromeOS doesn't expose WebGPU by default. To check what you have:
 
 1. Open `chrome://gpu` and look at the **Graphics Feature Status** block. The `WebGPU` line tells you the truth: `Hardware accelerated`, `Software only`, or `Disabled`. If it's not hardware-accelerated, none of the flags below will help — your GPU/drivers can't.
-2. Visit https://webgpureport.org. If it reports adapter info ("Intel Iris Xe Graphics" or similar), you're in.
+2. Visit <https://webgpureport.org>. If it reports adapter info ("Intel Iris Xe Graphics" or similar), you're in.
 
 If WebGPU is disabled but the hardware should be capable:
 
@@ -57,7 +57,7 @@ If WebGPU is disabled but the hardware should be capable:
 
 The single most common failure mode we hit on WASM was:
 
-```
+```text
 Error: Can't create a session. ERROR_CODE: 9,
 ERROR_MESSAGE: Could not find an implementation for
 GatherBlockQuantized(1) node with name '/model/embed_tokens/Gather_Quant'
@@ -105,7 +105,7 @@ Captured in roughly the order we hit them so the rationale is visible.
 - **Integer "exception" (e.g., `Error: 12077640`).** Emscripten panic in the WASM ONNX runtime. Almost always memory pressure — bigger model than the heap can hold, or KV cache outgrowing it during long generation. Drop to a smaller model or a smaller `max_new_tokens`.
 - **`Could not find an implementation for X` errors.** ONNX op missing in the active execution provider. See [ONNX op compatibility](#onnx-op-compatibility). If `X` isn't `GatherBlockQuantized`, the same workaround pattern applies: change dtype to dodge the op.
 - **Streaming arrives as one giant chunk instead of token-by-token.** Usually means the model is degenerate (looping on one token), and `TextStreamer`'s UTF-8 boundary heuristic collapses the run into one flush. The streaming code is fine; the model is broken. Try a different dtype or a different model.
-- **`The feature flag gating model execution was disabled` (NotAllowedError).** This is Chrome's *native* `LanguageModel` API rejecting because you're not on Chromebook Plus / equivalent. The polyfill installs over the native binding, but only if it actually loads — see [`content.ts`](../content.ts) for the unconditional polyfill import we use to bypass this.
+- **`The feature flag gating model execution was disabled` (NotAllowedError).** This is Chrome's *native* `LanguageModel` API rejecting because you're not on Chromebook Plus / equivalent. The polyfill's install guard would skip installation if native `LanguageModel` were present. This extension bypasses the guard by importing `LanguageModel` from the polyfill module directly — see [`src/session.ts`](../src/session.ts) for the import. The extension always uses the polyfill.
 
 ## On `max_new_tokens`
 

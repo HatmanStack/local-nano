@@ -11,7 +11,7 @@ cp .env.example.json .env.json
   "apiKey": "dummy",
   "device": "webgpu",
   "dtype": "q4",
-  "modelName": "onnx-community/Qwen3.5-0.8B-ONNX"
+  "modelName": "onnx-community/gemma-4-E2B-it-ONNX"
 }
 ```
 
@@ -25,8 +25,8 @@ A Hugging Face model identifier in `org/repo` form. The model must be an ONNX-fo
 
 Smaller models load faster and are kinder to your GPU memory; bigger ones are smarter but take longer to download and to respond. Some practical picks:
 
-- `onnx-community/Qwen3.5-0.8B-ONNX` — small, fast, decent for short answers (the default).
-- `onnx-community/gemma-4-E2B-it-ONNX` — bigger, smarter; needs WebGPU.
+- `onnx-community/gemma-4-E2B-it-ONNX` — bigger, smarter; needs WebGPU (the default).
+- `onnx-community/Qwen3.5-0.8B-ONNX` — small, fast, decent for short answers; needs WebGPU.
 - `onnx-community/Qwen2.5-0.5B-Instruct` — proven safe pick when you're stuck on WASM.
 
 Picking the right model for your hardware is its own topic — see [`docs/models.md`](models.md) for a field guide covering which models we've tried, what fails, and how to run without WebGPU.
@@ -60,4 +60,14 @@ The shortcut isn't in `.env.json` — it's in `manifest.json` under `commands.to
 
 ## Other knobs
 
-The polyfill itself accepts an `env` block that maps onto Transformers.js's `env` object (e.g., `allowRemoteModels`, custom wasm paths). See `vendor/prompt-api-polyfill/dot_env.json` for the full shape if you need to override a Transformers.js setting from `.env.json`.
+The polyfill itself accepts an `env` block that maps onto Transformers.js's `env` object (e.g., `allowRemoteModels`, custom wasm paths). For the full list of Transformers.js-level settings the polyfill accepts, see `vendor/prompt-api-polyfill/dot_env.json` — it is a **reference template only** and is not read at runtime. All live configuration comes from your `.env.json`.
+
+## Default fallback layer
+
+If a field is absent from `.env.json`, the polyfill's Transformers backend
+falls back to the values in
+`vendor/prompt-api-polyfill/backends/defaults.js` (the `DEFAULT_MODELS.transformers`
+object). This secondary layer supplies `modelName`, `device`, and `dtype`
+defaults. In practice `.env.json` always provides all fields — but if you
+remove a field to experiment, it will silently resolve from that file rather
+than failing.

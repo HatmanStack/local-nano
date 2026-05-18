@@ -1,6 +1,6 @@
 {
   "name": "local-nano",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,13 +9,17 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "coverage": "vitest run --coverage"
+    "coverage": "vitest run --coverage",
+    "lint": "biome check --write .",
+    "lint:ci": "biome check ."
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
     "@types/chrome": "^0.0.270",
     "@vitest/coverage-v8": "^2.1.5",
     "esbuild": "^0.24.0",
     "jsdom": "^25.0.1",
+    "onnxruntime-web": "1.26.0-dev.20260416-b7804b056c",
     "typescript": "^5.6.0",
     "vitest": "^2.1.5"
   },

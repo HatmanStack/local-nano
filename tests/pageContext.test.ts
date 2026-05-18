@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pageContext, PAGE_CONTEXT_BODY_LIMIT } from '../src/pageContext.js';
+import { PAGE_CONTEXT_BODY_LIMIT, pageContext } from '../src/pageContext.js';
 
 describe('pageContext', () => {
   it('formats title, URL, and body', () => {

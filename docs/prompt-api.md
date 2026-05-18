@@ -26,6 +26,34 @@ When pulling from upstream, these edits need to carry forward:
 - **`prompt-api-polyfill.js`** — the iframe-injection block was removed. Upstream patches `HTMLIFrameElement.prototype.contentWindow` and installs a `MutationObserver` on `documentElement` to inject itself into iframes. In a content-script context that's unnecessary (the extension can be configured to inject directly into iframes via the manifest) and very expensive on SPAs with frequent DOM mutations — every page mutation woke the observer.
 - **`backends/transformers.js`** — `max_new_tokens` raised from 1024 to 2048. See [`docs/models.md`](models.md#on-max_new_tokens) for the tradeoff.
 
+## Resync procedure
+
+When pulling a new upstream commit of the polyfill:
+
+1. Download `prompt-api-polyfill.js` from upstream into the vendor tree:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/GoogleChromeLabs/web-ai-demos/main/prompt-api-polyfill/prompt-api-polyfill.js \
+     -o vendor/prompt-api-polyfill/prompt-api-polyfill.js
+   ```
+
+1. Check the header comment (lines 1–30) for new backends; keep only the Transformers.js backend listing.
+
+1. Search for `HTMLIFrameElement.prototype` or `MutationObserver` near the top; delete the iframe-injection block if present (removed to prevent SPA performance regressions — see ADR in `docs/architecture.md`).
+
+1. Download `backends/transformers.js` from upstream:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/GoogleChromeLabs/web-ai-demos/main/prompt-api-polyfill/backends/transformers.js \
+     -o vendor/prompt-api-polyfill/backends/transformers.js
+   ```
+
+1. In `backends/transformers.js`, verify `max_new_tokens` is 2048; raise it if the upstream reset it to 1024.
+
+1. Verify `backends-registry.js` still only registers the `'transformers'` backend.
+
+1. Run `npm run build` and smoke-test the extension in Chrome. Confirm `[local-nano] heavy modules loaded` appears in the console.
+
 ## How it's wired in
 
 [`content.ts`](../content.ts) lazy-imports the polyfill alongside `@huggingface/transformers` on first hotkey toggle:
@@ -51,7 +79,7 @@ Every user turn calls `session.promptStreaming(input, { signal })`, returning a 
 
 ## When native lands
 
-The polyfill installs over the native binding when both exist, so today the extension behaves identically on Chromebook Plus and on every other Chrome. That's deliberate — a consistent model across machines is more valuable for now than a marginal performance win on a narrow hardware tier.
+The polyfill's install guard skips globalThis assignment when a native `LanguageModel` is already present. This extension bypasses that guard entirely — `content.ts` imports and uses the module-exported `LanguageModel` directly, so behavior is identical on Chromebook Plus and on every other Chrome. That's deliberate — a consistent model across machines is more valuable for now than a marginal performance win on a narrow hardware tier.
 
 Once native is widely available, the natural change is to gate the polyfill load behind a real availability check:
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Local AI Cmd",
-  "version": "0.1",
+  "version": "0.1.1",
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": [
     "https://huggingface.co/*",
@@ -10,14 +10,18 @@
     "https://cdn.jsdelivr.net/*"
   ],
   "background": { "service_worker": "dist/background.js", "type": "module" },
-  "content_scripts": [{
-    "matches": ["<all_urls>"],
-    "js": ["dist/content.js"]
-  }],
-  "web_accessible_resources": [{
-    "resources": ["dist/ort/*"],
-    "matches": ["<all_urls>"]
-  }],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["dist/content.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["dist/ort/*"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "commands": {
     "toggle_ai_palette": {
       "suggested_key": { "default": "Ctrl+Shift+K", "mac": "Command+Shift+K" },
