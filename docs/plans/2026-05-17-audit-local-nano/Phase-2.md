@@ -328,10 +328,10 @@ rejections are logged rather than silently swallowed (findings M5, H2 partial).
 
 **Verification Checklist:**
 
-- [ ] `persist()` calls `.catch()` on the return value of `saveHistoryToStorage`
-- [ ] The catch logs with `console.error` and includes the error object
-- [ ] `npm run typecheck` passes
-- [ ] `npm test` passes
+- [x] `persist()` calls `.catch()` on the return value of `saveHistoryToStorage`
+- [x] The catch logs with `console.error` and includes the error object
+- [x] `npm run typecheck` passes
+- [x] `npm test` passes
 
 **Testing Instructions:**
 

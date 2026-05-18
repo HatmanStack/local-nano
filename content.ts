@@ -141,7 +141,9 @@ const STORAGE_KEY = storageKey(location);
 let history: Entry[] = [];
 
 function persist() {
-  saveHistoryToStorage(STORAGE_KEY, history);
+  saveHistoryToStorage(STORAGE_KEY, history).catch((err: unknown) => {
+    console.error('[local-nano] history write failed:', err);
+  });
 }
 
 async function restore(): Promise<void> {
