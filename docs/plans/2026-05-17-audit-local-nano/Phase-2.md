@@ -443,13 +443,13 @@ testable and independent of the `content.ts` entry point.
 
 **Verification Checklist:**
 
-- [ ] `src/history.ts` exports `MAX_HISTORY = 200`
-- [ ] `saveHistory` trims to `MAX_HISTORY` entries before writing
-- [ ] Three new tests in `tests/history.test.ts` cover: over-cap trim, correct
+- [x] `src/history.ts` exports `MAX_HISTORY = 200`
+- [x] `saveHistory` trims to `MAX_HISTORY` entries before writing
+- [x] Three new tests in `tests/history.test.ts` cover: over-cap trim, correct
   tail kept, under-cap passthrough
-- [ ] `npm run typecheck` passes
-- [ ] `npm run coverage` passes and all thresholds are met
-- [ ] All tests pass (30 total after the 3 new ones)
+- [x] `npm run typecheck` passes
+- [x] `npm run coverage` passes and all thresholds are met
+- [x] All tests pass (30 total after the 3 new ones)
 
 **Testing Instructions:**
 

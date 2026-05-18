@@ -11,6 +11,11 @@ export async function loadHistory(key: string): Promise<Entry[]> {
   return Array.isArray(stored) ? (stored as Entry[]) : [];
 }
 
+export const MAX_HISTORY = 200;
+
 export function saveHistory(key: string, history: Entry[]): Promise<void> {
-  return chrome.storage.local.set({ [key]: history });
+  const trimmed = history.length > MAX_HISTORY
+    ? history.slice(-MAX_HISTORY)
+    : history;
+  return chrome.storage.local.set({ [key]: trimmed });
 }

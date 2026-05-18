@@ -3,7 +3,9 @@ import {
   loadHistory,
   saveHistory,
   storageKey,
+  MAX_HISTORY,
   type Entry,
+  type Role,
 } from '../src/history.js';
 import { chromeMock } from './setup.js';
 
@@ -55,5 +57,35 @@ describe('saveHistory', () => {
     ];
     await saveHistory('k', entries);
     expect(await loadHistory('k')).toEqual(entries);
+  });
+});
+
+describe('saveHistory — MAX_HISTORY eviction', () => {
+  it('stores at most MAX_HISTORY entries', async () => {
+    const entries: Entry[] = Array.from({ length: MAX_HISTORY + 10 }, (_, k) => ({
+      role: 'user' as Role,
+      text: `msg ${k}`,
+    }));
+    await saveHistory('k', entries);
+    const stored = chromeMock.storage.local.store['k'] as Entry[];
+    expect(stored.length).toBe(MAX_HISTORY);
+  });
+
+  it('keeps the most recent entries when trimming', async () => {
+    const entries: Entry[] = Array.from({ length: MAX_HISTORY + 5 }, (_, k) => ({
+      role: 'user' as Role,
+      text: `msg ${k}`,
+    }));
+    await saveHistory('k', entries);
+    const stored = chromeMock.storage.local.store['k'] as Entry[];
+    expect(stored[0].text).toBe(`msg 5`);
+    expect(stored[stored.length - 1].text).toBe(`msg ${MAX_HISTORY + 4}`);
+  });
+
+  it('does not trim when under the cap', async () => {
+    const entries: Entry[] = [{ role: 'user', text: 'hi' }];
+    await saveHistory('k', entries);
+    const stored = chromeMock.storage.local.store['k'] as Entry[];
+    expect(stored.length).toBe(1);
   });
 });
