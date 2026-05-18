@@ -46,7 +46,7 @@ This runs esbuild in watch mode. After each save, refresh the extension at `chro
 
 ## Project layout
 
-```
+```text
 .
 ├── background.ts          # MV3 service worker entry
 ├── content.ts             # Content script entry — DOM + session glue

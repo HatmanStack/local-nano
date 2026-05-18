@@ -6,7 +6,7 @@
 2. A **content script** injected into every page; it owns the chat UI and runs the model.
 3. A vendored **Prompt API polyfill** that exposes the W3C-proposed `LanguageModel` interface backed by Transformers.js + ONNX Runtime Web.
 
-```
+```text
                 ┌──────────────────────┐         ┌──────────────────────────┐
    Ctrl+Shift+K │ background.ts        │ message │ content.ts (per tab)     │
   ───────────▶  │  chrome.commands     │ ──────▶ │  toggles panel           │

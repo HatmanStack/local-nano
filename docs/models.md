@@ -44,7 +44,7 @@ Configure it as:
 ChromeOS doesn't expose WebGPU by default. To check what you have:
 
 1. Open `chrome://gpu` and look at the **Graphics Feature Status** block. The `WebGPU` line tells you the truth: `Hardware accelerated`, `Software only`, or `Disabled`. If it's not hardware-accelerated, none of the flags below will help — your GPU/drivers can't.
-2. Visit https://webgpureport.org. If it reports adapter info ("Intel Iris Xe Graphics" or similar), you're in.
+2. Visit <https://webgpureport.org>. If it reports adapter info ("Intel Iris Xe Graphics" or similar), you're in.
 
 If WebGPU is disabled but the hardware should be capable:
 
@@ -57,7 +57,7 @@ If WebGPU is disabled but the hardware should be capable:
 
 The single most common failure mode we hit on WASM was:
 
-```
+```text
 Error: Can't create a session. ERROR_CODE: 9,
 ERROR_MESSAGE: Could not find an implementation for
 GatherBlockQuantized(1) node with name '/model/embed_tokens/Gather_Quant'

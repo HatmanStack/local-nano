@@ -27,7 +27,7 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 
 Thresholds are enforced in `vitest.config.ts`:
 
-```
+```text
 lines/statements/functions: 75%
 branches:                   80%
 ```

@@ -25,6 +25,9 @@ jobs:
       - name: Lint
         run: npm run lint:ci
 
+      - name: Markdown lint
+        run: npx --yes markdownlint-cli2 "docs/*.md" "README.md" "CHANGELOG.md"
+
       - name: Typecheck
         run: npm run typecheck
 
