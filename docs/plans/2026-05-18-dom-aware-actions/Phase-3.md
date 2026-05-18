@@ -162,11 +162,11 @@ the user clicking the panel.
 
 **Verification Checklist:**
 
-- [ ] `src/dom-actions.ts` exports `SelectionSnapshot` union and
+- [x] `src/dom-actions.ts` exports `SelectionSnapshot` union and
       `captureSelection`
-- [ ] `tests/dom-actions.test.ts` has >= 7 tests for capture
-- [ ] `npm run typecheck` exits 0
-- [ ] `npm run lint:ci` exits 0
+- [x] `tests/dom-actions.test.ts` has >= 7 tests for capture
+- [x] `npm run typecheck` exits 0
+- [x] `npm run lint:ci` exits 0
 
 **Testing Instructions:**
 
@@ -298,12 +298,12 @@ contentEditable. Uses only safe text-node primitives — never `innerHTML`.
 
 **Verification Checklist:**
 
-- [ ] `src/dom-apply.ts` exports `applyToTarget`
-- [ ] `tests/dom-apply.test.ts` has >= 8 tests covering all branches
-- [ ] No `innerHTML` reference in `src/dom-apply.ts`
-- [ ] `npm run coverage` shows `src/dom-apply.ts` at >= 85% statements,
+- [x] `src/dom-apply.ts` exports `applyToTarget`
+- [x] `tests/dom-apply.test.ts` has >= 8 tests covering all branches
+- [x] No `innerHTML` reference in `src/dom-apply.ts`
+- [x] `npm run coverage` shows `src/dom-apply.ts` at >= 85% statements,
       >= 80% branches
-- [ ] `npm run lint:ci` exits 0
+- [x] `npm run lint:ci` exits 0
 
 **Testing Instructions:**
 
@@ -462,15 +462,15 @@ Task 3.5).
 
 **Verification Checklist:**
 
-- [ ] `src/ui/preview.ts` exports `PreviewState`, `PreviewHandle`,
+- [x] `src/ui/preview.ts` exports `PreviewState`, `PreviewHandle`,
       `PreviewCallbacks`, and `makePreview`
-- [ ] State transitions enforced (e.g. `complete` after `abort` is a
+- [x] State transitions enforced (e.g. `complete` after `abort` is a
       no-op; document this in JSDoc and test for it)
-- [ ] No `innerHTML` reference
-- [ ] `tests/ui-preview.test.ts` has >= 14 tests
-- [ ] `npm run coverage` shows `src/ui/preview.ts` at >= 85% statements,
+- [x] No `innerHTML` reference
+- [x] `tests/ui-preview.test.ts` has >= 14 tests
+- [x] `npm run coverage` shows `src/ui/preview.ts` at >= 85% statements,
       >= 80% branches
-- [ ] `npm run lint:ci` exits 0
+- [x] `npm run lint:ci` exits 0
 
 **Testing Instructions:**
 
@@ -590,13 +590,13 @@ shape that `setPreviewSlot` will host).
 
 **Verification Checklist:**
 
-- [ ] `initSession` returns a `SessionHandle`
-- [ ] All four handle methods implemented and exported
-- [ ] Existing `tests/session.test.ts` tests pass unchanged
-- [ ] New handle-surface tests added (>= 7 new tests)
-- [ ] `npm run coverage` shows `src/session.ts` at >= 85% statements,
+- [x] `initSession` returns a `SessionHandle`
+- [x] All four handle methods implemented and exported
+- [x] Existing `tests/session.test.ts` tests pass unchanged
+- [x] New handle-surface tests added (>= 7 new tests)
+- [x] `npm run coverage` shows `src/session.ts` at >= 85% statements,
       >= 80% branches (was 91% pre-change; should not drop materially)
-- [ ] `npm run typecheck` exits 0
+- [x] `npm run typecheck` exits 0
 
 **Testing Instructions:**
 
@@ -874,14 +874,14 @@ that dispatches incoming `ActionMessage`s to the right handler.
 
 **Verification Checklist:**
 
-- [ ] `src/dom-actions.ts` exports `initDomActions`
-- [ ] `tests/dom-actions.test.ts` has >= 22 tests total (7 capture + 15
+- [x] `src/dom-actions.ts` exports `initDomActions`
+- [x] `tests/dom-actions.test.ts` has >= 22 tests total (7 capture + 15
       dispatch)
-- [ ] Concurrent-transform abort path verified by a test
-- [ ] `npm run coverage` shows `src/dom-actions.ts` at >= 80% statements,
+- [x] Concurrent-transform abort path verified by a test
+- [x] `npm run coverage` shows `src/dom-actions.ts` at >= 80% statements,
       >= 75% branches
-- [ ] `npm run typecheck` exits 0
-- [ ] `npm run lint:ci` exits 0
+- [x] `npm run typecheck` exits 0
+- [x] `npm run lint:ci` exits 0
 
 **Testing Instructions:**
 
@@ -996,10 +996,12 @@ the manual smoke test on a real Chrome install.
 
 **Verification Checklist:**
 
-- [ ] `content.ts` calls `initDomActions(deps)` after `initSession(deps)`
-- [ ] All 14 manual smoke steps above pass
-- [ ] `npm run build` exits 0
-- [ ] `npm run lint:ci && npm run typecheck && npm run coverage` exits 0
+- [x] `content.ts` calls `initDomActions(deps)` after `initSession(deps)`
+- [ ] All 14 manual smoke steps above pass (deferred — requires a human
+      at a real Chrome install; documented in the phase verification
+      report; carried into Phase-4 Task 4.x smoke checklist)
+- [x] `npm run build` exits 0
+- [x] `npm run lint:ci && npm run typecheck && npm run coverage` exits 0
 
 **Testing Instructions:**
 
