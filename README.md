@@ -17,7 +17,7 @@
 
 A Chrome extension that puts a small, **fully local** AI assistant on every page you visit. Press a keyboard shortcut, a chat panel slides in, and an in-browser language model answers questions about the page you're reading — no API keys, no servers, no data leaving your machine after the model is downloaded.
 
-> Status: experimental. Tested in Chrome 120+ on desktop. Performance depends heavily on your GPU and the model you pick.
+> Status: experimental. Tested in Chrome 120+ on desktop. Runs on WebGPU when available and falls back to WASM CPU — see [docs/models.md](docs/models.md) for model and dtype tradeoffs in each mode.
 
 ## Highlights
 
@@ -57,7 +57,7 @@ Configuration lives in `.env.json` at the repo root. See [`.env.example.json`](.
   "apiKey": "dummy",
   "device": "webgpu",
   "dtype": "q4",
-  "modelName": "onnx-community/Qwen3.5-0.8B-ONNX"
+  "modelName": "onnx-community/gemma-4-E2B-it-ONNX"
 }
 ```
 
