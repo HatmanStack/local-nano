@@ -1,15 +1,6 @@
-/**
- * Minimal typed surface for a LanguageModel session returned by the
- * Prompt API polyfill. Only the methods called in this extension are
- * declared; the full spec surface is larger.
- */
-export interface LanguageModelSession {
-  promptStreaming(input: string, options?: { signal?: AbortSignal }): ReadableStream<string>;
-  destroy(): void;
-}
-
 import type transformersConfigType from '../.env.json';
 import { TOGGLE_MESSAGE } from './background/handler.js';
+import { type LanguageModelSession, loadHeavy, resetHeavyCache } from './heavy.js';
 import {
   type Entry,
   loadHistory as loadHistoryFromStorage,
@@ -22,6 +13,10 @@ import { pageContext } from './pageContext.js';
 import { SYSTEM_INSTRUCTION } from './system.js';
 import { makeTypingIndicator, renderMessage } from './ui/messages.js';
 import { setGeneratingState, setIdleState } from './ui/state.js';
+
+// Re-export the LanguageModelSession interface so existing importers
+// that still reach for it via `./session.js` keep compiling.
+export type { LanguageModelSession } from './heavy.js';
 
 // The transformers config shape — imported for type only; actual import
 // happens at build time in content.ts.
@@ -41,41 +36,9 @@ export interface SessionDeps {
   document: Pick<Document, 'title'> & { body: { innerText: string } };
 }
 
-interface OnnxWasmEnv {
-  backends: { onnx: { wasm: { wasmPaths: string; numThreads: number } } };
-}
-
 export function initSession(deps: SessionDeps): void {
   const { root, messages, input: i, actionBtn, transformersConfig, location, document } = deps;
   const STORAGE_KEY = storageKey(location);
-
-  // ---- Heavy module loader (lazy, singleton) ----
-  let heavyLoadPromise: Promise<{
-    LanguageModel: { create: (opts: unknown) => Promise<LanguageModelSession> };
-  }> | null = null;
-
-  function loadHeavy() {
-    if (heavyLoadPromise) return heavyLoadPromise;
-    heavyLoadPromise = (async () => {
-      const [tfMod, polyfillMod] = await Promise.all([
-        import('@huggingface/transformers'),
-        import('../vendor/prompt-api-polyfill/prompt-api-polyfill.js'),
-      ]);
-      const ortPath = chrome.runtime.getURL('dist/ort/');
-      (tfMod.env as unknown as OnnxWasmEnv).backends.onnx.wasm.wasmPaths = ortPath;
-      (tfMod.env as unknown as OnnxWasmEnv).backends.onnx.wasm.numThreads = 1;
-      (window as unknown as Record<string, unknown>).TRANSFORMERS_CONFIG = transformersConfig;
-      console.log('[local-nano] heavy modules loaded; ORT wasmPaths =', ortPath);
-      return {
-        LanguageModel: (
-          polyfillMod as unknown as {
-            LanguageModel: { create: (opts: unknown) => Promise<LanguageModelSession> };
-          }
-        ).LanguageModel,
-      };
-    })();
-    return heavyLoadPromise;
-  }
 
   // ---- History ----
   let history: Entry[] = [];
@@ -130,7 +93,7 @@ export function initSession(deps: SessionDeps): void {
     i.disabled = true;
     const status = addMessage('system', 'Loading model…');
     try {
-      const { LanguageModel } = await loadHeavy();
+      const { LanguageModel } = await loadHeavy(transformersConfig);
       const created = await LanguageModel.create({
         expectedInputs: [{ type: 'text', languages: ['en'] }],
         expectedOutputs: [{ type: 'text', languages: ['en'] }],
@@ -149,10 +112,11 @@ export function initSession(deps: SessionDeps): void {
     } catch (e: unknown) {
       console.error('[local-nano] LanguageModel.create failed:', e);
       status.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
-      // Reset heavyLoadPromise so the user can retry by closing and reopening
-      // the panel. Without this, every subsequent ensureSession call returns
-      // the same rejected promise and the failure is permanent for the tab.
-      heavyLoadPromise = null;
+      // Reset the heavy module cache so the user can retry by closing and
+      // reopening the panel. Without this, every subsequent ensureSession
+      // call returns the same rejected promise and the failure is permanent
+      // for the tab.
+      resetHeavyCache();
     } finally {
       creating = false;
       i.disabled = false;
