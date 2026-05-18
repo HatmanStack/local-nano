@@ -85,12 +85,12 @@ lifecycle listeners so the Phase-2 modules can be unit-tested.
 
 **Verification Checklist:**
 
-- [ ] `tests/setup.ts` exports a `chromeMock` that includes
+- [x] `tests/setup.ts` exports a `chromeMock` that includes
       `contextMenus.create`, `contextMenus.removeAll`,
       `contextMenus.onClicked.addListener`, `runtime.onInstalled.addListener`,
       `runtime.onStartup.addListener`
-- [ ] Every existing test still passes
-- [ ] `npm run typecheck` exits 0
+- [x] Every existing test still passes
+- [x] `npm run typecheck` exits 0
 
 **Testing Instructions:**
 
@@ -262,12 +262,12 @@ forwards clicks to the active tab as `{ a: 'action', id: <ActionId> }`.
 
 **Verification Checklist:**
 
-- [ ] `src/background/menus.ts` exports `registerMenus` and `onMenuClicked`
-- [ ] `background.ts` registers all four chrome listeners
-- [ ] `tests/background-menus.test.ts` has >= 9 tests, all passing
-- [ ] `npm run typecheck` exits 0
-- [ ] `npm run lint:ci` exits 0
-- [ ] `npm run coverage` shows `src/background/menus.ts` at >= 90%
+- [x] `src/background/menus.ts` exports `registerMenus` and `onMenuClicked`
+- [x] `background.ts` registers all four chrome listeners
+- [x] `tests/background-menus.test.ts` has >= 9 tests, all passing
+- [x] `npm run typecheck` exits 0
+- [x] `npm run lint:ci` exits 0
+- [x] `npm run coverage` shows `src/background/menus.ts` at >= 90%
       statements
 
 **Testing Instructions:**
@@ -365,12 +365,12 @@ keeps Phase-3 simple (one message kind to handle).
 
 **Verification Checklist:**
 
-- [ ] `COMMAND_TO_ACTION` table defined and used
-- [ ] `handleCommand` routes all four commands correctly
-- [ ] `tests/background-handler.test.ts` adds >= 4 new tests
-- [ ] All existing handler tests still pass
-- [ ] `npm run typecheck` exits 0
-- [ ] `npm run lint:ci` exits 0
+- [x] `COMMAND_TO_ACTION` table defined and used
+- [x] `handleCommand` routes all four commands correctly
+- [x] `tests/background-handler.test.ts` adds >= 4 new tests
+- [x] All existing handler tests still pass
+- [x] `npm run typecheck` exits 0
+- [x] `npm run lint:ci` exits 0
 
 **Testing Instructions:**
 
@@ -442,10 +442,10 @@ inert until the background wiring is in place).
 
 **Verification Checklist:**
 
-- [ ] `manifest.json` has `"contextMenus"` in `permissions`
-- [ ] `manifest.json` has exactly 4 commands
-- [ ] Manifest JSON parses cleanly (`node -e "JSON.parse(require('fs').readFileSync('manifest.json'))"`)
-- [ ] `npm run build` exits 0
+- [x] `manifest.json` has `"contextMenus"` in `permissions`
+- [x] `manifest.json` has exactly 4 commands
+- [x] Manifest JSON parses cleanly (`node -e "JSON.parse(require('fs').readFileSync('manifest.json'))"`)
+- [x] `npm run build` exits 0
 - [ ] Load the unpacked extension in Chrome: the new chords appear at
       `chrome://extensions/shortcuts`; right-clicking on any page shows
       the new menu items (`Ask local-nano about this`, `Summarize this
