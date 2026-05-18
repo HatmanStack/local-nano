@@ -10,3 +10,6 @@ coverage/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local skill-runs manifest (per-developer audit/pipeline history)
+.claude/
