@@ -181,8 +181,19 @@ export function initDomActions(deps: DomActionsDeps): void {
       {
         onApply: () => {
           const text = preview.getResultText();
-          applyToTarget(snapshot, text);
-          tearDownPreview();
+          const ok = applyToTarget(snapshot, text);
+          if (ok) {
+            tearDownPreview();
+          } else {
+            // applyToTarget returned false — the captured page-DOM target
+            // was disconnected or the Range mutation threw. Keep the
+            // preview open so the user can Discard explicitly; surface
+            // the failure inline. Retrying would not help (the target
+            // is gone), so Apply stays disabled.
+            preview.applyFailed(
+              'Could not apply — the selection on the page is no longer available.',
+            );
+          }
         },
         onDiscard: () => {
           tearDownPreview();

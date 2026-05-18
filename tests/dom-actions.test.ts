@@ -15,9 +15,18 @@ vi.mock('../src/transform.js', () => ({
   runTransform: vi.fn(),
 }));
 
+// Mock applyToTarget so tests can drive both the success and failure
+// paths of the Apply button without relying on jsdom's partial Range
+// behavior under detached nodes.
+vi.mock('../src/dom-apply.js', () => ({
+  applyToTarget: vi.fn(),
+}));
+
 import * as transformMod from '../src/transform.js';
+import * as applyMod from '../src/dom-apply.js';
 
 const mockRunTransform = transformMod.runTransform as ReturnType<typeof vi.fn>;
+const mockApplyToTarget = applyMod.applyToTarget as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -306,6 +315,9 @@ describe('initDomActions — dispatch', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: applyToTarget succeeds. Tests covering the failure path
+    // override this with mockReturnValueOnce(false).
+    mockApplyToTarget.mockReturnValue(true);
     document.body.innerHTML = '';
     // Reset getSelection back to jsdom's default so tests don't leak.
     Object.defineProperty(window, 'getSelection', {
@@ -505,7 +517,48 @@ describe('initDomActions — dispatch', () => {
     expect(applyBtn).not.toBeNull();
     // After stream completion the Apply button is enabled; click it.
     applyBtn.click();
-    expect(p.textContent).toBe('NEW');
+    // applyToTarget is mocked at module scope; verify dispatch called it
+    // with the captured snapshot and the streamed result text.
+    expect(mockApplyToTarget).toHaveBeenCalledTimes(1);
+    expect(mockApplyToTarget).toHaveBeenCalledWith(snap, 'NEW');
+    // On success the preview is torn down (no inline error surfaced).
+    expect(session.lastTeardown).not.toBeNull();
+    expect(session.lastTeardown).toHaveBeenCalled();
+  });
+
+  it('Preview onApply surfaces an error inline when applyToTarget returns false', async () => {
+    // Drive the failure path of applyToTarget — happens when the page-DOM
+    // target was disconnected between snapshot and Apply. The preview
+    // must stay open with an inline error and a locked Apply button.
+    const { snap } = makeRangeSnapshot('orig', null);
+    mockRunTransform.mockResolvedValue({
+      stream: new ReadableStream<string>({
+        start(controller) {
+          controller.enqueue('NEW');
+          controller.close();
+        },
+      }),
+      done: Promise.resolve(),
+    });
+    mockApplyToTarget.mockReturnValueOnce(false);
+
+    initDomActions(deps);
+    primeSnapshot(snap);
+    const listener = getMessageListener();
+    listener({ a: 'action', id: 'translate_en' });
+    await new Promise((r) => setTimeout(r, 20));
+    const previewRoot = session.mountPreview.mock.calls[0][0] as HTMLElement;
+    const applyBtn = previewRoot.querySelector('button[data-action="apply"]') as HTMLButtonElement;
+    applyBtn.click();
+    const status = previewRoot.querySelector('[data-role="apply-status"]') as HTMLElement;
+    expect(status.textContent).toContain('Could not apply');
+    // Preview is NOT torn down on Apply failure — user must Discard
+    // explicitly. `lastTeardown` is the fn returned by mountPreview;
+    // dispatch keeps it but never calls it on the failure path.
+    expect(session.lastTeardown).not.toBeNull();
+    expect(session.lastTeardown).not.toHaveBeenCalled();
+    // Apply is now locked.
+    expect(applyBtn.disabled).toBe(true);
   });
 
   it('Preview onDiscard tears down the preview', async () => {

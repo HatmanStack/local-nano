@@ -32,6 +32,13 @@ export interface PreviewHandle {
   error(message: string): void;
   /** Reset to `pending`. Clears the streamed text and restores indicator. */
   reset(): void;
+  /**
+   * Disable Apply and surface an error message below the buttons.
+   * Used when `applyToTarget` returns `false` (the page-DOM target was
+   * removed or mutation threw). The preview stays open so the user can
+   * Discard explicitly — calling this on a terminal state is allowed.
+   */
+  applyFailed(message: string): void;
   /** Remove the Preview root from the DOM. */
   destroy(): void;
   /** Accumulated streamed text (independent of `[stopped]` suffix). */
@@ -114,7 +121,14 @@ export function makePreview(callbacks: PreviewCallbacks, doc: Document = documen
   `;
 
   buttonRow.append(discardBtn, applyBtn);
-  root.append(originalHeader, originalPane, resultHeader, resultPane, buttonRow);
+
+  // Status line for post-Apply failures (e.g. the page DOM target was
+  // removed between snapshot and Apply). Hidden by default.
+  const status = doc.createElement('div');
+  status.dataset.role = 'apply-status';
+  status.style.cssText = 'color: #f88; font-size: 12px; min-height: 0;';
+
+  root.append(originalHeader, originalPane, resultHeader, resultPane, buttonRow, status);
 
   function setApplyEnabled(enabled: boolean): void {
     applyBtn.disabled = !enabled;
@@ -193,6 +207,13 @@ export function makePreview(callbacks: PreviewCallbacks, doc: Document = documen
       resultPane.textContent = '';
       indicator = makeTypingIndicator(doc);
       resultPane.appendChild(indicator);
+      setApplyEnabled(false);
+    },
+    applyFailed(message: string): void {
+      // Allowed from terminal states (Apply is only clickable when
+      // `complete`). Do not change the state machine — just surface the
+      // failure and lock Apply so the user must Discard.
+      status.textContent = message;
       setApplyEnabled(false);
     },
     destroy(): void {
