@@ -17,7 +17,7 @@ Thanks for taking the time. This is a small experimental project — the bar for
 ## Code style
 
 - TypeScript, ES2022, no transpilation for downlevel targets (we ship to Chrome 120+).
-- Strict mode is off — feel free to lean on `any` where the prompt-api polyfill or Transformers.js types aren't pulling their weight.
+- Strict mode is on. Use `any` only at explicit polyfill or Transformers.js boundaries where no types exist — document why with a comment. Do not propagate `any` into application logic.
 - Keep the bundle small. `content.ts` is loaded into every page. The heavy modules (`@huggingface/transformers`, the polyfill) are dynamically imported via `loadHeavy()` — don't move them back to top-level imports.
 - One short comment when WHY isn't obvious; otherwise let the code speak.
 - Prefer small pure helpers in `src/` over inline logic in `content.ts`. Helpers are testable; content-script side effects aren't.

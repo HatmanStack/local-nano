@@ -176,9 +176,9 @@ async function ensureSession() {
       expectedInputs: [{ type: 'text', languages: ['en'] }],
       expectedOutputs: [{ type: 'text', languages: ['en'] }],
       initialPrompts: [{ role: 'system', content: SYSTEM_INSTRUCTION }],
-      monitor(mon: any) {
-        mon.addEventListener('downloadprogress', (e: any) => {
-          const v = e.loaded;
+      monitor(mon: EventTarget) {
+        mon.addEventListener('downloadprogress', (e: Event) => {
+          const v = (e as any).loaded as number;
           const label = v <= 1 ? `${Math.round(v * 100)}%` : `${(v / 1_000_000).toFixed(1)} MB`;
           status.textContent = `Loading model… ${label}`;
         });
@@ -186,9 +186,9 @@ async function ensureSession() {
     });
     s = session;
     status.textContent = 'Ready.';
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error('[local-nano] LanguageModel.create failed:', e);
-    status.textContent = `Error: ${e?.message || String(e)}`;
+    status.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
     creating = false;
   }
@@ -256,8 +256,8 @@ async function send() {
       responseEl.textContent = modelText;
       messages.scrollTop = messages.scrollHeight;
     }
-  } catch (err: any) {
-    if (err?.name === 'AbortError') {
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'AbortError') {
       modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
       responseEl.textContent = modelText;
     } else {
