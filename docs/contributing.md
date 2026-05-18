@@ -7,11 +7,15 @@ Thanks for taking the time. This is a small experimental project — the bar for
 1. Fork & branch off `main`.
 2. Make your change.
 3. Run the checks locally:
+
+   The `coverage` command runs the full test suite (implicitly `npm test`) and then enforces the coverage thresholds from `vitest.config.ts`. You do not need to run `npm test` separately.
+
    ```bash
    npm run typecheck
    npm run coverage
    npm run build
    ```
+
 4. Open a PR. CI runs the same three commands; the coverage step enforces the thresholds in `vitest.config.ts`.
 
 ## Code style

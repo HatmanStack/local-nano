@@ -60,7 +60,7 @@ The shortcut isn't in `.env.json` — it's in `manifest.json` under `commands.to
 
 ## Other knobs
 
-The polyfill itself accepts an `env` block that maps onto Transformers.js's `env` object (e.g., `allowRemoteModels`, custom wasm paths). See `vendor/prompt-api-polyfill/dot_env.json` for the full shape if you need to override a Transformers.js setting from `.env.json`.
+The polyfill itself accepts an `env` block that maps onto Transformers.js's `env` object (e.g., `allowRemoteModels`, custom wasm paths). For the full list of Transformers.js-level settings the polyfill accepts, see `vendor/prompt-api-polyfill/dot_env.json` — it is a **reference template only** and is not read at runtime. All live configuration comes from your `.env.json`.
 
 ## Default fallback layer
 
