@@ -1,4 +1,5 @@
 import transformersConfig from './.env.json';
+import { initDomActions } from './src/dom-actions.js';
 import { initSession } from './src/session.js';
 import { IDLE_BG } from './src/ui/state.js';
 
@@ -110,7 +111,7 @@ closeBtn.addEventListener('click', () => {
   root.style.display = 'none';
 });
 
-initSession({
+const session = initSession({
   root,
   messages,
   input,
@@ -118,4 +119,10 @@ initSession({
   transformersConfig,
   location,
   document,
+});
+
+initDomActions({
+  document,
+  session,
+  transformersConfig,
 });
