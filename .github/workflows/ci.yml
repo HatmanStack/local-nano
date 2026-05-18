@@ -26,7 +26,7 @@ jobs:
         run: npm run lint:ci
 
       - name: Markdown lint
-        run: npx --yes markdownlint-cli2 "docs/*.md" "README.md" "CHANGELOG.md"
+        run: npx --yes markdownlint-cli2 "docs/**/*.md" "!docs/plans/**" "README.md" "CHANGELOG.md"
 
       - name: Check links
         uses: lycheeverse/lychee-action@v2
