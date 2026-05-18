@@ -16,6 +16,7 @@
     "@vitest/coverage-v8": "^2.1.5",
     "esbuild": "^0.24.0",
     "jsdom": "^25.0.1",
+    "onnxruntime-web": "1.26.0-dev.20260416-b7804b056c",
     "typescript": "^5.6.0",
     "vitest": "^2.1.5"
   },
