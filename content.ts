@@ -241,11 +241,10 @@ async function send() {
     const stream = s.promptStreaming(prompt, { signal: activeAbort.signal });
     const reader = stream.getReader();
     let firstChunk = true;
-    let chunkCount = 0;
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
-        console.log(`[local-nano] stream done after ${chunkCount} chunks, ${(performance.now() - t0).toFixed(0)}ms`);
+        console.log(`[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms`);
         break;
       }
       if (firstChunk) {
@@ -253,8 +252,6 @@ async function send() {
         responseEl.textContent = ''; // clears the dots
         firstChunk = false;
       }
-      chunkCount++;
-      console.log(`[local-nano] chunk ${chunkCount}:`, JSON.stringify(value));
       modelText += value;
       responseEl.textContent = modelText;
       messages.scrollTop = messages.scrollHeight;
