@@ -14,6 +14,7 @@ That's the entire list of outbound traffic the extension causes.
 
 - **Your prompts.** Sent only to the in-page polyfill, which runs the model locally.
 - **The page content you ask about.** On the first turn of a conversation, the page title, URL, and a body excerpt (capped at 1500 characters) are included in the prompt. They are not transmitted anywhere — they are passed to the local model.
+- **Selection text from right-click / hotkey actions.** Any text you select and feed into an action (Ask, Rewrite, Translate, etc.) is sent to the local model only. It is not transmitted off your machine.
 - **Conversation history.** Persisted in `chrome.storage.local`, scoped per `origin + pathname`. This storage is local to your browser profile.
 - **Model responses.** Generated locally.
 
@@ -29,6 +30,7 @@ From `manifest.json`:
 | `host_permissions` for `huggingface.co` and `*.huggingface.co` | Download model weights from Hugging Face and its CDN subdomains. |
 | `host_permissions` for `cdn-lfs.huggingface.co` | Download large model files from Hugging Face's LFS CDN. |
 | `host_permissions` for `cdn.jsdelivr.net` | Fallback CDN used by Transformers.js (rarely hit — the ORT wasm files are bundled in `dist/ort/` to avoid this). |
+| `contextMenus` | Required for the right-click menu of DOM-aware actions. Grants no network access; `chrome.contextMenus` is a UI-only Chrome API. |
 
 The content script declares `matches: ["<all_urls>"]`. That is required for the assistant to be available on any page, but it also means the extension can read DOM on every page. If that matters to you, narrow it before publishing.
 

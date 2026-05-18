@@ -13,6 +13,7 @@
 
 <p align="center">
   <a href="docs/architecture.md">Architecture</a> ·
+  <a href="docs/dom-actions.md">DOM Actions</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
   <a href="docs/models.md">Models</a> ·
   <a href="docs/privacy.md">Privacy</a> ·
@@ -30,6 +31,7 @@ A Chrome extension that puts a small, **fully local** AI assistant on every page
 
 - **Runs in the browser, not the cloud.** Inference happens on-device via [Transformers.js](https://huggingface.co/docs/transformers.js) and the [ONNX Runtime Web](https://onnxruntime.ai/) WebAssembly/WebGPU backend.
 - **Built on the proposed Prompt API.** Uses Google's [`prompt-api-polyfill`](https://github.com/GoogleChromeLabs/web-ai-demos/tree/main/prompt-api-polyfill) so the same code can target a native `LanguageModel` once browsers ship it.
+- **DOM-aware actions.** Right-click any selection (or use a hotkey) to ask about it, rewrite editable text, or translate / simplify / summarize prose in place — preview the result, then Apply with one click. All actions stay on-device.
 - **Per-tab chat history.** Conversations are scoped per URL and persisted in `chrome.storage.local`.
 - **Streaming + stop.** Tokens stream in as they're generated; you can interrupt mid-response.
 - **Page-aware first turn.** The model gets the page's title, URL, and a body excerpt on the first question of a conversation.
@@ -90,6 +92,7 @@ The model weights are fetched from Hugging Face's CDN on first run. After that, 
 - [Architecture](docs/architecture.md) — components and data flow
 - [Development](docs/development.md) — local setup, build, debugging
 - [Configuration](docs/configuration.md) — model, device, dtype
+- [DOM Actions](docs/dom-actions.md) — right-click menu, hotkeys, and inline rewrite / translate
 - [Models & runtime notes](docs/models.md) — picking a model, running without WebGPU, ONNX op gotchas
 - [Prompt API polyfill](docs/prompt-api.md) — what we vendor and how it's wired in
 - [Privacy](docs/privacy.md) — what leaves your machine and what doesn't
