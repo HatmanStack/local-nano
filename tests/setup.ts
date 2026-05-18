@@ -31,8 +31,17 @@ const chromeMock = {
   runtime: {
     getURL: vi.fn((p: string) => `chrome-extension://test/${p}`),
     onMessage: { addListener: vi.fn() },
+    onInstalled: { addListener: vi.fn() },
+    onStartup: { addListener: vi.fn() },
   },
   commands: { onCommand: { addListener: vi.fn() } },
+  contextMenus: {
+    create: vi.fn(),
+    removeAll: vi.fn((cb?: () => void) => {
+      if (cb) cb();
+    }),
+    onClicked: { addListener: vi.fn() },
+  },
   tabs: {
     query: vi.fn((_q: unknown, cb: (tabs: Array<{ id?: number }>) => void) => cb([{ id: 1 }])),
     sendMessage: vi.fn(),
@@ -47,13 +56,22 @@ beforeEach(() => {
   local.set.mockClear();
   chromeMock.runtime.getURL.mockClear();
   chromeMock.runtime.onMessage.addListener.mockClear();
+  chromeMock.runtime.onInstalled.addListener.mockClear();
+  chromeMock.runtime.onStartup.addListener.mockClear();
   chromeMock.commands.onCommand.addListener.mockClear();
+  chromeMock.contextMenus.create.mockClear();
+  chromeMock.contextMenus.removeAll.mockClear();
+  chromeMock.contextMenus.onClicked.addListener.mockClear();
   chromeMock.tabs.query.mockClear();
   chromeMock.tabs.sendMessage.mockClear();
   // Default tabs.query implementation — overridable per-test.
   chromeMock.tabs.query.mockImplementation(
     (_q: unknown, cb: (tabs: Array<{ id?: number }>) => void) => cb([{ id: 1 }]),
   );
+  // Default contextMenus.removeAll — invoke callback synchronously.
+  chromeMock.contextMenus.removeAll.mockImplementation((cb?: () => void) => {
+    if (cb) cb();
+  });
 });
 
 export { chromeMock };
