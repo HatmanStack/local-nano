@@ -13,5 +13,7 @@ max_cache_age = "1d"
 # Do not fail on timeouts (transient network issues in CI)
 timeout = 15
 
-# Only check markdown files
+# Skip links that appear inside verbatim/code blocks. Example snippets
+# (URLs in fenced code, regex examples, manifest globs) are not real
+# hyperlinks and shouldn't be probed.
 include_verbatim = false
