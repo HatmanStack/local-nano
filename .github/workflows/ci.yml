@@ -22,6 +22,9 @@ jobs:
       - name: Provision .env.json from example
         run: cp .env.example.json .env.json
 
+      - name: Lint
+        run: npm run lint:ci
+
       - name: Typecheck
         run: npm run typecheck
 
