@@ -456,14 +456,14 @@ consumes in Phase-3.
 
 **Verification Checklist:**
 
-- [ ] `src/transform.ts` exists and exports `runTransform`
-- [ ] Returns `{ stream, done }`; `done` resolves after `session.destroy()`
-- [ ] `tests/transform.test.ts` has >= 8 tests, all passing
-- [ ] `session.destroy()` is called in all three terminal cases (complete,
+- [x] `src/transform.ts` exists and exports `runTransform`
+- [x] Returns `{ stream, done }`; `done` resolves after `session.destroy()`
+- [x] `tests/transform.test.ts` has >= 8 tests, all passing
+- [x] `session.destroy()` is called in all three terminal cases (complete,
       error, abort)
-- [ ] `npm run coverage` shows `src/transform.ts` at >= 85% statements,
+- [x] `npm run coverage` shows `src/transform.ts` at >= 85% statements,
       >= 80% branches
-- [ ] `npm run lint:ci` and `npm run typecheck` exit 0
+- [x] `npm run lint:ci` and `npm run typecheck` exit 0
 
 **Testing Instructions:**
 
