@@ -241,20 +241,24 @@ async function send() {
     const stream = s.promptStreaming(prompt, { signal: activeAbort.signal });
     const reader = stream.getReader();
     let firstChunk = true;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        console.log(`[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms`);
-        break;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          console.log(`[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms`);
+          break;
+        }
+        if (firstChunk) {
+          console.log(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
+          responseEl.textContent = ''; // clears the dots
+          firstChunk = false;
+        }
+        modelText += value;
+        responseEl.textContent = modelText;
+        messages.scrollTop = messages.scrollHeight;
       }
-      if (firstChunk) {
-        console.log(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
-        responseEl.textContent = ''; // clears the dots
-        firstChunk = false;
-      }
-      modelText += value;
-      responseEl.textContent = modelText;
-      messages.scrollTop = messages.scrollHeight;
+    } finally {
+      reader.releaseLock();
     }
   } catch (err: unknown) {
     if (err instanceof Error && err.name === 'AbortError') {

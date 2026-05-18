@@ -264,13 +264,13 @@ lock on the underlying `ReadableStream` after an abort or error.
 
 **Verification Checklist:**
 
-- [ ] `content.ts:send()` calls `reader.releaseLock()` in a `finally` block
+- [x] `content.ts:send()` calls `reader.releaseLock()` in a `finally` block
   nested inside the outer try
-- [ ] The outer `catch` (err: unknown) block is unchanged
-- [ ] The outer `finally` (setIdleState, activeAbort = null, i.focus()) is
+- [x] The outer `catch` (err: unknown) block is unchanged
+- [x] The outer `finally` (setIdleState, activeAbort = null, i.focus()) is
   unchanged
-- [ ] `npm run typecheck` passes
-- [ ] `npm test` passes
+- [x] `npm run typecheck` passes
+- [x] `npm test` passes
 
 **Testing Instructions:**
 
