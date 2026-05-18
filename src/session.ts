@@ -36,7 +36,35 @@ export interface SessionDeps {
   document: Pick<Document, 'title'> & { body: { innerText: string } };
 }
 
-export function initSession(deps: SessionDeps): void {
+/**
+ * Public handle returned by `initSession`. v0.2 exposes a small surface
+ * so `initDomActions` can drive the panel (open it, prefill+send, mount
+ * a Preview component) without owning panel DOM.
+ */
+export interface SessionHandle {
+  /** Show the panel (hidden by default) and focus the input. */
+  openPanel(): void;
+  /** Hide the panel. */
+  closePanel(): void;
+  /** Whether the panel is currently visible. */
+  isPanelOpen(): boolean;
+  /**
+   * Prefill the input with `text` and (optionally) trigger send.
+   * Used by `Summarize this page` and `ask_about_selection`. When
+   * `autoSend === false` the user must press Enter themselves.
+   */
+  prefillAndSend(text: string, autoSend: boolean): void;
+  /**
+   * Replace the messages list with the given Preview element. Returns a
+   * teardown function that restores the messages list and removes the
+   * Preview root. Calling `mountPreview` while a previous Preview is
+   * still mounted invokes the previous teardown before mounting the new
+   * one (one Preview at a time).
+   */
+  mountPreview(previewRoot: HTMLElement): () => void;
+}
+
+export function initSession(deps: SessionDeps): SessionHandle {
   const { root, messages, input: i, actionBtn, transformersConfig, location, document } = deps;
   const STORAGE_KEY = storageKey(location);
 
@@ -204,10 +232,13 @@ export function initSession(deps: SessionDeps): void {
     }
   });
 
-  // ---- Toggle listener ----
+  // ---- Panel show/hide (shared by toggle and SessionHandle.openPanel) ----
   let convertedAnchor = false;
-  chrome.runtime.onMessage.addListener((m: typeof TOGGLE_MESSAGE) => {
-    if (m.a !== TOGGLE_MESSAGE.a) return;
+  function isPanelOpen(): boolean {
+    return root.style.display !== 'none';
+  }
+
+  function openPanel(): void {
     if (root.style.display === 'none') {
       root.style.display = 'flex';
       if (!convertedAnchor) {
@@ -216,13 +247,65 @@ export function initSession(deps: SessionDeps): void {
         root.style.right = 'auto';
         convertedAnchor = true;
       }
-      i.focus();
-      void ensureSession();
+    }
+    i.focus();
+    void ensureSession();
+  }
+
+  function closePanel(): void {
+    root.style.display = 'none';
+  }
+
+  // ---- Preview mount/unmount ----
+  // Only one Preview can be active at a time. The teardown captured here
+  // returns the panel to its chat layout; calling mountPreview again
+  // tears down the previous Preview first (idempotent — clearing happens
+  // before the new mount).
+  let currentPreviewTeardown: (() => void) | null = null;
+
+  function mountPreview(previewRoot: HTMLElement): () => void {
+    // Tear down any previous Preview first so only one is mounted.
+    if (currentPreviewTeardown) {
+      currentPreviewTeardown();
+      currentPreviewTeardown = null;
+    }
+    const prevDisplay = messages.style.display;
+    messages.style.display = 'none';
+    // Insert the preview after the messages list so the existing inputWrap
+    // still sits at the bottom of the panel.
+    messages.parentNode?.insertBefore(previewRoot, messages.nextSibling);
+    const teardown = () => {
+      if (previewRoot.parentNode) previewRoot.parentNode.removeChild(previewRoot);
+      messages.style.display = prevDisplay;
+      // Only clear the slot if this is still the active teardown — a
+      // concurrent mountPreview call already cleared us out.
+      if (currentPreviewTeardown === teardown) currentPreviewTeardown = null;
+    };
+    currentPreviewTeardown = teardown;
+    return teardown;
+  }
+
+  // ---- Toggle listener ----
+  chrome.runtime.onMessage.addListener((m: typeof TOGGLE_MESSAGE) => {
+    if (m.a !== TOGGLE_MESSAGE.a) return;
+    if (isPanelOpen()) {
+      closePanel();
     } else {
-      root.style.display = 'none';
+      openPanel();
     }
   });
 
   // ---- Initial restore ----
   void restore();
+
+  return {
+    openPanel,
+    closePanel,
+    isPanelOpen,
+    prefillAndSend(text: string, autoSend: boolean): void {
+      i.value = text;
+      if (autoSend) void send();
+    },
+    mountPreview,
+  };
 }
