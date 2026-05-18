@@ -5,7 +5,9 @@ import {
   type ActionId,
   actionToDescriptor,
   actionToPrompt,
+  checkSelection,
   SELECTION_LIMIT,
+  selectionChatPrefill,
 } from '../src/transform-prompts.js';
 
 // ---------------------------------------------------------------------------
@@ -158,5 +160,43 @@ describe('actionToDescriptor', () => {
 
   it('throws for unknown action ids', () => {
     expect(() => actionToDescriptor('bogus' as ActionId)).toThrow(/Unknown action/);
+  });
+});
+
+describe('checkSelection', () => {
+  it('rejects an empty string', () => {
+    expect(checkSelection('')).toEqual({ ok: false, error: 'No selection.' });
+  });
+
+  it('rejects a whitespace-only string', () => {
+    const result = checkSelection('   ');
+    expect(result.ok).toBe(false);
+    expect(result.error).toBeDefined();
+  });
+
+  it('accepts a short non-empty string', () => {
+    expect(checkSelection('hello')).toEqual({ ok: true });
+  });
+
+  it('accepts exactly SELECTION_LIMIT characters', () => {
+    expect(checkSelection('x'.repeat(SELECTION_LIMIT))).toEqual({ ok: true });
+  });
+
+  it('rejects more than SELECTION_LIMIT characters with a user-facing limit string', () => {
+    const result = checkSelection('x'.repeat(SELECTION_LIMIT + 1));
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('1500');
+  });
+});
+
+describe('selectionChatPrefill', () => {
+  it('formats the selection-into-chat wrapper exactly', () => {
+    expect(selectionChatPrefill('foo')).toBe('Selection: "foo"\n\nAsk: ');
+  });
+
+  it('does not escape quotes inside the selection (the model consumes this, not HTML)', () => {
+    // The captured selection is passed to the model, not rendered as
+    // HTML, so naive quotation marks inside the text are acceptable.
+    expect(selectionChatPrefill('he said "hi"')).toBe('Selection: "he said "hi""\n\nAsk: ');
   });
 });

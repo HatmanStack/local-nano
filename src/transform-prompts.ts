@@ -202,3 +202,37 @@ export function actionToPrompt(actionId: ActionId): string {
   }
   return descriptor.systemPrompt;
 }
+
+export interface SelectionCheck {
+  ok: boolean;
+  /** Error message suitable for surfacing to the user. */
+  error?: string;
+}
+
+/**
+ * Pure pre-flight check against `SELECTION_LIMIT`. Callers (Preview UI,
+ * chat-context packager) use this to surface "selection too long" or
+ * "no selection" errors *before* dispatching a transform, so the user
+ * sees the limit before any model work begins.
+ */
+export function checkSelection(text: string): SelectionCheck {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return { ok: false, error: 'No selection.' };
+  if (text.length > SELECTION_LIMIT) {
+    return {
+      ok: false,
+      error: `Selection too long. Maximum ${SELECTION_LIMIT} characters.`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Build the chat-context wrapper text used by `ask_about_selection`.
+ * Returns the exact string prefilled into the chat input. The model
+ * consumes this verbatim, so quotation marks inside the selection are
+ * not escaped — there is no HTML rendering path.
+ */
+export function selectionChatPrefill(text: string): string {
+  return `Selection: "${text}"\n\nAsk: `;
+}

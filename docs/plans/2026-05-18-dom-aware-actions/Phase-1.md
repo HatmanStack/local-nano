@@ -549,10 +549,10 @@ check ride together.
 
 **Verification Checklist:**
 
-- [ ] `checkSelection` and `selectionChatPrefill` exported
-- [ ] Test count on `tests/transform-prompts.test.ts` increases by at
+- [x] `checkSelection` and `selectionChatPrefill` exported
+- [x] Test count on `tests/transform-prompts.test.ts` increases by at
       least 5
-- [ ] `npm run coverage` exits 0
+- [x] `npm run coverage` exits 0
 
 **Testing Instructions:**
 
