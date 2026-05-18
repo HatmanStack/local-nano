@@ -44,3 +44,10 @@ Open a GitHub issue with:
 ## Releases
 
 Bump `version` in `manifest.json` and `package.json`, run `npm run build`, zip the repo (without `node_modules/` and `dist/ort/*.wasm.map`), and upload to the Chrome Web Store dashboard. There's no automated release pipeline yet.
+
+## Dependency updates
+
+Dependabot is configured to open PRs for non-major version bumps in
+`devDependencies`. A separate CI workflow (`dependabot-auto-merge.yml`)
+waits for all CI checks to pass and then auto-squash-merges the PR.
+Major version bumps require manual review and are never auto-merged.

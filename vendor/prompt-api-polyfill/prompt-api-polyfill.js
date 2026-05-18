@@ -5,20 +5,18 @@
 
 /**
  * Polyfill for the Prompt API (`LanguageModel`)
- * Backends:
- * - Firebase AI Logic (via `firebase/ai`)
- * - Google Gemini API (via `@google/generative-ai`)
- * - OpenAI API (via `openai`)
+ * Supported backends (in this vendored copy):
  * - Transformers.js (via `@huggingface/transformers`)
+ *
+ * NOTE: Firebase AI Logic, Google Gemini API, OpenAI API, and WebLLM
+ * backends from the upstream project have been removed from this copy.
+ * See docs/prompt-api.md for the full list of modifications.
  *
  * Spec: https://github.com/webmachinelearning/prompt-api/blob/main/README.md
  *
  * Instructions:
  * 1. Include this script in your HTML type="module".
  * 2. Configure the backend:
- *    - For Firebase: Define `window.FIREBASE_CONFIG`.
- *    - For Gemini: Define `window.GEMINI_CONFIG`.
- *    - For OpenAI: Define `window.OPENAI_CONFIG`.
  *    - For Transformers.js: Define `window.TRANSFORMERS_CONFIG`.
  */
 
