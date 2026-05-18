@@ -9,10 +9,7 @@ export function setIdleState(btn: HTMLButtonElement, input: HTMLInputElement): v
   input.disabled = false;
 }
 
-export function setGeneratingState(
-  btn: HTMLButtonElement,
-  input: HTMLInputElement,
-): void {
+export function setGeneratingState(btn: HTMLButtonElement, input: HTMLInputElement): void {
   btn.textContent = BUSY_LABEL;
   btn.style.background = BUSY_BG;
   input.disabled = true;

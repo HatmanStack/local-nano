@@ -92,12 +92,12 @@ header.addEventListener('mousedown', (e) => {
   const offX = e.clientX - rect.left;
   const offY = e.clientY - rect.top;
   root.style.right = 'auto';
-  root.style.left = rect.left + 'px';
+  root.style.left = `${rect.left}px`;
   e.preventDefault();
 
   const onMove = (ev: MouseEvent) => {
-    root.style.left = (ev.clientX - offX) + 'px';
-    root.style.top = (ev.clientY - offY) + 'px';
+    root.style.left = `${ev.clientX - offX}px`;
+    root.style.top = `${ev.clientY - offY}px`;
   };
   const onUp = () => {
     document.removeEventListener('mousemove', onMove);
@@ -106,7 +106,9 @@ header.addEventListener('mousedown', (e) => {
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
 });
-closeBtn.addEventListener('click', () => { root.style.display = 'none'; });
+closeBtn.addEventListener('click', () => {
+  root.style.display = 'none';
+});
 
 initSession({
   root,

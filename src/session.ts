@@ -4,26 +4,23 @@
  * declared; the full spec surface is larger.
  */
 export interface LanguageModelSession {
-  promptStreaming(
-    input: string,
-    options?: { signal?: AbortSignal },
-  ): ReadableStream<string>;
+  promptStreaming(input: string, options?: { signal?: AbortSignal }): ReadableStream<string>;
   destroy(): void;
 }
 
+import type transformersConfigType from '../.env.json';
+import { TOGGLE_MESSAGE } from './background/handler.js';
 import {
-  storageKey,
-  loadHistory as loadHistoryFromStorage,
-  saveHistory as saveHistoryToStorage,
   type Entry,
+  loadHistory as loadHistoryFromStorage,
   type Role,
+  saveHistory as saveHistoryToStorage,
+  storageKey,
 } from './history.js';
 import { pageContext } from './pageContext.js';
 import { SYSTEM_INSTRUCTION } from './system.js';
 import { makeTypingIndicator, renderMessage } from './ui/messages.js';
-import { setIdleState, setGeneratingState } from './ui/state.js';
-import { TOGGLE_MESSAGE } from './background/handler.js';
-import transformersConfigType from '../.env.json';
+import { setGeneratingState, setIdleState } from './ui/state.js';
 
 // The transformers config shape — imported for type only; actual import
 // happens at build time in content.ts.
@@ -52,7 +49,9 @@ export function initSession(deps: SessionDeps): void {
   const STORAGE_KEY = storageKey(location);
 
   // ---- Heavy module loader (lazy, singleton) ----
-  let heavyLoadPromise: Promise<{ LanguageModel: { create: (opts: unknown) => Promise<LanguageModelSession> } }> | null = null;
+  let heavyLoadPromise: Promise<{
+    LanguageModel: { create: (opts: unknown) => Promise<LanguageModelSession> };
+  }> | null = null;
 
   function loadHeavy() {
     if (heavyLoadPromise) return heavyLoadPromise;
@@ -66,7 +65,13 @@ export function initSession(deps: SessionDeps): void {
       (tfMod.env as unknown as OnnxWasmEnv).backends.onnx.wasm.numThreads = 1;
       (window as unknown as Record<string, unknown>).TRANSFORMERS_CONFIG = transformersConfig;
       console.log('[local-nano] heavy modules loaded; ORT wasmPaths =', ortPath);
-      return { LanguageModel: (polyfillMod as unknown as { LanguageModel: { create: (opts: unknown) => Promise<LanguageModelSession> } }).LanguageModel };
+      return {
+        LanguageModel: (
+          polyfillMod as unknown as {
+            LanguageModel: { create: (opts: unknown) => Promise<LanguageModelSession> };
+          }
+        ).LanguageModel,
+      };
     })();
     return heavyLoadPromise;
   }
@@ -154,9 +159,7 @@ export function initSession(deps: SessionDeps): void {
     const responseEl = renderMessage(messages, 'model', '');
     const indicator = makeTypingIndicator();
     responseEl.appendChild(indicator);
-    const prompt = isFirstTurn
-      ? `${pageContext(document, location)}\n\n---\n\n${text}`
-      : text;
+    const prompt = isFirstTurn ? `${pageContext(document, location)}\n\n---\n\n${text}` : text;
     isFirstTurn = false;
 
     activeAbort = new AbortController();
@@ -231,7 +234,7 @@ export function initSession(deps: SessionDeps): void {
       root.style.display = 'flex';
       if (!convertedAnchor) {
         const rect = root.getBoundingClientRect();
-        root.style.left = rect.left + 'px';
+        root.style.left = `${rect.left}px`;
         root.style.right = 'auto';
         convertedAnchor = true;
       }

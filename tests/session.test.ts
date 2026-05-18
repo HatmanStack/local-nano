@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { chromeMock } from './setup.js';
-import { initSession, type SessionDeps } from '../src/session.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TOGGLE_MESSAGE } from '../src/background/handler.js';
 import { MAX_HISTORY } from '../src/history.js';
+import { initSession, type SessionDeps } from '../src/session.js';
+import { chromeMock } from './setup.js';
 
 // ---------------------------------------------------------------------------
 // Mock the dynamic imports inside loadHeavy()
@@ -136,7 +136,9 @@ describe('initSession — session lifecycle', () => {
     // Create resolves after we check
     let resolveCreate!: (s: ReturnType<typeof makeSessionMock>) => void;
     mockLanguageModelCreate.mockReturnValue(
-      new Promise<ReturnType<typeof makeSessionMock>>((r) => { resolveCreate = r; }),
+      new Promise<ReturnType<typeof makeSessionMock>>((r) => {
+        resolveCreate = r;
+      }),
     );
     initSession(deps);
     // Simulate toggle to trigger ensureSession
@@ -173,7 +175,9 @@ describe('initSession — session lifecycle', () => {
   it('does not call LanguageModel.create twice under concurrent ensureSession calls', async () => {
     let resolveCreate!: (s: ReturnType<typeof makeSessionMock>) => void;
     mockLanguageModelCreate.mockReturnValue(
-      new Promise<ReturnType<typeof makeSessionMock>>((r) => { resolveCreate = r; }),
+      new Promise<ReturnType<typeof makeSessionMock>>((r) => {
+        resolveCreate = r;
+      }),
     );
     initSession(deps);
     const listener = getToggleListener();
@@ -191,7 +195,9 @@ describe('initSession — session lifecycle', () => {
   it('shows "Loading model…" status message while session creates', async () => {
     let resolveCreate!: (s: ReturnType<typeof makeSessionMock>) => void;
     mockLanguageModelCreate.mockReturnValue(
-      new Promise<ReturnType<typeof makeSessionMock>>((r) => { resolveCreate = r; }),
+      new Promise<ReturnType<typeof makeSessionMock>>((r) => {
+        resolveCreate = r;
+      }),
     );
     initSession(deps);
     const listener = getToggleListener();
@@ -301,7 +307,8 @@ describe('initSession — send behavior', () => {
     // jsdom's DOMException is not instanceof Error in the vitest environment.
     const abortError = Object.assign(new Error('Aborted'), { name: 'AbortError' });
     const reader = {
-      read: vi.fn()
+      read: vi
+        .fn()
         .mockResolvedValueOnce({ done: false, value: 'partial' })
         .mockRejectedValueOnce(abortError),
       releaseLock: vi.fn(),
@@ -337,7 +344,10 @@ describe('initSession — send behavior', () => {
     deps._actionBtn.click();
     await new Promise((r) => setTimeout(r, 20));
     const storageKey = 'local-nano:history:https://example.com/page';
-    const stored = chromeMock.storage.local.store[storageKey] as Array<{ role: string; text: string }>;
+    const stored = chromeMock.storage.local.store[storageKey] as Array<{
+      role: string;
+      text: string;
+    }>;
     // Should have user + model entries
     expect(stored.some((e) => e.role === 'user' && e.text === 'user question')).toBe(true);
     expect(stored.some((e) => e.role === 'model')).toBe(true);

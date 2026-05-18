@@ -1,4 +1,4 @@
-import { vi, beforeEach } from 'vitest';
+import { beforeEach, vi } from 'vitest';
 
 type StorageRecord = Record<string, unknown>;
 
@@ -34,9 +34,7 @@ const chromeMock = {
   },
   commands: { onCommand: { addListener: vi.fn() } },
   tabs: {
-    query: vi.fn(
-      (_q: unknown, cb: (tabs: Array<{ id?: number }>) => void) => cb([{ id: 1 }]),
-    ),
+    query: vi.fn((_q: unknown, cb: (tabs: Array<{ id?: number }>) => void) => cb([{ id: 1 }])),
     sendMessage: vi.fn(),
   },
 };

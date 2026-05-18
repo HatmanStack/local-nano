@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  handleCommand,
-  TOGGLE_COMMAND,
-  TOGGLE_MESSAGE,
-} from '../src/background/handler.js';
+import { handleCommand, TOGGLE_COMMAND, TOGGLE_MESSAGE } from '../src/background/handler.js';
 import { chromeMock } from './setup.js';
 
 describe('handleCommand', () => {
