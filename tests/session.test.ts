@@ -394,6 +394,31 @@ describe('initSession — send behavior', () => {
     const stored = chromeMock.storage.local.store[key] as Array<{ role: string; text: string }>;
     expect(stored.length).toBeLessThanOrEqual(MAX_HISTORY);
   });
+
+  it('trims oversized restored history to MAX_HISTORY on the first persist', async () => {
+    // Storage somehow contains more than MAX_HISTORY entries (e.g. from a
+    // prior buggy write). Restore must clamp the in-memory array; otherwise
+    // the next persist re-writes the oversized history back to storage,
+    // and the array grows unbounded during the session.
+    const key = 'local-nano:history:https://example.com/page';
+    const oversized = MAX_HISTORY + 50;
+    chromeMock.storage.local.store[key] = Array.from({ length: oversized }, (_, k) => ({
+      role: k % 2 === 0 ? 'user' : 'model',
+      text: `msg ${k}`,
+    }));
+
+    await setupWithSession();
+    const stream = makeStream(['fresh answer']);
+    sessionMock.promptStreaming.mockReturnValue(stream);
+    deps._input.value = 'fresh question';
+    deps._actionBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    const stored = chromeMock.storage.local.store[key] as Array<{ role: string; text: string }>;
+    expect(stored.length).toBe(MAX_HISTORY);
+    // Oldest entries dropped; newest (user + model) retained at the tail
+    expect(stored[stored.length - 2]).toEqual({ role: 'user', text: 'fresh question' });
+    expect(stored[stored.length - 1].role).toBe('model');
+  });
 });
 
 describe('initSession — toggle behavior', () => {

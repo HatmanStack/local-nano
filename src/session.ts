@@ -13,6 +13,7 @@ import { TOGGLE_MESSAGE } from './background/handler.js';
 import {
   type Entry,
   loadHistory as loadHistoryFromStorage,
+  MAX_HISTORY,
   type Role,
   saveHistory as saveHistoryToStorage,
   storageKey,
@@ -79,6 +80,16 @@ export function initSession(deps: SessionDeps): void {
   // ---- History ----
   let history: Entry[] = [];
 
+  // Keep the in-memory array bounded so a long session doesn't grow it
+  // without limit. Storage is already capped in saveHistory, but the
+  // in-memory copy can outlive any single persist call.
+  function pushEntry(entry: Entry) {
+    history.push(entry);
+    if (history.length > MAX_HISTORY) {
+      history.splice(0, history.length - MAX_HISTORY);
+    }
+  }
+
   function persist() {
     saveHistoryToStorage(STORAGE_KEY, history).catch((err: unknown) => {
       console.error('[local-nano] history write failed:', err);
@@ -86,14 +97,15 @@ export function initSession(deps: SessionDeps): void {
   }
 
   async function restore(): Promise<void> {
-    history = await loadHistoryFromStorage(STORAGE_KEY);
+    const loaded = await loadHistoryFromStorage(STORAGE_KEY);
+    history = loaded.length > MAX_HISTORY ? loaded.slice(-MAX_HISTORY) : loaded;
     for (const entry of history) renderMessage(messages, entry.role, entry.text);
   }
 
   function addMessage(role: Role, text: string): HTMLElement {
     const el = renderMessage(messages, role, text);
     if (role !== 'system') {
-      history.push({ role, text });
+      pushEntry({ role, text });
       persist();
     }
     return el;
@@ -200,7 +212,7 @@ export function initSession(deps: SessionDeps): void {
       }
     } finally {
       if (modelText) {
-        history.push({ role: 'model', text: modelText });
+        pushEntry({ role: 'model', text: modelText });
         persist();
       }
       setIdleState(actionBtn, i);
