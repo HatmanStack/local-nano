@@ -323,6 +323,20 @@ describe('initSession — send behavior', () => {
     expect(reader.releaseLock).toHaveBeenCalled();
   });
 
+  it('removes the typing indicator when the stream yields zero chunks', async () => {
+    await setupWithSession();
+    // Stream closes immediately with no values
+    const emptyStream = makeStream([]);
+    sessionMock.promptStreaming.mockReturnValue(emptyStream);
+    deps._input.value = 'will get an empty reply';
+    deps._actionBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    // The model bubble is the last child; it must contain no `.ln-dot`
+    // descendants once the stream finishes.
+    const responseEl = deps._messages.lastElementChild as HTMLElement;
+    expect(responseEl.querySelectorAll('.ln-dot').length).toBe(0);
+  });
+
   it('calls reader.releaseLock() even when stream errors', async () => {
     await setupWithSession();
     const reader = {

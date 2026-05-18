@@ -146,7 +146,6 @@ export function initSession(deps: SessionDeps): void {
       });
       session = created;
       status.textContent = 'Ready.';
-      i.disabled = false;
     } catch (e: unknown) {
       console.error('[local-nano] LanguageModel.create failed:', e);
       status.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
@@ -154,9 +153,9 @@ export function initSession(deps: SessionDeps): void {
       // the panel. Without this, every subsequent ensureSession call returns
       // the same rejected promise and the failure is permanent for the tab.
       heavyLoadPromise = null;
-      i.disabled = false;
     } finally {
       creating = false;
+      i.disabled = false;
     }
   }
 
@@ -211,6 +210,10 @@ export function initSession(deps: SessionDeps): void {
         responseEl.textContent = modelText;
       }
     } finally {
+      // Drop the typing indicator unconditionally. The in-loop reset only
+      // runs when at least one chunk arrives; a stream that closes with
+      // zero chunks would otherwise leave the bouncing dots in place.
+      if (indicator.parentNode) indicator.remove();
       if (modelText) {
         pushEntry({ role: 'model', text: modelText });
         persist();
@@ -241,7 +244,6 @@ export function initSession(deps: SessionDeps): void {
   let convertedAnchor = false;
   chrome.runtime.onMessage.addListener((m: typeof TOGGLE_MESSAGE) => {
     if (m.a !== TOGGLE_MESSAGE.a) return;
-    if (!root) return;
     if (root.style.display === 'none') {
       root.style.display = 'flex';
       if (!convertedAnchor) {
