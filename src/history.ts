@@ -12,5 +12,5 @@ export async function loadHistory(key: string): Promise<Entry[]> {
 }
 
 export function saveHistory(key: string, history: Entry[]): Promise<void> {
-  return chrome.storage.local.set({ [key]: history }) as unknown as Promise<void>;
+  return chrome.storage.local.set({ [key]: history });
 }

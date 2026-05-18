@@ -173,9 +173,9 @@ boilerplate that is now unnecessary noise (health-audit quick win #1).
 
 **Verification Checklist:**
 
-- [ ] `src/history.ts` has no `as unknown` cast
-- [ ] `npm run typecheck` passes
-- [ ] All history tests pass
+- [x] `src/history.ts` has no `as unknown` cast
+- [x] `npm run typecheck` passes
+- [x] All history tests pass
 
 **Testing Instructions:**
 
