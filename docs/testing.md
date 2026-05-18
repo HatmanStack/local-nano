@@ -21,6 +21,7 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 | `tests/ui-messages.test.ts`        | `renderMessage`, `makeTypingIndicator` (XSS-safety, alignment, scroll) |
 | `tests/ui-state.test.ts`           | Send/Stop button state transitions           |
 | `tests/background-handler.test.ts` | Command handler (toggle, ignore unknown, no-id) |
+| `tests/session.test.ts`            | `initSession` — session lifecycle, streaming, abort, toggle, concurrency |
 
 ## Coverage
 
@@ -28,7 +29,7 @@ Thresholds are enforced in `vitest.config.ts`:
 
 ```
 lines/statements/functions: 75%
-branches:                   70%
+branches:                   80%
 ```
 
 If a change drops below those, `npm run coverage` (and therefore CI) fails. The current `src/` suite sits at 100% — keep it high by adding a test alongside any new module.
