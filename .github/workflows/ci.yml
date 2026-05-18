@@ -19,6 +19,9 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Provision .env.json from example
+        run: cp .env.example.json .env.json
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -26,9 +29,7 @@ jobs:
         run: npm run coverage
 
       - name: Build
-        run: |
-          cp .env.example.json .env.json
-          npm run build
+        run: npm run build
 
       - name: Upload coverage report
         if: always()
