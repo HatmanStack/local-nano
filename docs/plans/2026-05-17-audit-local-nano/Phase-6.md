@@ -613,10 +613,10 @@ D2 drift class from recurring silently (doc-audit Prevention Recommendations).
    ```
 
    The project uses `"type": "module"` in `package.json`, so test files are
-   treated as ESM. In ESM, `__dirname` is not defined. On Node 20,
-   `import.meta.dirname` is not yet available (added in Node 21.2). The
-   `fileURLToPath(new URL('.', import.meta.url))` pattern is the correct
-   Node 20 ESM replacement.
+   treated as ESM. In ESM, `__dirname` is not defined. `import.meta.dirname`
+   is available on Node 20.11+ and Node 21.2+, but for portability across
+   older Node 20 patch versions we use the broadly-supported
+   `fileURLToPath(new URL('.', import.meta.url))` pattern.
 
    This test will fail if `docs/configuration.md` is updated with a wrong model
    name, or if `.env.example.json` is updated without updating the doc.

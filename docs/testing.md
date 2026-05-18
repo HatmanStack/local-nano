@@ -32,7 +32,7 @@ lines/statements/functions: 75%
 branches:                   80%
 ```
 
-If a change drops below those, `npm run coverage` (and therefore CI) fails. The current `src/` suite sits at 100% — keep it high by adding a test alongside any new module.
+If a change drops below those, `npm run coverage` (and therefore CI) fails. The `src/` suite currently sits well above the thresholds — keep it high by adding a test alongside any new module.
 
 What is **not** measured:
 

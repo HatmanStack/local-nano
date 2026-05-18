@@ -10,7 +10,7 @@ existing_tooling: None (no linter, CI added during audit window — see context 
 
 ## Context
 
-This audit ran across `/home/christophergalliart/projects/local-nano` at 2026-05-17. A few minor edits to the repo happened during the audit window (CI workflow added, `well_done.jpg` adopted as the README hero, license badge added) — those mean a couple of LOW findings below are already partly addressed in the live tree. They're preserved here for completeness; the planner can drop them when remediating.
+This audit ran across the repository root at 2026-05-17. A few minor edits to the repo happened during the audit window (CI workflow added, `well_done.jpg` adopted as the README hero, license badge added) — those mean a couple of LOW findings below are already partly addressed in the live tree. They're preserved here for completeness; the planner can drop them when remediating.
 
 ## Executive Summary
 

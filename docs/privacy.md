@@ -5,6 +5,7 @@
 ## What does leave your machine
 
 - **Model weights, on first use.** When the chat panel is opened for the first time, Transformers.js downloads the configured model from Hugging Face (`huggingface.co` and `cdn-lfs.huggingface.co`). The host permissions for those domains are declared in `manifest.json`. Subsequent loads come from the browser cache.
+- **`cdn.jsdelivr.net`, in fallback paths only.** Transformers.js can fall back to its public CDN on jsdelivr for ORT runtime files. We bundle those files into `dist/ort/` so the fallback should not normally trigger, but the host permission is declared so the request doesn't silently fail if it ever does.
 - **Whatever the page itself sends.** The extension does not block or interfere with the host page's own network activity.
 
 That's the entire list of outbound traffic the extension causes.
