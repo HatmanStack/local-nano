@@ -587,6 +587,44 @@ describe('initSession — SessionHandle surface', () => {
     expect(arg).toContain('Page: Test Page');
   });
 
+  it('prefillAndSend(text, true) awaits in-flight session creation before sending', async () => {
+    // This is the dispatch-from-context-menu race: the user picks a
+    // menu action that calls openPanel() (which kicks off ensureSession)
+    // and immediately prefillAndSend(..., true) before the model has
+    // finished loading. send() returns early when session is null, so
+    // without ensureSession-awaiting the autoSend would be silently
+    // dropped.
+    const sessionMock = makeSessionMock();
+    const stream = makeStream(['ok']);
+    sessionMock.promptStreaming.mockReturnValue(stream);
+    // Hold session creation open so prefillAndSend fires while the
+    // session is still loading.
+    let resolveCreate!: (s: ReturnType<typeof makeSessionMock>) => void;
+    mockLanguageModelCreate.mockReturnValue(
+      new Promise<ReturnType<typeof makeSessionMock>>((r) => {
+        resolveCreate = r;
+      }),
+    );
+
+    const handle = initSession(deps);
+    deps._root.style.display = 'none';
+    handle.openPanel();
+    // Immediately call prefillAndSend — session is NOT ready yet.
+    handle.prefillAndSend('Summarize this page.', true);
+    await new Promise((r) => setTimeout(r, 5));
+    // promptStreaming must NOT have been called: the autoSend should be
+    // queued behind the in-flight create.
+    expect(sessionMock.promptStreaming).not.toHaveBeenCalled();
+
+    // Now resolve session creation; the queued send should fire.
+    resolveCreate(sessionMock);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sessionMock.promptStreaming).toHaveBeenCalledTimes(1);
+    const arg = sessionMock.promptStreaming.mock.calls[0][0] as string;
+    expect(arg).toContain('Summarize this page.');
+    expect(arg).toContain('Page: Test Page');
+  });
+
   it('mountPreview appends the preview root after messages and hides messages', () => {
     const handle = initSession(deps);
     const previewRoot = document.createElement('div');

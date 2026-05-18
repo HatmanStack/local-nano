@@ -104,7 +104,12 @@ export function initSession(deps: SessionDeps): SessionHandle {
 
   // ---- Session state ----
   let session: LanguageModelSession | null = null;
-  let creating = false;
+  // In-flight session-creation promise. `null` means no create is in
+  // flight. Replaces the previous boolean `creating` flag so callers
+  // (e.g. `prefillAndSend(text, true)` triggered from a context-menu
+  // action before the model has loaded) can await readiness rather than
+  // silently no-op'ing on the first chat turn.
+  let createInFlight: Promise<void> | null = null;
   // NOTE(isFirstTurn): This flag is not reset after restore() re-renders prior
   // history. The restored messages are displayed in the UI but the new session
   // has no access to them (the polyfill creates a fresh context). This means
@@ -115,40 +120,48 @@ export function initSession(deps: SessionDeps): SessionHandle {
   // iteration because the correct fix depends on polyfill replay support.
   let isFirstTurn = true;
 
-  async function ensureSession() {
-    if (session || creating) return;
-    creating = true;
-    i.disabled = true;
-    const status = addMessage('system', 'Loading model…');
-    try {
-      const { LanguageModel } = await loadHeavy(transformersConfig);
-      const created = await LanguageModel.create({
-        expectedInputs: [{ type: 'text', languages: ['en'] }],
-        expectedOutputs: [{ type: 'text', languages: ['en'] }],
-        initialPrompts: [{ role: 'system', content: SYSTEM_INSTRUCTION }],
-        monitor(mon: EventTarget) {
-          mon.addEventListener('downloadprogress', (e) => {
-            const ev = e as Event & { loaded: number };
-            const v = ev.loaded;
-            const label = v <= 1 ? `${Math.round(v * 100)}%` : `${(v / 1_000_000).toFixed(1)} MB`;
-            status.textContent = `Loading model… ${label}`;
-          });
-        },
-      });
-      session = created;
-      status.textContent = 'Ready.';
-    } catch (e: unknown) {
-      console.error('[local-nano] LanguageModel.create failed:', e);
-      status.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
-      // Reset the heavy module cache so the user can retry by closing and
-      // reopening the panel. Without this, every subsequent ensureSession
-      // call returns the same rejected promise and the failure is permanent
-      // for the tab.
-      resetHeavyCache();
-    } finally {
-      creating = false;
-      i.disabled = false;
-    }
+  function ensureSession(): Promise<void> {
+    if (session) return Promise.resolve();
+    if (createInFlight) return createInFlight;
+    createInFlight = (async () => {
+      i.disabled = true;
+      const status = addMessage('system', 'Loading model…');
+      try {
+        const { LanguageModel } = await loadHeavy(transformersConfig);
+        const created = await LanguageModel.create({
+          expectedInputs: [{ type: 'text', languages: ['en'] }],
+          expectedOutputs: [{ type: 'text', languages: ['en'] }],
+          initialPrompts: [{ role: 'system', content: SYSTEM_INSTRUCTION }],
+          monitor(mon: EventTarget) {
+            mon.addEventListener('downloadprogress', (e) => {
+              const ev = e as Event & { loaded: number };
+              const v = ev.loaded;
+              const label =
+                v <= 1 ? `${Math.round(v * 100)}%` : `${(v / 1_000_000).toFixed(1)} MB`;
+              status.textContent = `Loading model… ${label}`;
+            });
+          },
+        });
+        session = created;
+        status.textContent = 'Ready.';
+      } catch (e: unknown) {
+        console.error('[local-nano] LanguageModel.create failed:', e);
+        status.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
+        // Reset the heavy module cache so the user can retry by closing and
+        // reopening the panel. Without this, every subsequent ensureSession
+        // call returns the same rejected promise and the failure is permanent
+        // for the tab.
+        resetHeavyCache();
+      } finally {
+        i.disabled = false;
+        // Clear the in-flight slot on failure so a subsequent call can
+        // retry. On success the slot is retained but `session` is set, so
+        // the early-return at the top of the function short-circuits all
+        // future calls without touching this slot.
+        if (!session) createInFlight = null;
+      }
+    })();
+    return createInFlight;
   }
 
   // ---- Send / Stop ----
@@ -304,7 +317,16 @@ export function initSession(deps: SessionDeps): SessionHandle {
     isPanelOpen,
     prefillAndSend(text: string, autoSend: boolean): void {
       i.value = text;
-      if (autoSend) void send();
+      if (!autoSend) return;
+      // Wait for any in-flight model load before calling send(). Without
+      // this, dispatch from a context-menu action that hits the panel
+      // before the model has loaded would silently no-op: send() returns
+      // early when `session` is still null. `ensureSession()` either
+      // resolves immediately (model already loaded) or chains onto the
+      // in-flight create.
+      void ensureSession().then(() => {
+        if (session) void send();
+      });
     },
     mountPreview,
   };
