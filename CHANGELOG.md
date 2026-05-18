@@ -5,6 +5,40 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-18
+
+First feature release. v0.1.x was a chat panel that opened on a hotkey and read the page body as a single excerpt. v0.2 makes the extension DOM-aware: right-click on a selection (or hit a hotkey) to ask, rewrite, or transform that selection in place. All inference still runs on-device.
+
+### Added
+
+- **Right-click menu.** `chrome.contextMenus` integration registered from the background service worker. Menu inventory: `Ask local-nano about this`, `Summarize this page`, `Rewrite ▸ {Improve writing, Make shorter, Make formal, Fix grammar}`, and `Translate / Simplify / Summarize in place ▸ {To English, To Spanish, To French, Simplify, Summarize}`.
+- **Hotkeys.** Three new commands (`ask_about_selection`, `rewrite_selection`, `translate_selection`) bring the manifest to its 4-command Chrome cap. Default chords are `Ctrl+Shift+{L, I, U}` (`Cmd+Shift+{L, I, U}` on Mac).
+- **Preview-then-apply UX.** Write-side actions stream into a stacked Preview component (original on top, model output below) with Apply / Discard buttons. Escape triggers Discard. Apply replaces the captured `Range` / input selection in the page DOM.
+- **Per-action ephemeral sessions.** `runTransform` creates a fresh `LanguageModel` session per action with a task-specific system prompt; the chat session is untouched. Transforms do not write to chat history. Heavy modules (Transformers.js + polyfill) share a module-level cache in the new `src/heavy.ts`.
+- **Selection snapshot layer.** `src/dom-actions.ts` snapshots the selection at `contextmenu` / `keydown` time via `Range.cloneRange()` or `<input>` / `<textarea>` offsets, so the selection survives the user clicking the panel.
+- **DOM apply layer.** `src/dom-apply.ts` covers three branches: `setRangeText` for `<input>` / `<textarea>` (plus a synthetic `input` event so React/Vue see the change), `execCommand('insertText')` for contenteditable (preserving native undo, with a `Range`-mutation fallback), and `deleteContents` + `insertNode(createTextNode)` for read-only prose. No `innerHTML` anywhere in the apply path.
+- **Docs.** New `docs/dom-actions.md` describing the menu inventory, hotkeys, preview-then-apply UX, privacy invariant, and contributor guide for adding a new action. Privacy doc and architecture doc updated to reflect v0.2.
+- **Tests.** `tests/transform-prompts.test.ts`, `tests/transform.test.ts`, `tests/background-menus.test.ts`, `tests/dom-actions.test.ts`, `tests/dom-apply.test.ts`, `tests/ui-preview.test.ts` add coverage for every new `src/` module.
+
+### Changed
+
+- `initSession` now returns a `SessionHandle` (`openPanel`, `closePanel`, `isPanelOpen`, `prefillAndSend`, `mountPreview`) so the new dispatch layer can drive the panel without owning its DOM. The existing 24 session tests still pass unchanged.
+- `src/heavy.ts` factored out of `src/session.ts`. The heavy-module promise is now module-scoped so both the long-lived chat session and the per-action transform sessions share it.
+- `manifest.json`: `permissions` += `contextMenus`; `commands` expanded to the 4-command cap.
+- `tests/setup.ts`: extended with `contextMenus`, `runtime.onInstalled`, and `runtime.onStartup` mocks.
+
+### Privacy
+
+- Selection text and chat input are still on-device only. The new `contextMenus` permission is a Chrome UI API and grants no network access. See `docs/privacy.md` for the updated permissions table.
+
+### Known Limitations
+
+- Translation languages hardcoded EN / ES / FR (configurable in v0.3).
+- Selections in cross-origin iframes are not supported (top frame only).
+- DOM mutations between the right-click snapshot and Apply may make the captured `Range` point to changed content; re-anchoring deferred.
+- `contenteditable` widgets that intercept native events may behave unexpectedly during Apply; framework-specific guarantees are not in scope.
+- Only one transform may stream at a time; a new transform aborts the in-flight one.
+
 ## [0.1.1] - 2026-05-18
 
 Patch release covering the first round of post-publication audit remediation and PR review fixes. No new user-facing features; the focus is correctness, hardening, and contributor-experience tooling.
