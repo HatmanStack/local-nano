@@ -518,3 +518,142 @@ describe('initSession — toggle behavior', () => {
     expect(mockLanguageModelCreate).not.toHaveBeenCalled();
   });
 });
+
+describe('initSession — SessionHandle surface', () => {
+  let deps: ReturnType<typeof makeDeps>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    deps = makeDeps();
+    mockLanguageModelCreate.mockResolvedValue(makeSessionMock());
+  });
+
+  it('openPanel() makes the root visible and triggers ensureSession', async () => {
+    const handle = initSession(deps);
+    deps._root.style.display = 'none';
+    handle.openPanel();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(deps._root.style.display).toBe('flex');
+    expect(mockLanguageModelCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('closePanel() hides the root and openPanel() shows it again', async () => {
+    const handle = initSession(deps);
+    deps._root.style.display = 'flex';
+    handle.closePanel();
+    expect(deps._root.style.display).toBe('none');
+    handle.openPanel();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(deps._root.style.display).toBe('flex');
+  });
+
+  it('isPanelOpen() reflects the current display state', () => {
+    const handle = initSession(deps);
+    deps._root.style.display = 'none';
+    expect(handle.isPanelOpen()).toBe(false);
+    deps._root.style.display = 'flex';
+    expect(handle.isPanelOpen()).toBe(true);
+  });
+
+  it('prefillAndSend(text, false) sets input.value without calling promptStreaming', async () => {
+    const sessionMock = makeSessionMock();
+    mockLanguageModelCreate.mockResolvedValue(sessionMock);
+    const handle = initSession(deps);
+    // Ensure the session is ready before prefillAndSend
+    deps._root.style.display = 'none';
+    handle.openPanel();
+    await new Promise((r) => setTimeout(r, 10));
+    handle.prefillAndSend('hello', false);
+    expect(deps._input.value).toBe('hello');
+    expect(sessionMock.promptStreaming).not.toHaveBeenCalled();
+  });
+
+  it('prefillAndSend(text, true) sends the prefilled text via the existing send path', async () => {
+    const sessionMock = makeSessionMock();
+    mockLanguageModelCreate.mockResolvedValue(sessionMock);
+    const stream = makeStream(['ok']);
+    sessionMock.promptStreaming.mockReturnValue(stream);
+
+    const handle = initSession(deps);
+    deps._root.style.display = 'none';
+    handle.openPanel();
+    await new Promise((r) => setTimeout(r, 10));
+    handle.prefillAndSend('Summarize this page.', true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sessionMock.promptStreaming).toHaveBeenCalledTimes(1);
+    const arg = sessionMock.promptStreaming.mock.calls[0][0] as string;
+    // First turn — pageContext is prepended.
+    expect(arg).toContain('Summarize this page.');
+    expect(arg).toContain('Page: Test Page');
+  });
+
+  it('prefillAndSend(text, true) awaits in-flight session creation before sending', async () => {
+    // This is the dispatch-from-context-menu race: the user picks a
+    // menu action that calls openPanel() (which kicks off ensureSession)
+    // and immediately prefillAndSend(..., true) before the model has
+    // finished loading. send() returns early when session is null, so
+    // without ensureSession-awaiting the autoSend would be silently
+    // dropped.
+    const sessionMock = makeSessionMock();
+    const stream = makeStream(['ok']);
+    sessionMock.promptStreaming.mockReturnValue(stream);
+    // Hold session creation open so prefillAndSend fires while the
+    // session is still loading.
+    let resolveCreate!: (s: ReturnType<typeof makeSessionMock>) => void;
+    mockLanguageModelCreate.mockReturnValue(
+      new Promise<ReturnType<typeof makeSessionMock>>((r) => {
+        resolveCreate = r;
+      }),
+    );
+
+    const handle = initSession(deps);
+    deps._root.style.display = 'none';
+    handle.openPanel();
+    // Immediately call prefillAndSend — session is NOT ready yet.
+    handle.prefillAndSend('Summarize this page.', true);
+    await new Promise((r) => setTimeout(r, 5));
+    // promptStreaming must NOT have been called: the autoSend should be
+    // queued behind the in-flight create.
+    expect(sessionMock.promptStreaming).not.toHaveBeenCalled();
+
+    // Now resolve session creation; the queued send should fire.
+    resolveCreate(sessionMock);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(sessionMock.promptStreaming).toHaveBeenCalledTimes(1);
+    const arg = sessionMock.promptStreaming.mock.calls[0][0] as string;
+    expect(arg).toContain('Summarize this page.');
+    expect(arg).toContain('Page: Test Page');
+  });
+
+  it('mountPreview appends the preview root after messages and hides messages', () => {
+    const handle = initSession(deps);
+    const previewRoot = document.createElement('div');
+    previewRoot.id = 'mock-preview';
+    handle.mountPreview(previewRoot);
+    expect(deps._messages.style.display).toBe('none');
+    // Preview appears as a sibling of messages within root.
+    expect(previewRoot.parentNode).toBe(deps._root);
+  });
+
+  it('mountPreview teardown restores messages and removes the preview', () => {
+    const handle = initSession(deps);
+    const previewRoot = document.createElement('div');
+    const teardown = handle.mountPreview(previewRoot);
+    teardown();
+    expect(previewRoot.parentNode).toBeNull();
+    // The messages display style is restored (was '' by default).
+    expect(deps._messages.style.display).toBe('');
+  });
+
+  it('mountPreview tears down the previous preview before mounting a new one', () => {
+    const handle = initSession(deps);
+    const first = document.createElement('div');
+    first.id = 'first';
+    const second = document.createElement('div');
+    second.id = 'second';
+    handle.mountPreview(first);
+    handle.mountPreview(second);
+    expect(first.parentNode).toBeNull();
+    expect(second.parentNode).toBe(deps._root);
+  });
+});

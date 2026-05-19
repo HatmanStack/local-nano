@@ -1,15 +1,6 @@
-/**
- * Minimal typed surface for a LanguageModel session returned by the
- * Prompt API polyfill. Only the methods called in this extension are
- * declared; the full spec surface is larger.
- */
-export interface LanguageModelSession {
-  promptStreaming(input: string, options?: { signal?: AbortSignal }): ReadableStream<string>;
-  destroy(): void;
-}
-
 import type transformersConfigType from '../.env.json';
 import { TOGGLE_MESSAGE } from './background/handler.js';
+import { type LanguageModelSession, loadHeavy, resetHeavyCache } from './heavy.js';
 import {
   type Entry,
   loadHistory as loadHistoryFromStorage,
@@ -22,6 +13,10 @@ import { pageContext } from './pageContext.js';
 import { SYSTEM_INSTRUCTION } from './system.js';
 import { makeTypingIndicator, renderMessage } from './ui/messages.js';
 import { setGeneratingState, setIdleState } from './ui/state.js';
+
+// Re-export the LanguageModelSession interface so existing importers
+// that still reach for it via `./session.js` keep compiling.
+export type { LanguageModelSession } from './heavy.js';
 
 // The transformers config shape — imported for type only; actual import
 // happens at build time in content.ts.
@@ -41,41 +36,37 @@ export interface SessionDeps {
   document: Pick<Document, 'title'> & { body: { innerText: string } };
 }
 
-interface OnnxWasmEnv {
-  backends: { onnx: { wasm: { wasmPaths: string; numThreads: number } } };
+/**
+ * Public handle returned by `initSession`. v0.2 exposes a small surface
+ * so `initDomActions` can drive the panel (open it, prefill+send, mount
+ * a Preview component) without owning panel DOM.
+ */
+export interface SessionHandle {
+  /** Show the panel (hidden by default) and focus the input. */
+  openPanel(): void;
+  /** Hide the panel. */
+  closePanel(): void;
+  /** Whether the panel is currently visible. */
+  isPanelOpen(): boolean;
+  /**
+   * Prefill the input with `text` and (optionally) trigger send.
+   * Used by `Summarize this page` and `ask_about_selection`. When
+   * `autoSend === false` the user must press Enter themselves.
+   */
+  prefillAndSend(text: string, autoSend: boolean): void;
+  /**
+   * Replace the messages list with the given Preview element. Returns a
+   * teardown function that restores the messages list and removes the
+   * Preview root. Calling `mountPreview` while a previous Preview is
+   * still mounted invokes the previous teardown before mounting the new
+   * one (one Preview at a time).
+   */
+  mountPreview(previewRoot: HTMLElement): () => void;
 }
 
-export function initSession(deps: SessionDeps): void {
+export function initSession(deps: SessionDeps): SessionHandle {
   const { root, messages, input: i, actionBtn, transformersConfig, location, document } = deps;
   const STORAGE_KEY = storageKey(location);
-
-  // ---- Heavy module loader (lazy, singleton) ----
-  let heavyLoadPromise: Promise<{
-    LanguageModel: { create: (opts: unknown) => Promise<LanguageModelSession> };
-  }> | null = null;
-
-  function loadHeavy() {
-    if (heavyLoadPromise) return heavyLoadPromise;
-    heavyLoadPromise = (async () => {
-      const [tfMod, polyfillMod] = await Promise.all([
-        import('@huggingface/transformers'),
-        import('../vendor/prompt-api-polyfill/prompt-api-polyfill.js'),
-      ]);
-      const ortPath = chrome.runtime.getURL('dist/ort/');
-      (tfMod.env as unknown as OnnxWasmEnv).backends.onnx.wasm.wasmPaths = ortPath;
-      (tfMod.env as unknown as OnnxWasmEnv).backends.onnx.wasm.numThreads = 1;
-      (window as unknown as Record<string, unknown>).TRANSFORMERS_CONFIG = transformersConfig;
-      console.log('[local-nano] heavy modules loaded; ORT wasmPaths =', ortPath);
-      return {
-        LanguageModel: (
-          polyfillMod as unknown as {
-            LanguageModel: { create: (opts: unknown) => Promise<LanguageModelSession> };
-          }
-        ).LanguageModel,
-      };
-    })();
-    return heavyLoadPromise;
-  }
 
   // ---- History ----
   let history: Entry[] = [];
@@ -113,7 +104,12 @@ export function initSession(deps: SessionDeps): void {
 
   // ---- Session state ----
   let session: LanguageModelSession | null = null;
-  let creating = false;
+  // In-flight session-creation promise. `null` means no create is in
+  // flight. Replaces the previous boolean `creating` flag so callers
+  // (e.g. `prefillAndSend(text, true)` triggered from a context-menu
+  // action before the model has loaded) can await readiness rather than
+  // silently no-op'ing on the first chat turn.
+  let createInFlight: Promise<void> | null = null;
   // NOTE(isFirstTurn): This flag is not reset after restore() re-renders prior
   // history. The restored messages are displayed in the UI but the new session
   // has no access to them (the polyfill creates a fresh context). This means
@@ -124,39 +120,47 @@ export function initSession(deps: SessionDeps): void {
   // iteration because the correct fix depends on polyfill replay support.
   let isFirstTurn = true;
 
-  async function ensureSession() {
-    if (session || creating) return;
-    creating = true;
-    i.disabled = true;
-    const status = addMessage('system', 'Loading model…');
-    try {
-      const { LanguageModel } = await loadHeavy();
-      const created = await LanguageModel.create({
-        expectedInputs: [{ type: 'text', languages: ['en'] }],
-        expectedOutputs: [{ type: 'text', languages: ['en'] }],
-        initialPrompts: [{ role: 'system', content: SYSTEM_INSTRUCTION }],
-        monitor(mon: EventTarget) {
-          mon.addEventListener('downloadprogress', (e) => {
-            const ev = e as Event & { loaded: number };
-            const v = ev.loaded;
-            const label = v <= 1 ? `${Math.round(v * 100)}%` : `${(v / 1_000_000).toFixed(1)} MB`;
-            status.textContent = `Loading model… ${label}`;
-          });
-        },
-      });
-      session = created;
-      status.textContent = 'Ready.';
-    } catch (e: unknown) {
-      console.error('[local-nano] LanguageModel.create failed:', e);
-      status.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
-      // Reset heavyLoadPromise so the user can retry by closing and reopening
-      // the panel. Without this, every subsequent ensureSession call returns
-      // the same rejected promise and the failure is permanent for the tab.
-      heavyLoadPromise = null;
-    } finally {
-      creating = false;
-      i.disabled = false;
-    }
+  function ensureSession(): Promise<void> {
+    if (session) return Promise.resolve();
+    if (createInFlight) return createInFlight;
+    createInFlight = (async () => {
+      i.disabled = true;
+      const status = addMessage('system', 'Loading model…');
+      try {
+        const { LanguageModel } = await loadHeavy(transformersConfig);
+        const created = await LanguageModel.create({
+          expectedInputs: [{ type: 'text', languages: ['en'] }],
+          expectedOutputs: [{ type: 'text', languages: ['en'] }],
+          initialPrompts: [{ role: 'system', content: SYSTEM_INSTRUCTION }],
+          monitor(mon: EventTarget) {
+            mon.addEventListener('downloadprogress', (e) => {
+              const ev = e as Event & { loaded: number };
+              const v = ev.loaded;
+              const label = v <= 1 ? `${Math.round(v * 100)}%` : `${(v / 1_000_000).toFixed(1)} MB`;
+              status.textContent = `Loading model… ${label}`;
+            });
+          },
+        });
+        session = created;
+        status.textContent = 'Ready.';
+      } catch (e: unknown) {
+        console.error('[local-nano] LanguageModel.create failed:', e);
+        status.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
+        // Reset the heavy module cache so the user can retry by closing and
+        // reopening the panel. Without this, every subsequent ensureSession
+        // call returns the same rejected promise and the failure is permanent
+        // for the tab.
+        resetHeavyCache();
+      } finally {
+        i.disabled = false;
+        // Clear the in-flight slot on failure so a subsequent call can
+        // retry. On success the slot is retained but `session` is set, so
+        // the early-return at the top of the function short-circuits all
+        // future calls without touching this slot.
+        if (!session) createInFlight = null;
+      }
+    })();
+    return createInFlight;
   }
 
   // ---- Send / Stop ----
@@ -240,10 +244,13 @@ export function initSession(deps: SessionDeps): void {
     }
   });
 
-  // ---- Toggle listener ----
+  // ---- Panel show/hide (shared by toggle and SessionHandle.openPanel) ----
   let convertedAnchor = false;
-  chrome.runtime.onMessage.addListener((m: typeof TOGGLE_MESSAGE) => {
-    if (m.a !== TOGGLE_MESSAGE.a) return;
+  function isPanelOpen(): boolean {
+    return root.style.display !== 'none';
+  }
+
+  function openPanel(): void {
     if (root.style.display === 'none') {
       root.style.display = 'flex';
       if (!convertedAnchor) {
@@ -252,13 +259,74 @@ export function initSession(deps: SessionDeps): void {
         root.style.right = 'auto';
         convertedAnchor = true;
       }
-      i.focus();
-      void ensureSession();
+    }
+    i.focus();
+    void ensureSession();
+  }
+
+  function closePanel(): void {
+    root.style.display = 'none';
+  }
+
+  // ---- Preview mount/unmount ----
+  // Only one Preview can be active at a time. The teardown captured here
+  // returns the panel to its chat layout; calling mountPreview again
+  // tears down the previous Preview first (idempotent — clearing happens
+  // before the new mount).
+  let currentPreviewTeardown: (() => void) | null = null;
+
+  function mountPreview(previewRoot: HTMLElement): () => void {
+    // Tear down any previous Preview first so only one is mounted.
+    if (currentPreviewTeardown) {
+      currentPreviewTeardown();
+      currentPreviewTeardown = null;
+    }
+    const prevDisplay = messages.style.display;
+    messages.style.display = 'none';
+    // Insert the preview after the messages list so the existing inputWrap
+    // still sits at the bottom of the panel.
+    messages.parentNode?.insertBefore(previewRoot, messages.nextSibling);
+    const teardown = () => {
+      if (previewRoot.parentNode) previewRoot.parentNode.removeChild(previewRoot);
+      messages.style.display = prevDisplay;
+      // Only clear the slot if this is still the active teardown — a
+      // concurrent mountPreview call already cleared us out.
+      if (currentPreviewTeardown === teardown) currentPreviewTeardown = null;
+    };
+    currentPreviewTeardown = teardown;
+    return teardown;
+  }
+
+  // ---- Toggle listener ----
+  chrome.runtime.onMessage.addListener((m: typeof TOGGLE_MESSAGE) => {
+    if (m.a !== TOGGLE_MESSAGE.a) return;
+    if (isPanelOpen()) {
+      closePanel();
     } else {
-      root.style.display = 'none';
+      openPanel();
     }
   });
 
   // ---- Initial restore ----
   void restore();
+
+  return {
+    openPanel,
+    closePanel,
+    isPanelOpen,
+    prefillAndSend(text: string, autoSend: boolean): void {
+      i.value = text;
+      if (!autoSend) return;
+      // Wait for any in-flight model load before calling send(). Without
+      // this, dispatch from a context-menu action that hits the panel
+      // before the model has loaded would silently no-op: send() returns
+      // early when `session` is still null. `ensureSession()` either
+      // resolves immediately (model already loaded) or chains onto the
+      // in-flight create.
+      void ensureSession().then(() => {
+        if (session) void send();
+      });
+    },
+    mountPreview,
+  };
 }

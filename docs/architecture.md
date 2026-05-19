@@ -68,19 +68,26 @@ Before building it copies the ONNX runtime `.wasm` / `.mjs` files into `dist/ort
 
 ## What lives where
 
-| Concern              | File                                  |
-| -------------------- | ------------------------------------- |
-| Keyboard shortcut    | `background.ts` + `src/background/handler.ts` |
-| Panel DOM + dragging | `content.ts`                          |
-| Session lifecycle    | `src/session.ts`                      |
-| Message rendering    | `src/ui/messages.ts`                  |
-| Send/Stop button     | `src/ui/state.ts`                     |
-| Page context prompt  | `src/pageContext.ts`                  |
-| System instruction   | `src/system.ts`                       |
-| History persistence  | `src/history.ts`                      |
-| Polyfill + backend   | `vendor/prompt-api-polyfill/`         |
-| Build                | `build.mjs`                           |
-| Manifest             | `manifest.json`                       |
+| Concern                      | File                                          |
+| ---------------------------- | --------------------------------------------- |
+| Keyboard shortcut            | `background.ts` + `src/background/handler.ts` |
+| Panel DOM + dragging         | `content.ts`                                  |
+| Session lifecycle            | `src/session.ts`                              |
+| Message rendering            | `src/ui/messages.ts`                          |
+| Send/Stop button             | `src/ui/state.ts`                             |
+| Page context prompt          | `src/pageContext.ts`                          |
+| System instruction           | `src/system.ts`                               |
+| History persistence          | `src/history.ts`                              |
+| Action schema and prompts    | `src/transform-prompts.ts`                    |
+| Per-action transform         | `src/transform.ts`                            |
+| Heavy module loader          | `src/heavy.ts`                                |
+| Context-menu registration    | `src/background/menus.ts`                     |
+| Selection capture & dispatch | `src/dom-actions.ts`                          |
+| DOM apply layer              | `src/dom-apply.ts`                            |
+| Preview component            | `src/ui/preview.ts`                           |
+| Polyfill + backend           | `vendor/prompt-api-polyfill/`                 |
+| Build                        | `build.mjs`                                   |
+| Manifest                     | `manifest.json`                               |
 
 ## Session Lifecycle (post-extraction)
 
@@ -110,6 +117,47 @@ The correct fix is to replay the restored history into `LanguageModel.create`'s
 `initialPrompts`, which it does — but replaying could be expensive for long
 histories and is deferred pending user feedback on whether continuity across
 reloads is a desired feature.
+
+## DOM-Aware Actions (v0.2)
+
+v0.2 layers a right-click menu and three new hotkeys on top of the v0.1
+chat panel. The architecture is intentionally additive — the long-lived
+chat session and its history are untouched. The session lifecycle now
+also includes short-lived, ephemeral transform sessions that share the
+heavy-module cache but otherwise live and die per right-click.
+
+- **Menu and command surface.** `chrome.contextMenus` is registered
+  from the background service worker (`src/background/menus.ts`) on
+  `chrome.runtime.onInstalled` and `chrome.runtime.onStartup` so the
+  menu survives worker termination. `chrome.runtime.onMessage`
+  delivers an `ActionMessage` from the background to the per-tab
+  content script.
+- **Selection capture and dispatch.** `src/dom-actions.ts` snapshots
+  the current selection on `contextmenu` / `keydown` and stores it in
+  a module-level "pending action" slot. The snapshot is either a
+  cloned `Range` (for regular DOM selections) or a
+  `{ element, selectionStart, selectionEnd, text }` tuple for
+  `<input>` / `<textarea>` targets. When the action message arrives,
+  `dispatchAction` routes it by descriptor `kind`
+  (`chat`, `page-chat`, `transform-editable`, `transform-readonly`).
+- **Per-action ephemeral sessions.** `src/transform.ts` exports
+  `runTransform({ action, sourceText, signal })`. Each call creates a
+  fresh `LanguageModel` session with a task-specific system prompt
+  (defined in `src/transform-prompts.ts`) and returns a streaming
+  result. The heavy modules (`@huggingface/transformers` + polyfill)
+  are loaded once per page via the module-scoped cache in
+  `src/heavy.ts`, shared with the chat session.
+- **Preview component.** `src/ui/preview.ts` mounts inside the chat
+  panel and replaces the messages list while a transform is active.
+  It renders the original selection on top and the streamed result
+  below, with Apply / Discard buttons and Escape-to-discard.
+- **DOM apply layer.** `src/dom-apply.ts` handles the three target
+  branches: `setRangeText` for `<input>` / `<textarea>` (plus a
+  synthetic `input` event so React/Vue see the change),
+  `execCommand('insertText')` for `contenteditable` (preserving
+  native undo, with a `Range`-mutation fallback), and
+  `deleteContents` + `insertNode(createTextNode)` for read-only
+  prose. No `innerHTML` is used anywhere in the apply path.
 
 ## Architecture Decision Records
 
@@ -143,3 +191,71 @@ not be cached. Without resetting, every subsequent `ensureSession()` call
 returns the same rejected promise and the extension is permanently broken in
 that tab without a page reload. Resetting to null allows the next panel open to
 retry the full load sequence.
+
+### ADR-005: Preview-then-apply for all write-side actions
+
+Rewrite, translate, simplify, and summarize-in-place stream into a stacked
+Preview component (original on top, model output below) with Apply / Discard
+buttons. Apply replaces the captured `Range` in the page DOM; Discard leaves
+the page untouched. Streaming directly into the page was rejected — every
+contenteditable framework intercepts native edits differently and bad model
+output is hard to undo cleanly.
+
+### ADR-006: Ephemeral `LanguageModel` sessions for transforms
+
+Each write-side action creates a fresh `LanguageModel` session via
+`LanguageModel.create({ initialPrompts: [{ role: 'system', content: <prompt> }] })`.
+The long-lived chat session is untouched. Transforms are commits, not
+conversations — they do not write to chat history. The heavy modules are
+shared via `src/heavy.ts`, so setup cost is paid once per page lifetime.
+
+### ADR-007: Selection snapshot via `Range.cloneRange` (with input/textarea branch)
+
+The content script snapshots the current selection on `contextmenu` and on
+the matching `keydown`. For regular DOM selections the snapshot is a cloned
+`Range` plus the selection text; for `<input>` and `<textarea>` it is a
+`{ element, selectionStart, selectionEnd, text }` tuple. The snapshot
+survives the user clicking into the panel.
+
+### ADR-008: Hotkey selection for v0.2
+
+Chrome's manifest caps `commands` at 4. The slot already used by
+`toggle_ai_palette` plus three new commands fill the budget:
+`ask_about_selection` (Ctrl+Shift+L), `rewrite_selection` (Ctrl+Shift+I),
+and `translate_selection` (Ctrl+Shift+U). All other action variants are
+reachable only through the right-click menu in v0.2. Users may rebind any
+chord at `chrome://extensions/shortcuts`.
+
+### ADR-009: `Summarize this page` is a synthetic chat turn
+
+`Summarize this page` reuses the existing chat send path rather than running
+through `runTransform`. The content script focuses the input, sets its value
+to `Summarize this page.`, and triggers the existing send pipeline so the
+existing `isFirstTurn` logic auto-prepends the page excerpt. The result is
+part of chat history, so the user can ask follow-ups naturally.
+
+### ADR-010: Selection length cap
+
+Selection text passed to a transform — or used as `Ask` context — is capped
+at 1500 characters, matching `PAGE_CONTEXT_BODY_LIMIT`. If the selection
+exceeds the cap, the Preview displays an error message instead of starting
+the model. The threshold is exported as a named `SELECTION_LIMIT` constant
+so a future release can lift it without grep-and-replace.
+
+### ADR-011: XSS hygiene in the apply layer
+
+The apply layer never uses `innerHTML`. The three branches are
+`setRangeText` for `<input>` / `<textarea>`,
+`execCommand('insertText')` for `contenteditable` (with a `Range`-mutation
+fallback), and `range.deleteContents()` + `range.insertNode(createTextNode)`
+for read-only prose. Every path constructs a text node, so model output is
+never interpreted as HTML. Unit tests assert the resulting node is a `Text`
+node when given `<script>` payloads.
+
+### ADR-012: One transform at a time
+
+Only one transform may stream at a time. Triggering a new transform while
+one is in flight aborts the in-flight one
+(`activeTransformAbort.abort()`) and starts the new one. Discard during
+streaming also aborts. This matches the chat panel's Send/Stop semantics
+and is simpler than queueing.

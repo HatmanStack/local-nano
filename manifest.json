@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Local AI Cmd",
-  "version": "0.1.1",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "version": "0.2.0",
+  "permissions": ["activeTab", "scripting", "storage", "contextMenus"],
   "host_permissions": [
     "https://huggingface.co/*",
     "https://*.huggingface.co/*",
@@ -26,6 +26,18 @@
     "toggle_ai_palette": {
       "suggested_key": { "default": "Ctrl+Shift+K", "mac": "Command+Shift+K" },
       "description": "Toggle AI Palette"
+    },
+    "ask_about_selection": {
+      "suggested_key": { "default": "Ctrl+Shift+L", "mac": "Command+Shift+L" },
+      "description": "Ask local-nano about the current selection"
+    },
+    "rewrite_selection": {
+      "suggested_key": { "default": "Ctrl+Shift+I", "mac": "Command+Shift+I" },
+      "description": "Rewrite the current selection (improve writing)"
+    },
+    "translate_selection": {
+      "suggested_key": { "default": "Ctrl+Shift+U", "mac": "Command+Shift+U" },
+      "description": "Translate the current selection to English"
     }
   }
 }
