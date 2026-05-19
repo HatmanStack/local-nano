@@ -84,5 +84,12 @@ export function onMenuClicked(
   const tabId = tab?.id;
   if (tabId == null) return;
   const msg: ActionMessage = { a: ACTION_MESSAGE_KIND, id: id as ActionId };
-  tabsApi.sendMessage(tabId, msg);
+  // Pass a no-op callback so chrome.runtime.lastError is consumed
+  // instead of bubbling to the console. On chrome:// pages, extension
+  // pages, or any tab where the content script failed to inject, the
+  // sendMessage call has no receiver and Chrome would otherwise log
+  // "Could not establish connection. Receiving end does not exist." —
+  // a known, expected, and harmless condition that we don't want to
+  // surface as a runtime error.
+  tabsApi.sendMessage(tabId, msg, () => void chrome.runtime.lastError);
 }

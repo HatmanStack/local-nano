@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { onMenuClicked, registerMenus } from '../src/background/menus.js';
 import { ACTION_DESCRIPTORS } from '../src/transform-prompts.js';
 import { chromeMock } from './setup.js';
@@ -99,10 +99,28 @@ describe('onMenuClicked', () => {
       { id: 5 } as chrome.tabs.Tab,
       chromeMock.tabs as unknown as typeof chrome.tabs,
     );
-    expect(chromeMock.tabs.sendMessage).toHaveBeenCalledWith(5, {
-      a: 'action',
-      id: 'ask_about_selection',
-    });
+    expect(chromeMock.tabs.sendMessage).toHaveBeenCalledWith(
+      5,
+      { a: 'action', id: 'ask_about_selection' },
+      expect.any(Function),
+    );
+  });
+
+  it('passes a callback to sendMessage that consumes chrome.runtime.lastError', () => {
+    onMenuClicked(
+      { menuItemId: 'ask_about_selection' } as chrome.contextMenus.OnClickData,
+      { id: 5 } as chrome.tabs.Tab,
+      chromeMock.tabs as unknown as typeof chrome.tabs,
+    );
+    // Pull the callback Chrome would invoke and confirm it doesn't
+    // throw when invoked. On chrome:// pages / extension pages where no
+    // content script is listening, Chrome calls this callback with
+    // chrome.runtime.lastError set; the callback must read it (any
+    // expression that touches the property counts) so Chrome doesn't
+    // bubble the error to the console.
+    const calls = (chromeMock.tabs.sendMessage as ReturnType<typeof vi.fn>).mock.calls;
+    const cb = calls[0][2] as () => void;
+    expect(() => cb()).not.toThrow();
   });
 
   it('returns silently when tab is undefined', () => {
