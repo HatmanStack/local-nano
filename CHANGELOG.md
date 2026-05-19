@@ -31,6 +31,20 @@ First feature release. v0.1.x was a chat panel that opened on a hotkey and read 
 
 - Selection text and chat input are still on-device only. The new `contextMenus` permission is a Chrome UI API and grants no network access. See `docs/privacy.md` for the updated permissions table.
 
+### Fixed
+
+- **Preview apply-failure surface.** When the page-DOM target was removed between the right-click snapshot and Apply, `applyToTarget` returned `false` but the Preview tore down as if it had succeeded. The new `Preview.applyFailed(message)` keeps the preview open with an inline error and a locked Apply so the user has to Discard explicitly.
+- **prefillAndSend readiness race.** `prefillAndSend(text, true)` triggered from a context-menu action before the model had loaded would silently drop the autoSend (because `send()` early-returns when `session` is null). The internal `creating: boolean` is now an awaitable `createInFlight: Promise<void>`, and `prefillAndSend` chains the send onto it.
+- **Preview Escape key.** The Preview registered a keydown listener on its root with `tabIndex=-1`, but the root was never focused on mount — so Escape was a no-op until the user clicked into the preview. `dispatchAction` now calls `preview.root.focus()` after `mountPreview`.
+- **chrome.runtime.lastError on context-menu clicks.** Right-clicks on chrome:// pages, extension pages, or any tab where the content script wasn't injected would surface "Could not establish connection. Receiving end does not exist." in the service worker console. `chrome.tabs.sendMessage` now passes a no-op callback that consumes `lastError`.
+- **`ACTION_DESCRIPTORS` deep freeze.** `Object.freeze` was applied only to the outer array, leaving individual descriptors mutable at runtime. Each descriptor is now frozen too, so accidentally overwriting `systemPrompt` in a caller becomes a TypeError under strict mode instead of silently corrupting later transforms.
+- **`actionToPrompt` error message.** Throwing `"Unknown action: <id>"` for chat-kind actions was misleading — the action IS known, it just has no system prompt. The message now names the kind: `"Action '<id>' is a chat-kind action and has no system prompt"`.
+- **Discard button color.** The Discard button used the chat panel's red `BUSY_BG`, which semantically reads as "generation in progress" instead of "dismiss the preview." It's now neutral grey.
+
+### Hardening
+
+- **`loadHeavy` config-mismatch warning.** The cache silently won the first config and ignored later mismatches. A wiring bug between `initSession` and `runTransform` (passing different `transformersConfig` references) now surfaces a single `console.warn` naming the symptom.
+
 ### Known Limitations
 
 - Translation languages hardcoded EN / ES / FR (configurable in v0.3).

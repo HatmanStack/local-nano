@@ -1,5 +1,4 @@
 import { makeTypingIndicator } from './messages.js';
-import { BUSY_BG } from './state.js';
 
 /**
  * State machine for the Preview component:
@@ -52,6 +51,10 @@ export interface PreviewCallbacks {
 
 const APPLY_BG_ENABLED = '#1f8a3a';
 const APPLY_BG_DISABLED = '#555';
+// Neutral dark grey for Discard. Deliberately not reusing BUSY_BG
+// (the red used by the chat Stop button) to avoid implying generation
+// is in progress when the user is just dismissing the Preview.
+const DISCARD_BG = '#555';
 
 export function makePreview(callbacks: PreviewCallbacks, doc: Document = document): PreviewHandle {
   let state: PreviewState = 'pending';
@@ -105,7 +108,7 @@ export function makePreview(callbacks: PreviewCallbacks, doc: Document = documen
   discardBtn.dataset.action = 'discard';
   discardBtn.textContent = 'Discard';
   discardBtn.style.cssText = `
-    background: ${BUSY_BG}; color: #fff; border: none;
+    background: ${DISCARD_BG}; color: #fff; border: none;
     border-radius: 4px; padding: 6px 12px; cursor: pointer;
     font: inherit; font-weight: 600;
   `;
