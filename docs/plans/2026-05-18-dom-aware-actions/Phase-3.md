@@ -22,9 +22,13 @@ behavior. The chat session is untouched; transforms run through
   three DOM branches.
 - `src/ui/preview.ts` exports a Preview component with Apply / Discard
   state machine.
-- `src/session.ts` exposes a small surface (`requestPreviewSlot`,
-  `prefillAndSend`, `setPanelVisible`) so `dom-actions.ts` can drive the
-  panel without owning its DOM.
+- `src/session.ts` exposes a small `SessionHandle` surface (`openPanel`,
+  `closePanel`, `isPanelOpen`, `prefillAndSend`, `mountPreview`) so
+  `dom-actions.ts` can drive the panel without owning its DOM.
+  `prefillAndSend(text, true)` is readiness-aware: it awaits any
+  in-flight `LanguageModel.create` before invoking the send path so the
+  autoSend isn't silently dropped when a context-menu action fires
+  before the model has finished loading.
 - `content.ts` is updated to call `initDomActions(deps)` after
   `initSession(deps)`.
 - New test files for each new module; existing 53 tests still pass.
@@ -987,7 +991,7 @@ the manual smoke test on a real Chrome install.
      with a selection — confirm same behavior as
      `Rewrite ▸ Improve writing` from the menu.
   1. Press `Ctrl+Shift+U` (`translate_selection`) on any selection —
-     confirm same behavior as `Translate to English` from the menu.
+     confirm same behavior as `To English` from the menu.
   1. Verify no errors in the service-worker console.
   1. Verify no errors in the page DevTools console.
 
