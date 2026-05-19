@@ -136,8 +136,7 @@ export function initSession(deps: SessionDeps): SessionHandle {
             mon.addEventListener('downloadprogress', (e) => {
               const ev = e as Event & { loaded: number };
               const v = ev.loaded;
-              const label =
-                v <= 1 ? `${Math.round(v * 100)}%` : `${(v / 1_000_000).toFixed(1)} MB`;
+              const label = v <= 1 ? `${Math.round(v * 100)}%` : `${(v / 1_000_000).toFixed(1)} MB`;
               status.textContent = `Loading model… ${label}`;
             });
           },

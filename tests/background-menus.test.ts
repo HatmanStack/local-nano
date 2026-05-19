@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, type vi } from 'vitest';
 import { onMenuClicked, registerMenus } from '../src/background/menus.js';
 import { ACTION_DESCRIPTORS } from '../src/transform-prompts.js';
 import { chromeMock } from './setup.js';

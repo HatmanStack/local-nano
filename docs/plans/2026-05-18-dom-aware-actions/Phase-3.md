@@ -964,7 +964,7 @@ the manual smoke test on a real Chrome install.
   1. Select more text; right-click; confirm
      `Translate / Simplify / Summarize in place ▸` submenu shows three
      translate options + Simplify + Summarize. Click
-     `Translate to Spanish`. Confirm the Preview component appears with
+     `To Spanish`. Confirm the Preview component appears with
      the original on top and a streaming Spanish translation below.
      Click Apply. Confirm the selection on the page is replaced with the
      Spanish text.
@@ -1034,7 +1034,7 @@ npm run lint:ci && npm run typecheck && npm run coverage && npm run build
 All four must exit 0. Additionally:
 
 - Test counts:
-  - `tests/dom-actions.test.ts` >= 19 tests
+  - `tests/dom-actions.test.ts` >= 22 tests (7 capture + 15 dispatch)
   - `tests/dom-apply.test.ts` >= 8 tests
   - `tests/ui-preview.test.ts` >= 14 tests
   - `tests/session.test.ts` >= 31 tests (24 existing + 7 new for the

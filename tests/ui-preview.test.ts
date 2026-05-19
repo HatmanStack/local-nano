@@ -197,16 +197,12 @@ describe('makePreview — applyFailed', () => {
     // Drive to a state where Apply is enabled.
     handle.appendChunk('rewritten text');
     handle.complete();
-    const applyBtn = handle.root.querySelector(
-      'button[data-action="apply"]',
-    ) as HTMLButtonElement;
+    const applyBtn = handle.root.querySelector('button[data-action="apply"]') as HTMLButtonElement;
     expect(applyBtn.disabled).toBe(false);
 
     handle.applyFailed('Could not apply — the selection on the page is no longer available.');
 
-    const status = handle.root.querySelector(
-      '[data-role="apply-status"]',
-    ) as HTMLElement;
+    const status = handle.root.querySelector('[data-role="apply-status"]') as HTMLElement;
     expect(status.textContent).toContain('Could not apply');
     expect(applyBtn.disabled).toBe(true);
   });

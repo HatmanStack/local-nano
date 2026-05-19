@@ -22,8 +22,8 @@ vi.mock('../src/dom-apply.js', () => ({
   applyToTarget: vi.fn(),
 }));
 
-import * as transformMod from '../src/transform.js';
 import * as applyMod from '../src/dom-apply.js';
+import * as transformMod from '../src/transform.js';
 
 const mockRunTransform = transformMod.runTransform as ReturnType<typeof vi.fn>;
 const mockApplyToTarget = applyMod.applyToTarget as ReturnType<typeof vi.fn>;

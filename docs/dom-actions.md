@@ -10,10 +10,11 @@ this feature changes the network story.
 
 ## Menu structure
 
-The right-click menu surfaces one or two entries depending on the
-context (text selection, editable field, or anywhere on the page). The
-labels below match what Chrome renders verbatim — they come from the
-canonical id-to-label table in `src/transform-prompts.ts`.
+The right-click menu surfaces one or more top-level entries (and one
+or two submenu groups) depending on the context — text selection,
+editable field, or anywhere on the page. The labels below match what
+Chrome renders verbatim; they come from the canonical id-to-label
+table in `src/transform-prompts.ts`.
 
 ```text
 | Menu item                                                         | Context                     | Behavior                                                                       |
