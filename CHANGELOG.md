@@ -5,6 +5,73 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-18
+
+Reverts the entire v0.2.0 DOM-aware-actions release. The feature was too ambitious for the in-browser GPU memory budget: spinning up a second `LanguageModel` session for every right-click action on top of the long-lived chat session pushed WebGPU into `VK_ERROR_OUT_OF_DEVICE_MEMORY` cascades during normal use. The tree is reset to the v0.1.1 baseline (chat-only, one model session per tab).
+
+The rewrite-selection capability is on the roadmap and will return in a future iteration designed against the memory budget — likely by reusing the chat session for transforms rather than allocating a parallel one, and by capping `max_new_tokens` per-call.
+
+### Removed
+
+- All v0.2.0 surface area: `chrome.contextMenus` registration, `ask_about_selection` / `rewrite_selection` / `translate_selection` keyboard commands, `runTransform` ephemeral sessions, the Preview component, the dom-apply layer, the selection-capture layer, and `docs/dom-actions.md`.
+- `src/transform-prompts.ts`, `src/transform.ts`, `src/dom-actions.ts`, `src/dom-apply.ts`, `src/ui/preview.ts`, `src/background/menus.ts`, and `src/heavy.ts` (the heavy-loader factored out for v0.2; the lazy import moves back inline into `src/session.ts`).
+- `SessionHandle` surface on `initSession` — the chat-only build doesn't need `openPanel` / `prefillAndSend` / `mountPreview`.
+
+### Notes
+
+- The v0.2.0 GitHub release and tag remain published. Anyone who pinned v0.2.0 still has it; this release just rolls `main` back to a stable baseline.
+- `package.json` version bumped 0.1.1 → 0.2.1 to match the changelog; semver-wise this is a backwards-incompatible removal under a 0.x version, which is the intended signal.
+
+## [0.2.0] - 2026-05-18
+
+First feature release. v0.1.x was a chat panel that opened on a hotkey and read the page body as a single excerpt. v0.2 makes the extension DOM-aware: right-click on a selection (or hit a hotkey) to ask, rewrite, or transform that selection in place. All inference still runs on-device.
+
+> **Reverted in [0.2.1]** — GPU memory pressure from double-loading the model made this release unstable in practice. See the 0.2.1 notes for the path forward.
+
+### Added
+
+- **Right-click menu.** `chrome.contextMenus` integration registered from the background service worker. Menu inventory: `Ask local-nano about this`, `Summarize this page`, `Rewrite ▸ {Improve writing, Make shorter, Make formal, Fix grammar}`, and `Translate / Simplify / Summarize in place ▸ {To English, To Spanish, To French, Simplify, Summarize}`.
+- **Hotkeys.** Three new commands (`ask_about_selection`, `rewrite_selection`, `translate_selection`) bring the manifest to its 4-command Chrome cap. Default chords are `Ctrl+Shift+{L, I, U}` (`Cmd+Shift+{L, I, U}` on Mac).
+- **Preview-then-apply UX.** Write-side actions stream into a stacked Preview component (original on top, model output below) with Apply / Discard buttons. Escape triggers Discard. Apply replaces the captured `Range` / input selection in the page DOM.
+- **Per-action ephemeral sessions.** `runTransform` creates a fresh `LanguageModel` session per action with a task-specific system prompt; the chat session is untouched. Transforms do not write to chat history. Heavy modules (Transformers.js + polyfill) share a module-level cache in the new `src/heavy.ts`.
+- **Selection snapshot layer.** `src/dom-actions.ts` snapshots the selection at `contextmenu` / `keydown` time via `Range.cloneRange()` or `<input>` / `<textarea>` offsets, so the selection survives the user clicking the panel.
+- **DOM apply layer.** `src/dom-apply.ts` covers three branches: `setRangeText` for `<input>` / `<textarea>` (plus a synthetic `input` event so React/Vue see the change), `execCommand('insertText')` for contenteditable (preserving native undo, with a `Range`-mutation fallback), and `deleteContents` + `insertNode(createTextNode)` for read-only prose. No `innerHTML` anywhere in the apply path.
+- **Docs.** New `docs/dom-actions.md` describing the menu inventory, hotkeys, preview-then-apply UX, privacy invariant, and contributor guide for adding a new action. Privacy doc and architecture doc updated to reflect v0.2.
+- **Tests.** `tests/transform-prompts.test.ts`, `tests/transform.test.ts`, `tests/background-menus.test.ts`, `tests/dom-actions.test.ts`, `tests/dom-apply.test.ts`, `tests/ui-preview.test.ts` add coverage for every new `src/` module.
+
+### Changed
+
+- `initSession` now returns a `SessionHandle` (`openPanel`, `closePanel`, `isPanelOpen`, `prefillAndSend`, `mountPreview`) so the new dispatch layer can drive the panel without owning its DOM. The existing 24 session tests still pass unchanged.
+- `src/heavy.ts` factored out of `src/session.ts`. The heavy-module promise is now module-scoped so both the long-lived chat session and the per-action transform sessions share it.
+- `manifest.json`: `permissions` += `contextMenus`; `commands` expanded to the 4-command cap.
+- `tests/setup.ts`: extended with `contextMenus`, `runtime.onInstalled`, and `runtime.onStartup` mocks.
+
+### Privacy
+
+- Selection text and chat input are still on-device only. The new `contextMenus` permission is a Chrome UI API and grants no network access. See `docs/privacy.md` for the updated permissions table.
+
+### Fixed
+
+- **Preview apply-failure surface.** When the page-DOM target was removed between the right-click snapshot and Apply, `applyToTarget` returned `false` but the Preview tore down as if it had succeeded. The new `Preview.applyFailed(message)` keeps the preview open with an inline error and a locked Apply so the user has to Discard explicitly.
+- **prefillAndSend readiness race.** `prefillAndSend(text, true)` triggered from a context-menu action before the model had loaded would silently drop the autoSend (because `send()` early-returns when `session` is null). The internal `creating: boolean` is now an awaitable `createInFlight: Promise<void>`, and `prefillAndSend` chains the send onto it.
+- **Preview Escape key.** The Preview registered a keydown listener on its root with `tabIndex=-1`, but the root was never focused on mount — so Escape was a no-op until the user clicked into the preview. `dispatchAction` now calls `preview.root.focus()` after `mountPreview`.
+- **chrome.runtime.lastError on context-menu clicks.** Right-clicks on chrome:// pages, extension pages, or any tab where the content script wasn't injected would surface "Could not establish connection. Receiving end does not exist." in the service worker console. `chrome.tabs.sendMessage` now passes a no-op callback that consumes `lastError`.
+- **`ACTION_DESCRIPTORS` deep freeze.** `Object.freeze` was applied only to the outer array, leaving individual descriptors mutable at runtime. Each descriptor is now frozen too, so accidentally overwriting `systemPrompt` in a caller becomes a TypeError under strict mode instead of silently corrupting later transforms.
+- **`actionToPrompt` error message.** Throwing `"Unknown action: <id>"` for chat-kind actions was misleading — the action IS known, it just has no system prompt. The message now names the kind: `"Action '<id>' is a chat-kind action and has no system prompt"`.
+- **Discard button color.** The Discard button used the chat panel's red `BUSY_BG`, which semantically reads as "generation in progress" instead of "dismiss the preview." It's now neutral grey.
+
+### Hardening
+
+- **`loadHeavy` config-mismatch warning.** The cache silently won the first config and ignored later mismatches. A wiring bug between `initSession` and `runTransform` (passing different `transformersConfig` references) now surfaces a single `console.warn` naming the symptom.
+
+### Known Limitations
+
+- Translation languages hardcoded EN / ES / FR (configurable in v0.3).
+- Selections in cross-origin iframes are not supported (top frame only).
+- DOM mutations between the right-click snapshot and Apply may make the captured `Range` point to changed content; re-anchoring deferred.
+- `contenteditable` widgets that intercept native events may behave unexpectedly during Apply; framework-specific guarantees are not in scope.
+- Only one transform may stream at a time; a new transform aborts the in-flight one.
+
 ## [0.1.1] - 2026-05-18
 
 Patch release covering the first round of post-publication audit remediation and PR review fixes. No new user-facing features; the focus is correctness, hardening, and contributor-experience tooling.
