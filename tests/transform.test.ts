@@ -182,7 +182,7 @@ describe('runTransform', () => {
         sourceText: 'hello',
         transformersConfig: TRANSFORMERS_CONFIG,
       }),
-    ).rejects.toThrow(/Unknown action/);
+    ).rejects.toThrow(/no system prompt/);
     expect(mockLanguageModelCreate).not.toHaveBeenCalled();
   });
 
@@ -247,6 +247,26 @@ describe('runTransform', () => {
     const aResolved = await a;
     const bResolved = await b;
     expect(aResolved).toBe(bResolved);
+  });
+
+  it('loadHeavy warns on a transformersConfig mismatch and reuses the first one', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const first = await loadHeavy(TRANSFORMERS_CONFIG);
+    // Different reference, same shape — should warn but reuse the cache.
+    const differentConfig = { ...(TRANSFORMERS_CONFIG as Record<string, unknown>) };
+    const second = await loadHeavy(differentConfig);
+    expect(second).toBe(first);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/different transformersConfig/);
+    warn.mockRestore();
+  });
+
+  it('loadHeavy does not warn when called with the same config reference', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await loadHeavy(TRANSFORMERS_CONFIG);
+    await loadHeavy(TRANSFORMERS_CONFIG);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it('creates a fresh ephemeral session per runTransform call (heavy modules still memoized)', async () => {

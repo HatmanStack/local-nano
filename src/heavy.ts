@@ -26,6 +26,13 @@ interface OnnxWasmEnv {
 // failure the cache is cleared so the next call retries from scratch.
 let heavyLoadPromise: Promise<LoadedHeavy> | null = null;
 
+// The transformersConfig that was stamped onto window.TRANSFORMERS_CONFIG
+// by the first loadHeavy call. Stored so subsequent calls with a
+// different reference can be flagged — both initSession and runTransform
+// must agree on the config, and a mismatch is a wiring bug, not a
+// recoverable runtime condition.
+let cachedTransformersConfig: unknown = null;
+
 /**
  * Lazily load the heavy on-device-model modules and return the polyfill
  * binding. Shared across `initSession` (chat session) and `runTransform`
@@ -35,9 +42,21 @@ let heavyLoadPromise: Promise<LoadedHeavy> | null = null;
  * The promise is memoized at module scope. Pass the same
  * `transformersConfig` value the rest of the extension uses; it is
  * stamped onto `window.TRANSFORMERS_CONFIG` for the polyfill to read.
+ * Subsequent calls with a different `transformersConfig` reference log
+ * a warning — the first config wins and is reused.
  */
 export function loadHeavy(transformersConfig: unknown): Promise<LoadedHeavy> {
-  if (heavyLoadPromise) return heavyLoadPromise;
+  if (heavyLoadPromise) {
+    if (cachedTransformersConfig !== transformersConfig) {
+      console.warn(
+        '[local-nano] loadHeavy called with a different transformersConfig; ' +
+          'reusing the first one. This indicates a wiring bug between callers ' +
+          '(initSession and runTransform must share the same config object).',
+      );
+    }
+    return heavyLoadPromise;
+  }
+  cachedTransformersConfig = transformersConfig;
   heavyLoadPromise = (async () => {
     try {
       const [tfMod, polyfillMod] = await Promise.all([
@@ -72,4 +91,5 @@ export function loadHeavy(transformersConfig: unknown): Promise<LoadedHeavy> {
  */
 export function resetHeavyCache(): void {
   heavyLoadPromise = null;
+  cachedTransformersConfig = null;
 }
