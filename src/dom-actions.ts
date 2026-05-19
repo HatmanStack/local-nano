@@ -203,6 +203,11 @@ export function initDomActions(deps: DomActionsDeps): void {
     );
     preview.setOriginal(snapshot.text);
     const teardown = session.mountPreview(preview.root);
+    // Focus the preview root so the Escape keydown listener registered
+    // inside makePreview actually fires. Without this, focus stays on
+    // the chat input and Escape is a no-op until the user clicks the
+    // preview first.
+    preview.root.focus();
     activePreviewTeardown = () => {
       teardown();
       preview.destroy();

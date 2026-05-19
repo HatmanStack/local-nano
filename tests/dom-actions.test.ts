@@ -561,6 +561,34 @@ describe('initDomActions — dispatch', () => {
     expect(applyBtn.disabled).toBe(true);
   });
 
+  it('focuses the preview root on mount so Escape keydown reaches the listener', async () => {
+    // Element.focus() only takes effect on elements attached to a
+    // document — override the mountPreview mock to insert the preview
+    // root into the body the way real session.ts does.
+    session.mountPreview.mockImplementation((el: HTMLElement) => {
+      document.body.appendChild(el);
+      const teardown = vi.fn();
+      session.lastTeardown = teardown;
+      return teardown;
+    });
+    mockRunTransform.mockResolvedValue({
+      stream: new ReadableStream<string>({
+        start() {
+          /* never closes */
+        },
+      }),
+      done: Promise.resolve(),
+    });
+    initDomActions(deps);
+    const { snap } = makeRangeSnapshot('xx', null);
+    primeSnapshot(snap);
+    const listener = getMessageListener();
+    listener({ a: 'action', id: 'translate_en' });
+    await new Promise((r) => setTimeout(r, 5));
+    const previewRoot = session.mountPreview.mock.calls[0][0] as HTMLElement;
+    expect(document.activeElement).toBe(previewRoot);
+  });
+
   it('Preview onDiscard tears down the preview', async () => {
     mockRunTransform.mockResolvedValue({
       stream: new ReadableStream<string>({
