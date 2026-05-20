@@ -431,13 +431,13 @@ function undoRewrite(snap: SelectionSnapshot): { ok: boolean; reason?: string }
 
 **Verification Checklist:**
 
-- [ ] No import of `vendor/prompt-api-polyfill`.
-- [ ] No call to `LanguageModel.create()`.
-- [ ] All five constants exported.
-- [ ] `isSupportedSelection` rejects `<input>`, `<textarea>`, and
+- [x] No import of `vendor/prompt-api-polyfill`.
+- [x] No call to `LanguageModel.create()`.
+- [x] All five constants exported.
+- [x] `isSupportedSelection` rejects `<input>`, `<textarea>`, and
       `contenteditable` ancestors.
-- [ ] Prompt builders return strings; no side effects.
-- [ ] `streamRewriteIntoRange.applyChunk` is idempotent for first-chunk
+- [x] Prompt builders return strings; no side effects.
+- [x] `streamRewriteIntoRange.applyChunk` is idempotent for first-chunk
       detection (calling it multiple times with empty strings does not
       delete the range twice).
 
