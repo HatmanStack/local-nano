@@ -7,8 +7,17 @@ import {
   saveHistory as saveHistoryToStorage,
   storageKey,
 } from './history.js';
-import { rebuildSession, streamPrompt } from './offscreen/client.js';
+import { countTokens, rebuildSession, streamPrompt } from './offscreen/client.js';
 import { pageContext } from './pageContext.js';
+import {
+  buildAskPrompt,
+  buildRewritePrompt,
+  MAX_OUTPUT_MULTIPLIER,
+  MIN_OUTPUT_TOKENS,
+  type SelectionSnapshot,
+  streamRewriteIntoRange,
+  undoRewrite,
+} from './selection-rewrite.js';
 import { makeTypingIndicator, renderMessage } from './ui/messages.js';
 import { setGeneratingState, setIdleState } from './ui/state.js';
 
@@ -27,6 +36,11 @@ function isDeviceLossError(err: unknown): boolean {
   return message.includes('WebGPU device loss') || message.includes('Model returned no output');
 }
 
+const PLACEHOLDER_CHAT = 'Ask anything about this page (Enter)';
+const PLACEHOLDER_EDIT = 'Edit selection… (Esc to switch to Ask)';
+const PLACEHOLDER_ASK = 'Ask about selection… (Esc to switch back to Edit)';
+const CHIP_MAX_CHARS = 60;
+
 /**
  * DOM elements and values that content.ts provides at injection time.
  * session.ts does not touch document directly.
@@ -36,12 +50,34 @@ export interface SessionDeps {
   messages: HTMLElement;
   input: HTMLInputElement;
   actionBtn: HTMLButtonElement;
+  /**
+   * Compact chip element above the input showing a preview of the
+   * current selection. Owned by content.ts; the session manages content
+   * and visibility.
+   */
+  selectionChip: HTMLElement;
+  /**
+   * Register a callback for selection-change events. content.ts wires
+   * `document.addEventListener('selectionchange', …)` and forwards
+   * `decideSnapshot(...)` results here. Snapshot may be null when no
+   * supported selection exists.
+   */
+  onSelectionChange: (cb: (snap: SelectionSnapshot | null) => void) => void;
   location: Pick<Location, 'origin' | 'pathname' | 'href'>;
   document: Pick<Document, 'title'> & { body: { innerText: string } };
 }
 
 export function initSession(deps: SessionDeps): void {
-  const { root, messages, input: i, actionBtn, location, document } = deps;
+  const {
+    root,
+    messages,
+    input: i,
+    actionBtn,
+    selectionChip,
+    onSelectionChange,
+    location,
+    document,
+  } = deps;
   const STORAGE_KEY = storageKey(location);
 
   // ---- History ----
@@ -78,6 +114,39 @@ export function initSession(deps: SessionDeps): void {
     return el;
   }
 
+  // ---- Selection state ----
+  let currentSelection: SelectionSnapshot | null = null;
+  let askMode = false;
+
+  function updatePlaceholder(): void {
+    if (!currentSelection) {
+      i.placeholder = PLACEHOLDER_CHAT;
+      return;
+    }
+    i.placeholder = askMode ? PLACEHOLDER_ASK : PLACEHOLDER_EDIT;
+  }
+
+  function updateChip(): void {
+    if (!currentSelection) {
+      selectionChip.style.display = 'none';
+      selectionChip.textContent = '';
+      return;
+    }
+    const preview =
+      currentSelection.text.length > CHIP_MAX_CHARS
+        ? `${currentSelection.text.slice(0, CHIP_MAX_CHARS)}…`
+        : currentSelection.text;
+    selectionChip.textContent = preview;
+    selectionChip.style.display = 'block';
+  }
+
+  onSelectionChange((snap) => {
+    currentSelection = snap;
+    if (!snap) askMode = false;
+    updatePlaceholder();
+    updateChip();
+  });
+
   // ---- Send / Stop ----
   // NOTE(isFirstTurn): This flag isn't reset after restore() re-renders
   // prior history. The restored messages are displayed in the UI but the
@@ -88,16 +157,28 @@ export function initSession(deps: SessionDeps): void {
   let isFirstTurn = true;
   let activeAbort: AbortController | null = null;
 
-  async function send() {
-    if (!i.value.trim() || activeAbort) return;
-    const text = i.value.trim();
-    i.value = '';
+  function attachUndoButton(modelBubble: HTMLElement, snap: SelectionSnapshot): void {
+    const btn = window.document.createElement('button');
+    btn.textContent = 'Undo';
+    btn.style.cssText =
+      'margin-top: 4px; padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
+    btn.addEventListener('click', () => {
+      const result = undoRewrite(snap);
+      btn.disabled = true;
+      if (result.ok) {
+        btn.textContent = 'Undone';
+        console.log('[local-nano] undo: restored original selection');
+      } else {
+        btn.textContent = 'Undo failed';
+        console.warn(`[local-nano] undo failed: ${result.reason ?? 'unknown'}`);
+      }
+    });
+    modelBubble.appendChild(window.document.createElement('br'));
+    modelBubble.appendChild(btn);
+  }
+
+  async function sendChat(text: string): Promise<void> {
     addMessage('user', text);
-    // First-turn UX hint. The model upload to WebGPU runs in the offscreen
-    // doc and the user has no other signal that something is happening for
-    // the 30-90s that takes. Hint is a transient system message — not
-    // persisted — that's removed when the first chunk arrives, or replaced
-    // if generation fails.
     const wasFirstTurn = isFirstTurn;
     const firstTurnHint = wasFirstTurn
       ? addMessage('system', 'Loading model… first response can take up to a minute.')
@@ -111,10 +192,6 @@ export function initSession(deps: SessionDeps): void {
     activeAbort = new AbortController();
     setGeneratingState(actionBtn, i);
 
-    // Accumulate inside onChunk so abort/error paths still see the partial
-    // text the user just watched stream in. The resolved value from
-    // streamPrompt would be identical on the happy path, but we don't
-    // rely on it.
     let modelText = '';
     let firstChunk = true;
     let rebuildHint: HTMLElement | null = null;
@@ -122,8 +199,6 @@ export function initSession(deps: SessionDeps): void {
     const onChunk = (chunk: string) => {
       if (firstChunk) {
         console.log(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
-        // Drop the "Loading model…" / "GPU recovering…" hints now that
-        // tokens are flowing.
         if (firstTurnHint?.parentNode) firstTurnHint.remove();
         if (rebuildHint?.parentNode) rebuildHint.remove();
         responseEl.textContent = '';
@@ -138,25 +213,14 @@ export function initSession(deps: SessionDeps): void {
         await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
       } catch (err) {
         if (!isDeviceLossError(err) || activeAbort.signal.aborted) throw err;
-        // The offscreen polyfill lost its WebGPU device (typically after a
-        // tab/window switch) and surfaced our explicit "no output" error.
-        // Re-seed a fresh session with the persisted conversation so the
-        // model wakes up knowing what was said, then retry the user's
-        // current prompt once. The just-added user turn is sliced off the
-        // reseed history — the polyfill will record it itself when we
-        // re-send below. Page-context prefix is dropped on retry: it was
-        // a first-turn UX nicety and never made it into our stored
-        // history, so re-sending it would be incoherent with the reseeded
-        // polyfill view.
-        rebuildHint = addMessage(
-          'system',
-          'GPU device lost — restoring session and retrying…',
-        );
+        rebuildHint = addMessage('system', 'GPU device lost — restoring session and retrying…');
         modelText = '';
         firstChunk = true;
         const historyForReseed = history
           .slice(0, -1)
-          .filter((entry): entry is { role: 'user' | 'model'; text: string } => entry.role !== 'system');
+          .filter(
+            (entry): entry is { role: 'user' | 'model'; text: string } => entry.role !== 'system',
+          );
         await rebuildSession(historyForReseed);
         await streamPrompt(text, { signal: activeAbort.signal, onChunk });
       }
@@ -164,8 +228,6 @@ export function initSession(deps: SessionDeps): void {
         `[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms, chars=${modelText.length}, prompt.length=${prompt.length}`,
       );
     } catch (err: unknown) {
-      // DOMException isn't always `instanceof Error` in non-browser
-      // environments (e.g. jsdom), so check the name field directly.
       const name = (err as { name?: unknown })?.name;
       if (name === 'AbortError') {
         modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
@@ -175,19 +237,9 @@ export function initSession(deps: SessionDeps): void {
         responseEl.textContent = modelText;
       }
     } finally {
-      // Drop the typing indicator unconditionally. The in-loop reset only
-      // runs when at least one chunk arrives; a stream that closes with
-      // zero chunks would otherwise leave the bouncing dots in place.
       if (indicator.parentNode) indicator.remove();
-      // Drop the first-turn / rebuild hints if either is still attached
-      // (they survive if no chunk ever arrived — abort or error before
-      // generation started).
       if (firstTurnHint?.parentNode) firstTurnHint.remove();
       if (rebuildHint?.parentNode) rebuildHint.remove();
-      // A stream that completed successfully with zero chunks means the
-      // model emitted EOS immediately. Surface it as an explicit message
-      // rather than leaving an empty bubble that looks like the panel is
-      // broken.
       if (!modelText) {
         responseEl.textContent = '(no response — the model returned an empty answer)';
       }
@@ -201,6 +253,155 @@ export function initSession(deps: SessionDeps): void {
     }
   }
 
+  async function sendAsk(instruction: string, snap: SelectionSnapshot): Promise<void> {
+    addMessage('user', instruction);
+    const responseEl = renderMessage(messages, 'model', '');
+    const indicator = makeTypingIndicator();
+    responseEl.appendChild(indicator);
+    const prompt = buildAskPrompt(snap, instruction);
+
+    activeAbort = new AbortController();
+    setGeneratingState(actionBtn, i);
+
+    let modelText = '';
+    let firstChunk = true;
+    const onChunk = (chunk: string) => {
+      if (firstChunk) {
+        responseEl.textContent = '';
+        firstChunk = false;
+      }
+      modelText += chunk;
+      responseEl.textContent = modelText;
+      messages.scrollTop = messages.scrollHeight;
+    };
+    try {
+      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+    } catch (err: unknown) {
+      const name = (err as { name?: unknown })?.name;
+      if (name === 'AbortError') {
+        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
+        responseEl.textContent = modelText;
+      } else {
+        modelText = err instanceof Error ? err.message : String(err);
+        responseEl.textContent = modelText;
+      }
+    } finally {
+      if (indicator.parentNode) indicator.remove();
+      if (!modelText) {
+        responseEl.textContent = '(no response — the model returned an empty answer)';
+      }
+      if (modelText) {
+        pushEntry({ role: 'model', text: modelText });
+        persist();
+      }
+      setIdleState(actionBtn, i);
+      activeAbort = null;
+      // Ask mode is one-shot; reset to Edit for the next turn if the
+      // selection is still active.
+      askMode = false;
+      updatePlaceholder();
+      i.focus();
+    }
+  }
+
+  async function sendRewrite(instruction: string, snap: SelectionSnapshot): Promise<void> {
+    // Compute the soft cap from the *content* payload, not the framed
+    // prompt — the framed prompt embeds the cap number, so counting that
+    // would be chicken-and-egg. The framing is short and constant; the
+    // delta is well inside the soft cap's margin.
+    const payload = `${snap.before}\n${snap.text}\n${snap.after}\n${instruction}`;
+    const inputTokens = await countTokens(payload);
+    const softCap = Math.max(MIN_OUTPUT_TOKENS, inputTokens * MAX_OUTPUT_MULTIPLIER);
+    const prompt = buildRewritePrompt(snap, instruction, softCap);
+
+    addMessage('user', instruction);
+    const responseEl = renderMessage(messages, 'model', '');
+    const indicator = makeTypingIndicator();
+    responseEl.appendChild(indicator);
+
+    activeAbort = new AbortController();
+    setGeneratingState(actionBtn, i);
+
+    const rewrite = streamRewriteIntoRange(snap);
+    let modelText = '';
+    let firstChunk = true;
+    let succeeded = false;
+    const onChunk = (chunk: string) => {
+      if (firstChunk) {
+        responseEl.textContent = '';
+        firstChunk = false;
+      }
+      rewrite.applyChunk(chunk);
+      modelText += chunk;
+      responseEl.textContent = modelText;
+      messages.scrollTop = messages.scrollHeight;
+    };
+    try {
+      try {
+        await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+      } catch (err) {
+        if (!isDeviceLossError(err) || activeAbort.signal.aborted) throw err;
+        modelText = '';
+        firstChunk = true;
+        const historyForReseed = history
+          .slice(0, -1)
+          .filter(
+            (entry): entry is { role: 'user' | 'model'; text: string } => entry.role !== 'system',
+          );
+        await rebuildSession(historyForReseed);
+        await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+      }
+      succeeded = modelText.length > 0;
+    } catch (err: unknown) {
+      const name = (err as { name?: unknown })?.name;
+      if (name === 'AbortError') {
+        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
+        responseEl.textContent = modelText;
+      } else {
+        modelText = err instanceof Error ? err.message : String(err);
+        responseEl.textContent = modelText;
+      }
+    } finally {
+      if (indicator.parentNode) indicator.remove();
+      if (!modelText) {
+        responseEl.textContent = '(no response — the model returned an empty answer)';
+      }
+      if (modelText) {
+        pushEntry({ role: 'model', text: modelText });
+        persist();
+      }
+      if (succeeded) {
+        rewrite.finalize();
+        attachUndoButton(responseEl, snap);
+      }
+      setIdleState(actionBtn, i);
+      activeAbort = null;
+      i.focus();
+    }
+  }
+
+  async function send() {
+    if (!i.value.trim() || activeAbort) return;
+    const text = i.value.trim();
+    i.value = '';
+    const snap = currentSelection;
+    if (snap && askMode) {
+      // Snapshot reference is fine — ask mode does not mutate the DOM.
+      await sendAsk(text, snap);
+      return;
+    }
+    if (snap) {
+      // Detach the snapshot from session state so a later selectionchange
+      // does not clobber the in-flight rewrite's anchor.
+      currentSelection = null;
+      updatePlaceholder();
+      updateChip();
+      await sendRewrite(text, snap);
+      return;
+    }
+    await sendChat(text);
+  }
+
   // ---- Event wiring ----
   actionBtn.addEventListener('click', () => {
     if (activeAbort) {
@@ -211,6 +412,12 @@ export function initSession(deps: SessionDeps): void {
   });
 
   i.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && currentSelection) {
+      e.preventDefault();
+      askMode = !askMode;
+      updatePlaceholder();
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       void send();

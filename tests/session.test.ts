@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TOGGLE_MESSAGE } from '../src/background/handler.js';
 import { MAX_HISTORY } from '../src/history.js';
+import type { SelectionSnapshot } from '../src/selection-rewrite.js';
 import { initSession, type SessionDeps } from '../src/session.js';
 import { chromeMock } from './setup.js';
 
@@ -32,39 +33,58 @@ vi.mock('../src/offscreen/client.js', () => ({
   }),
   sendPrompt: vi.fn(),
   rebuildSession: vi.fn(() => Promise.resolve()),
+  countTokens: vi.fn(async (text: string) => Math.ceil(text.length / 3)),
 }));
 
 import {
+  countTokens as mockedCountTokens,
   rebuildSession as mockedRebuildSession,
   streamPrompt as mockedStreamPrompt,
 } from '../src/offscreen/client.js';
 
 const streamPromptMock = mockedStreamPrompt as unknown as ReturnType<typeof vi.fn>;
 const rebuildSessionMock = mockedRebuildSession as unknown as ReturnType<typeof vi.fn>;
+const countTokensMock = mockedCountTokens as unknown as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+type SelectionChangeListener = (snap: SelectionSnapshot | null) => void;
 
 function makeDeps(): SessionDeps & {
   _root: HTMLDivElement;
   _messages: HTMLDivElement;
   _input: HTMLInputElement;
   _actionBtn: HTMLButtonElement;
+  _selectionChip: HTMLDivElement;
+  _fireSelectionChange: (snap: SelectionSnapshot | null) => void;
 } {
   const _root = document.createElement('div');
   _root.style.display = 'none';
   const _messages = document.createElement('div');
   const _input = document.createElement('input');
   const _actionBtn = document.createElement('button');
-  _root.append(_messages, _input, _actionBtn);
+  const _selectionChip = document.createElement('div');
+  _selectionChip.style.display = 'none';
+  _root.append(_messages, _input, _actionBtn, _selectionChip);
   document.body.appendChild(_root);
+
+  let captured: SelectionChangeListener | null = null;
+  const onSelectionChange = (cb: SelectionChangeListener) => {
+    captured = cb;
+  };
+  const fireSelectionChange: SelectionChangeListener = (snap) => {
+    if (captured) captured(snap);
+  };
 
   return {
     root: _root,
     messages: _messages,
     input: _input,
     actionBtn: _actionBtn,
+    selectionChip: _selectionChip,
+    onSelectionChange,
     location: {
       origin: 'https://example.com',
       pathname: '/page',
@@ -78,6 +98,8 @@ function makeDeps(): SessionDeps & {
     _messages,
     _input,
     _actionBtn,
+    _selectionChip,
+    _fireSelectionChange: fireSelectionChange,
   };
 }
 
@@ -357,5 +379,319 @@ describe('initSession — streaming', () => {
     // Resolve the first
     first.resolve('done');
     await flushMicrotasks();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Selection mode — placeholder swap, Esc toggle, rewrite, ask, undo, chip
+// ---------------------------------------------------------------------------
+
+function makeFakeSnapshot(args: {
+  text: string;
+  before?: string;
+  after?: string;
+  container?: HTMLElement;
+}): SelectionSnapshot {
+  // Build a real DOM range so streamRewriteIntoRange can mutate it.
+  const host = args.container ?? document.createElement('p');
+  host.textContent = args.text;
+  if (!args.container) document.body.appendChild(host);
+  const textNode = host.firstChild as Text;
+  const range = document.createRange();
+  range.setStart(textNode, 0);
+  range.setEnd(textNode, args.text.length);
+  return {
+    text: args.text,
+    before: args.before ?? '',
+    after: args.after ?? '',
+    range,
+    undoAnchor: {
+      startContainer: range.startContainer,
+      startOffset: range.startOffset,
+      endContainer: range.endContainer,
+      endOffset: range.endOffset,
+      originalText: args.text,
+      insertedNode: null,
+    },
+  };
+}
+
+describe('initSession — selection mode', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    countTokensMock.mockImplementation(async (text: string) => Math.ceil(text.length / 3));
+  });
+
+  it('swaps the placeholder to Edit mode when a snapshot arrives', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const snap = makeFakeSnapshot({ text: 'hello world' });
+    deps._fireSelectionChange(snap);
+    expect(deps._input.placeholder).toContain('Edit selection');
+  });
+
+  it('swaps back to chat default when snapshot becomes null', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    deps._fireSelectionChange(makeFakeSnapshot({ text: 'hi' }));
+    deps._fireSelectionChange(null);
+    expect(deps._input.placeholder).toContain('Ask anything');
+  });
+
+  it('Esc toggles to Ask mode when a selection is present', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    deps._fireSelectionChange(makeFakeSnapshot({ text: 'foo' }));
+    const esc = new KeyboardEvent('keydown', { key: 'Escape' });
+    deps._input.dispatchEvent(esc);
+    expect(deps._input.placeholder).toContain('Ask about selection');
+    deps._input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(deps._input.placeholder).toContain('Edit selection');
+  });
+
+  it('Esc with no selection is a no-op', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const original = deps._input.placeholder;
+    deps._input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(deps._input.placeholder).toBe(original);
+  });
+
+  it('rewrite send: prompt includes selection text, instruction, and soft-cap number', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const snap = makeFakeSnapshot({
+      text: 'the quick brown fox',
+      before: 'before-context',
+      after: 'after-context',
+    });
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'make it crisper';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    expect(call.prompt).toContain('the quick brown fox');
+    expect(call.prompt).toContain('make it crisper');
+    // soft cap = max(256, ceil(payload.length/3) * 2). For our payload,
+    // that's well over 256 so the prompt should contain a numeric token
+    // hint of some kind.
+    expect(call.prompt).toMatch(/\d+ tokens/);
+    call.opts.onChunk?.('CRISPER');
+    call.resolve('CRISPER');
+    await flushMicrotasks();
+  });
+
+  it('rewrite send: chunks land in both the chat bubble and the captured Range', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'original';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'original',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'original',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'rewrite please';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('REW');
+    call.opts.onChunk?.('RITTEN');
+    expect(host.textContent).toBe('REWRITTEN');
+    call.resolve('REWRITTEN');
+    await flushMicrotasks();
+    // The model bubble holds the streamed model text plus an Undo button.
+    // Read the text from the first text node to ignore the button label.
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    const firstTextNode = Array.from(modelBubble.childNodes).find((n) => n.nodeType === 3);
+    expect(firstTextNode?.textContent).toBe('REWRITTEN');
+    expect(modelBubble.querySelector('button')).not.toBeNull();
+  });
+
+  it('rewrite send on success: Undo button appears and restores the original text', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'original';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'original',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'original',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'fix';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('NEW');
+    call.resolve('NEW');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    const undoBtn = modelBubble.querySelector('button');
+    expect(undoBtn).not.toBeNull();
+    expect(host.textContent).toBe('NEW');
+    undoBtn?.click();
+    expect(host.textContent).toBe('original');
+    expect(undoBtn?.textContent).toContain('Undone');
+  });
+
+  it('rewrite send on success persists both turns to chrome.storage.local under the per-URL key', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    const host = document.createElement('p');
+    host.textContent = 'orig';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'orig',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'orig',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'tighten this';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('TIGHT');
+    call.resolve('TIGHT');
+    await flushMicrotasks();
+    const key = `local-nano:history:https://example.com/page`;
+    const stored = chromeMock.storage.local.store[key] as Array<{ role: string; text: string }>;
+    expect(stored).toBeTruthy();
+    expect(stored).toHaveLength(2);
+    expect(stored[0]).toEqual({ role: 'user', text: 'tighten this' });
+    expect(stored[1]).toEqual({ role: 'model', text: 'TIGHT' });
+  });
+
+  it('undo button after container removal changes to Undo failed', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'original';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'original',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'original',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'go';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('NEW');
+    call.resolve('NEW');
+    await flushMicrotasks();
+    // Remove the host paragraph so the snapshot is detached.
+    host.remove();
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    const undoBtn = modelBubble.querySelector('button');
+    undoBtn?.click();
+    expect(undoBtn?.textContent).toContain('Undo failed');
+  });
+
+  it('Ask-mode send: prompt is the ask shape and does not mutate the DOM', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'photosynthesis';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'photosynthesis',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'photosynthesis',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    // Toggle to ask mode.
+    deps._input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    deps._input.value = 'what does this mean?';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    expect(call.prompt).toContain('photosynthesis');
+    expect(call.prompt).toContain('what does this mean?');
+    expect(call.prompt.toLowerCase()).not.toContain('rewrite');
+    call.opts.onChunk?.('A plant process.');
+    call.resolve('A plant process.');
+    await flushMicrotasks();
+    // DOM should NOT have been mutated.
+    expect(host.textContent).toBe('photosynthesis');
+    // After the ask turn completes, mode resets to Edit.
+    expect(deps._input.placeholder).toContain('Edit selection');
+  });
+
+  it('empty snapshot hides the chip; non-null snapshot shows a truncated preview', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    expect(deps._selectionChip.style.display).toBe('none');
+    const longText = 'x'.repeat(120);
+    deps._fireSelectionChange(makeFakeSnapshot({ text: longText }));
+    expect(deps._selectionChip.style.display).not.toBe('none');
+    expect(deps._selectionChip.textContent?.length).toBeLessThanOrEqual(63);
+    deps._fireSelectionChange(null);
+    expect(deps._selectionChip.style.display).toBe('none');
   });
 });
