@@ -659,15 +659,15 @@ prompt through `streamPrompt`, and streams chunks into the DOM via
 
 **Verification Checklist:**
 
-- [ ] Placeholder updates correctly across all three states.
-- [ ] Esc toggles ask mode only when a selection is present.
-- [ ] Rewrite send does not run when `instruction` is empty.
-- [ ] Rewrite send writes both the user instruction and the model output
+- [x] Placeholder updates correctly across all three states.
+- [x] Esc toggles ask mode only when a selection is present.
+- [x] Rewrite send does not run when `instruction` is empty.
+- [x] Rewrite send writes both the user instruction and the model output
       to history (existing path covers this; verify nothing was bypassed).
-- [ ] Undo button appears only on successful rewrites.
-- [ ] Undo button restores original text on click.
-- [ ] No `LanguageModel.create()` calls in the diff (grep check).
-- [ ] None of the removed-at-v0.2.1 filenames reappear (grep check).
+- [x] Undo button appears only on successful rewrites.
+- [x] Undo button restores original text on click.
+- [x] No `LanguageModel.create()` calls in the diff (grep check).
+- [x] None of the removed-at-v0.2.1 filenames reappear (grep check).
 
 **Testing Instructions:**
 
@@ -774,11 +774,11 @@ hand both to `initSession` through the extended `SessionDeps`.
 
 **Verification Checklist:**
 
-- [ ] `selectionchange` listener installed at module load.
-- [ ] Listener body is the single `cb(decideSnapshot(...))` call; the
+- [x] `selectionchange` listener installed at module load.
+- [x] Listener body is the single `cb(decideSnapshot(...))` call; the
       suppression rule is not duplicated here.
-- [ ] Chip is appended above the input wrap.
-- [ ] `npm run build` produces a working `dist/content.js`.
+- [x] Chip is appended above the input wrap.
+- [x] `npm run build` produces a working `dist/content.js`.
 
 **Testing Instructions:**
 
