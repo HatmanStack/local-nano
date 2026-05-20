@@ -89,6 +89,33 @@ export function isRebuildSessionResponse(value: unknown): value is RebuildSessio
   return false;
 }
 
+export const COUNT_TOKENS_REQUEST = 'offscreen/count-tokens-request' as const;
+export const COUNT_TOKENS_RESPONSE = 'offscreen/count-tokens-response' as const;
+
+export interface CountTokensRequest {
+  type: typeof COUNT_TOKENS_REQUEST;
+  text: string;
+}
+
+export type CountTokensResponse =
+  | { type: typeof COUNT_TOKENS_RESPONSE; ok: true; count: number }
+  | { type: typeof COUNT_TOKENS_RESPONSE; ok: false; error: string };
+
+export function isCountTokensRequest(value: unknown): value is CountTokensRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return v.type === COUNT_TOKENS_REQUEST && typeof v.text === 'string';
+}
+
+export function isCountTokensResponse(value: unknown): value is CountTokensResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== COUNT_TOKENS_RESPONSE) return false;
+  if (v.ok === true) return typeof v.count === 'number' && Number.isFinite(v.count);
+  if (v.ok === false) return typeof v.error === 'string';
+  return false;
+}
+
 export const STREAM_PORT_NAME = 'offscreen-stream' as const;
 
 export const STREAM_REQUEST = 'stream/request' as const;

@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  COUNT_TOKENS_REQUEST,
+  COUNT_TOKENS_RESPONSE,
   ENSURE_OFFSCREEN_REQUEST,
   ENSURE_OFFSCREEN_RESPONSE,
+  isCountTokensRequest,
+  isCountTokensResponse,
   isEnsureOffscreenRequest,
   isEnsureOffscreenResponse,
   isRebuildSessionRequest,
@@ -36,6 +40,11 @@ describe('protocol discriminators', () => {
   it('keeps rebuild-session constants stable', () => {
     expect(REBUILD_SESSION_REQUEST).toBe('offscreen/rebuild-session-request');
     expect(REBUILD_SESSION_RESPONSE).toBe('offscreen/rebuild-session-response');
+  });
+
+  it('keeps count-tokens constants stable', () => {
+    expect(COUNT_TOKENS_REQUEST).toBe('offscreen/count-tokens-request');
+    expect(COUNT_TOKENS_RESPONSE).toBe('offscreen/count-tokens-response');
   });
 });
 
@@ -101,13 +110,88 @@ describe('isRebuildSessionResponse', () => {
 
   it('rejects ok:false without error string', () => {
     expect(isRebuildSessionResponse({ type: REBUILD_SESSION_RESPONSE, ok: false })).toBe(false);
-    expect(
-      isRebuildSessionResponse({ type: REBUILD_SESSION_RESPONSE, ok: false, error: 42 }),
-    ).toBe(false);
+    expect(isRebuildSessionResponse({ type: REBUILD_SESSION_RESPONSE, ok: false, error: 42 })).toBe(
+      false,
+    );
   });
 
   it('rejects wrong type', () => {
     expect(isRebuildSessionResponse({ type: 'other', ok: true })).toBe(false);
+  });
+});
+
+describe('isCountTokensRequest', () => {
+  it('accepts a well-formed request', () => {
+    expect(isCountTokensRequest({ type: COUNT_TOKENS_REQUEST, text: 'hello' })).toBe(true);
+    expect(isCountTokensRequest({ type: COUNT_TOKENS_REQUEST, text: '' })).toBe(true);
+  });
+
+  it('rejects null and primitives', () => {
+    expect(isCountTokensRequest(null)).toBe(false);
+    expect(isCountTokensRequest(undefined)).toBe(false);
+    expect(isCountTokensRequest('foo')).toBe(false);
+  });
+
+  it('rejects wrong discriminator', () => {
+    expect(isCountTokensRequest({ type: 'other', text: 'hi' })).toBe(false);
+  });
+
+  it('rejects missing or non-string text', () => {
+    expect(isCountTokensRequest({ type: COUNT_TOKENS_REQUEST })).toBe(false);
+    expect(isCountTokensRequest({ type: COUNT_TOKENS_REQUEST, text: 42 })).toBe(false);
+    expect(isCountTokensRequest({ type: COUNT_TOKENS_REQUEST, text: null })).toBe(false);
+  });
+});
+
+describe('isCountTokensResponse', () => {
+  it('accepts ok:true with finite count', () => {
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: true, count: 0 })).toBe(true);
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: true, count: 42 })).toBe(true);
+  });
+
+  it('accepts ok:false with error string', () => {
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: false, error: 'boom' })).toBe(
+      true,
+    );
+  });
+
+  it('rejects ok:true with non-numeric count', () => {
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: true })).toBe(false);
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: true, count: '5' })).toBe(
+      false,
+    );
+  });
+
+  it('rejects ok:true with non-finite count', () => {
+    expect(
+      isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: true, count: Number.NaN }),
+    ).toBe(false);
+    expect(
+      isCountTokensResponse({
+        type: COUNT_TOKENS_RESPONSE,
+        ok: true,
+        count: Number.POSITIVE_INFINITY,
+      }),
+    ).toBe(false);
+    expect(
+      isCountTokensResponse({
+        type: COUNT_TOKENS_RESPONSE,
+        ok: true,
+        count: Number.NEGATIVE_INFINITY,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects ok:false without error string', () => {
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: false })).toBe(false);
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: false, error: 42 })).toBe(
+      false,
+    );
+  });
+
+  it('rejects null and wrong discriminator', () => {
+    expect(isCountTokensResponse(null)).toBe(false);
+    expect(isCountTokensResponse({ type: 'other', ok: true, count: 1 })).toBe(false);
   });
 });
 
