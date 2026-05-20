@@ -4,6 +4,32 @@
 
 ## Resolved Feedback
 
+### FINAL_REVIEW (2026-05-19)
+
+#### Implementation-level
+
+1. **Task 9 manual smoke test deferral is silently dropped.**
+   **Resolution:** Added a "Verification status" paragraph to the
+   `### Notes` section of `CHANGELOG.md`'s `## [0.2.3]` block and a
+   new `## Verification status` section to `docs/transform.md` (just
+   above `## v0.3.0 follow-ups`) listing the eight manual smoke-test
+   steps that need to be run against a real Chrome + WebGPU build
+   before treating the happy path as proven. Markdownlint stays
+   green; the rest of the suite is unaffected.
+
+#### Notes (not blockers)
+
+- **Branch policy violation by user instruction.** The Phase-0 "feature
+  branch" rule was overridden by the user (commits 92210d9 …
+  c7782fc landed directly on `main`). Per the task brief, this is logged
+  but not a defect.
+
+- **Minor dead-code smell in `src/selection-rewrite.ts`.** The
+  `lastFromEnd` local in `collectBeforeContext` (lines 113, 136, 149) is
+  written but never read; only kept alive via a `void lastFromEnd;`
+  statement to satisfy the linter. Cosmetic only — remove on the next
+  touch of this file, not now.
+
 ### PLAN_REVIEW (2026-05-19)
 
 #### Critical Issues

@@ -79,6 +79,30 @@ non-negotiable constraints carry over:
    advisory; the bounded selection size plus the prompt hint keep
    real-world outputs well under 2048.
 
+## Verification status
+
+The unit + integration suite (160 tests under Vitest + jsdom, all
+passing) covers the selection-rewrite path end-to-end with a mocked
+offscreen client. The in-browser smoke test against a real
+WebGPU-backed Gemma session was **not** run before v0.2.3 shipped —
+the test environment cannot host WebGPU. To prove the happy path on
+your machine before relying on the release:
+
+1. Load the unpacked extension from `dist/`.
+1. Open a public article (any blog post or Wikipedia page).
+1. Highlight a paragraph.
+1. Toggle the panel with `Ctrl+Shift+K`.
+1. Confirm the placeholder swaps to `Edit selection…` and the
+   preview chip appears.
+1. Type an instruction (for example "tighten this to one sentence")
+   and press Enter.
+1. Confirm tokens stream into the highlighted text in place and the
+   resulting bubble carries an Undo button that restores the original
+   on click.
+1. Press `Esc` with a selection active and confirm the placeholder
+   swaps to `Ask about selection…` and that sending leaves the DOM
+   untouched.
+
 ## v0.3.0 follow-ups
 
 - `<input>` / `<textarea>` / `contenteditable` selection support.

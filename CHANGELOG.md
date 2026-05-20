@@ -29,6 +29,7 @@ The feature reuses the v0.2.2 offscreen `LanguageModel` session; no second model
 
 - The chat session and selection-rewrite share one `LanguageModel` instance by design; the v0.2.0 OOM root cause is foreclosed by construction.
 - `<input>`, `<textarea>`, and `contenteditable` regions are still unsupported. Queued for v0.3.0.
+- **Verification status:** unit + integration suite (160 tests, all passing under Vitest + jsdom with a mocked offscreen client) covers the selection-rewrite plumbing end-to-end. The in-browser smoke test against a real WebGPU-backed Gemma session was deferred for this release — open the unpacked extension and run the steps in `docs/transform.md#how-to-use` against a public article before treating the happy path as proven.
 
 ## [0.2.2] - 2026-05-19
 
