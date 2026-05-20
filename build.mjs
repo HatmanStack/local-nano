@@ -16,6 +16,11 @@ async function copyOrt() {
   }
 }
 
+async function copyOffscreenHtml() {
+  await mkdir('dist', { recursive: true });
+  await cp('offscreen.html', 'dist/offscreen.html');
+}
+
 const common = {
   bundle: true,
   target: 'chrome120',
@@ -27,9 +32,10 @@ const common = {
 const builds = [
   { ...common, entryPoints: ['content.ts'], format: 'iife' },
   { ...common, entryPoints: ['background.ts'], format: 'esm' },
+  { ...common, entryPoints: ['offscreen.ts'], format: 'iife' },
 ];
 
-await copyOrt();
+await Promise.all([copyOrt(), copyOffscreenHtml()]);
 
 if (watch) {
   for (const b of builds) {

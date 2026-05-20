@@ -5,46 +5,45 @@ import { initSession, type SessionDeps } from '../src/session.js';
 import { chromeMock } from './setup.js';
 
 // ---------------------------------------------------------------------------
-// Mock the dynamic imports inside loadHeavy()
+// Mock the offscreen client
 // ---------------------------------------------------------------------------
 
-// Minimal LanguageModelSession mock
-function makeSessionMock() {
-  return {
-    promptStreaming: vi.fn(),
-    destroy: vi.fn(),
-  };
+// The mock returns a promise the test can resolve/reject and also lets the
+// test fire onChunk callbacks during the in-flight call.
+type StreamPromptOpts = {
+  onChunk?: (chunk: string) => void;
+  signal?: AbortSignal;
+};
+
+interface PendingStream {
+  prompt: string;
+  opts: StreamPromptOpts;
+  resolve: (text: string) => void;
+  reject: (err: unknown) => void;
 }
 
-// Minimal ReadableStream mock that yields chunks then closes
-function makeStream(chunks: string[]) {
-  let idx = 0;
-  const reader = {
-    read: vi.fn(async () => {
-      if (idx < chunks.length) return { done: false, value: chunks[idx++] };
-      return { done: true, value: undefined };
-    }),
-    releaseLock: vi.fn(),
-  };
-  return {
-    getReader: () => reader,
-    _reader: reader, // exposed for assertions
-  };
-}
+const pending: PendingStream[] = [];
 
-// Stub the dynamic imports at the module level
-vi.mock('@huggingface/transformers', () => ({
-  env: { backends: { onnx: { wasm: { wasmPaths: '', numThreads: 0 } } } },
+vi.mock('../src/offscreen/client.js', () => ({
+  streamPrompt: vi.fn((prompt: string, opts: StreamPromptOpts = {}) => {
+    return new Promise<string>((resolve, reject) => {
+      pending.push({ prompt, opts, resolve, reject });
+    });
+  }),
+  sendPrompt: vi.fn(),
+  rebuildSession: vi.fn(() => Promise.resolve()),
 }));
 
-vi.mock('../vendor/prompt-api-polyfill/prompt-api-polyfill.js', () => ({
-  LanguageModel: {
-    create: vi.fn(),
-  },
-}));
+import {
+  rebuildSession as mockedRebuildSession,
+  streamPrompt as mockedStreamPrompt,
+} from '../src/offscreen/client.js';
+
+const streamPromptMock = mockedStreamPrompt as unknown as ReturnType<typeof vi.fn>;
+const rebuildSessionMock = mockedRebuildSession as unknown as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
-// Helper: build a minimal SessionDeps with real JSDOM elements
+// Helpers
 // ---------------------------------------------------------------------------
 
 function makeDeps(): SessionDeps & {
@@ -66,12 +65,6 @@ function makeDeps(): SessionDeps & {
     messages: _messages,
     input: _input,
     actionBtn: _actionBtn,
-    transformersConfig: {
-      apiKey: 'dummy',
-      device: 'wasm',
-      dtype: 'q8',
-      modelName: 'test-model',
-    },
     location: {
       origin: 'https://example.com',
       pathname: '/page',
@@ -88,33 +81,32 @@ function makeDeps(): SessionDeps & {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Import the mocked polyfill for controlling LanguageModel.create
-// ---------------------------------------------------------------------------
-import * as polyfillMod from '../vendor/prompt-api-polyfill/prompt-api-polyfill.js';
-
-const mockLanguageModelCreate = polyfillMod.LanguageModel.create as ReturnType<typeof vi.fn>;
-
-// ---------------------------------------------------------------------------
-// Helper to get the registered toggle listener
-// ---------------------------------------------------------------------------
 function getToggleListener(): (m: typeof TOGGLE_MESSAGE) => void {
-  const calls = (chromeMock.runtime.onMessage.addListener as ReturnType<typeof vi.fn>).mock.calls;
+  const calls = chromeMock.runtime.onMessage.addListener.mock.calls;
   return calls[calls.length - 1][0] as (m: typeof TOGGLE_MESSAGE) => void;
+}
+
+async function flushMicrotasks(times = 5) {
+  for (let i = 0; i < times; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
+async function awaitPending(): Promise<PendingStream> {
+  for (let i = 0; i < 40 && pending.length === 0; i++) {
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  const next = pending.shift();
+  if (!next) throw new Error('streamPrompt was not called');
+  return next;
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('initSession — session lifecycle', () => {
-  let deps: ReturnType<typeof makeDeps>;
-
-  beforeEach(async () => {
+describe('initSession — history restore', () => {
+  beforeEach(() => {
     vi.clearAllMocks();
-    deps = makeDeps();
-    // Default: LanguageModel.create succeeds immediately
-    mockLanguageModelCreate.mockResolvedValue(makeSessionMock());
+    pending.length = 0;
   });
 
   it('restores history on init and renders stored messages', async () => {
@@ -123,398 +115,247 @@ describe('initSession — session lifecycle', () => {
       { role: 'user', text: 'hello' },
       { role: 'model', text: 'world' },
     ];
+    const deps = makeDeps();
     initSession(deps);
-    // Wait for restore() microtask to complete
-    await new Promise((r) => setTimeout(r, 0));
-    // Two message divs should have been appended to messages container
+    await flushMicrotasks();
     expect(deps._messages.children.length).toBe(2);
     expect(deps._messages.children[0].textContent).toBe('hello');
     expect(deps._messages.children[1].textContent).toBe('world');
   });
 
-  it('disables input while session is loading', async () => {
-    // Create resolves after we check
-    let resolveCreate!: (s: ReturnType<typeof makeSessionMock>) => void;
-    mockLanguageModelCreate.mockReturnValue(
-      new Promise<ReturnType<typeof makeSessionMock>>((r) => {
-        resolveCreate = r;
-      }),
-    );
-    initSession(deps);
-    // Simulate toggle to trigger ensureSession
-    const listener = getToggleListener();
-    deps._root.style.display = 'none';
-    listener(TOGGLE_MESSAGE);
-    await new Promise((r) => setTimeout(r, 0));
-    expect(deps._input.disabled).toBe(true);
-    // Now resolve
-    resolveCreate(makeSessionMock());
-    await new Promise((r) => setTimeout(r, 0));
-    expect(deps._input.disabled).toBe(false);
-  });
-
-  it('re-enables input and resets heavyLoadPromise on session creation failure', async () => {
-    mockLanguageModelCreate.mockRejectedValue(new Error('Model unavailable'));
-    initSession(deps);
-    const listener = getToggleListener();
-    // First toggle: panel hidden → show, triggers ensureSession → fails
-    deps._root.style.display = 'none';
-    listener(TOGGLE_MESSAGE);
-    await new Promise((r) => setTimeout(r, 10));
-    // Input should be re-enabled after failure
-    expect(deps._input.disabled).toBe(false);
-    // Triggering ensureSession again should attempt a new create (heavyLoadPromise reset).
-    // Must hide the panel first so the toggle shows it again and calls ensureSession.
-    mockLanguageModelCreate.mockResolvedValue(makeSessionMock());
-    deps._root.style.display = 'none';
-    listener(TOGGLE_MESSAGE);
-    await new Promise((r) => setTimeout(r, 10));
-    expect(mockLanguageModelCreate).toHaveBeenCalledTimes(2);
-  });
-
-  it('does not call LanguageModel.create twice under concurrent ensureSession calls', async () => {
-    let resolveCreate!: (s: ReturnType<typeof makeSessionMock>) => void;
-    mockLanguageModelCreate.mockReturnValue(
-      new Promise<ReturnType<typeof makeSessionMock>>((r) => {
-        resolveCreate = r;
-      }),
-    );
-    initSession(deps);
-    const listener = getToggleListener();
-    // Trigger toggle twice rapidly
-    deps._root.style.display = 'none';
-    listener(TOGGLE_MESSAGE);
-    deps._root.style.display = 'none';
-    listener(TOGGLE_MESSAGE);
-    await new Promise((r) => setTimeout(r, 0));
-    // create should only have been called once despite two triggers
-    expect(mockLanguageModelCreate).toHaveBeenCalledTimes(1);
-    resolveCreate(makeSessionMock());
-  });
-
-  it('shows "Loading model…" status message while session creates', async () => {
-    let resolveCreate!: (s: ReturnType<typeof makeSessionMock>) => void;
-    mockLanguageModelCreate.mockReturnValue(
-      new Promise<ReturnType<typeof makeSessionMock>>((r) => {
-        resolveCreate = r;
-      }),
-    );
-    initSession(deps);
-    const listener = getToggleListener();
-    deps._root.style.display = 'none';
-    listener(TOGGLE_MESSAGE);
-    await new Promise((r) => setTimeout(r, 0));
-    const statusEl = deps._messages.lastElementChild as HTMLElement;
-    expect(statusEl.textContent).toContain('Loading model');
-    resolveCreate(makeSessionMock());
-    await new Promise((r) => setTimeout(r, 10));
-    expect(statusEl.textContent).toBe('Ready.');
-  });
-
-  it('shows error message on session creation failure', async () => {
-    mockLanguageModelCreate.mockRejectedValue(new Error('GPU not available'));
-    initSession(deps);
-    const listener = getToggleListener();
-    deps._root.style.display = 'none';
-    listener(TOGGLE_MESSAGE);
-    await new Promise((r) => setTimeout(r, 10));
-    const statusEl = deps._messages.lastElementChild as HTMLElement;
-    expect(statusEl.textContent).toContain('GPU not available');
-  });
-});
-
-describe('initSession — send behavior', () => {
-  let deps: ReturnType<typeof makeDeps>;
-  let sessionMock: ReturnType<typeof makeSessionMock>;
-
-  async function setupWithSession() {
-    deps = makeDeps();
-    sessionMock = makeSessionMock();
-    mockLanguageModelCreate.mockResolvedValue(sessionMock);
-    initSession(deps);
-    // Trigger toggle to start ensureSession
-    const listener = getToggleListener();
-    deps._root.style.display = 'none';
-    listener(TOGGLE_MESSAGE);
-    await new Promise((r) => setTimeout(r, 10));
-    // Session should now be ready
-  }
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('skips send when activeAbort is non-null (in-progress generation)', async () => {
-    await setupWithSession();
-    const stream = makeStream(['chunk1', 'chunk2']);
-    sessionMock.promptStreaming.mockReturnValue(stream);
-    // First send — starts generation
-    deps._input.value = 'first message';
-    deps._actionBtn.click(); // starts generation, sets activeAbort
-    // Second click while generation in progress — activeAbort != null, so this aborts not sends
-    deps._input.value = 'second message';
-    deps._actionBtn.click(); // clicks abort, not send
-    await new Promise((r) => setTimeout(r, 20));
-    // promptStreaming called only once — second click aborted, not re-sent
-    expect(sessionMock.promptStreaming).toHaveBeenCalledTimes(1);
-  });
-
-  it('skips send when input is empty', async () => {
-    await setupWithSession();
-    deps._input.value = '   ';
-    deps._actionBtn.click();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(sessionMock.promptStreaming).not.toHaveBeenCalled();
-  });
-
-  it('skips send when session is null', async () => {
-    // initSession but do NOT trigger ensureSession
-    deps = makeDeps();
-    mockLanguageModelCreate.mockResolvedValue(makeSessionMock());
-    initSession(deps);
-    deps._input.value = 'hello';
-    deps._actionBtn.click();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(mockLanguageModelCreate).not.toHaveBeenCalled();
-  });
-
-  it('prefixes pageContext on isFirstTurn only', async () => {
-    await setupWithSession();
-    const stream = makeStream(['response']);
-    sessionMock.promptStreaming.mockReturnValue(stream);
-    // First send
-    deps._input.value = 'first question';
-    deps._actionBtn.click();
-    await new Promise((r) => setTimeout(r, 20));
-    const firstCallArg = sessionMock.promptStreaming.mock.calls[0][0] as string;
-    expect(firstCallArg).toContain('Page: Test Page');
-    expect(firstCallArg).toContain('first question');
-    // Second send — should NOT include page context
-    const stream2 = makeStream(['response2']);
-    sessionMock.promptStreaming.mockReturnValue(stream2);
-    deps._input.value = 'follow-up';
-    deps._actionBtn.click();
-    await new Promise((r) => setTimeout(r, 20));
-    const secondCallArg = sessionMock.promptStreaming.mock.calls[1][0] as string;
-    expect(secondCallArg).toBe('follow-up');
-    expect(secondCallArg).not.toContain('Page:');
-  });
-
-  it('appends [stopped] on AbortError', async () => {
-    await setupWithSession();
-    // Stream that throws an AbortError mid-read.
-    // Use a plain Error with name 'AbortError' rather than DOMException because
-    // jsdom's DOMException is not instanceof Error in the vitest environment.
-    const abortError = Object.assign(new Error('Aborted'), { name: 'AbortError' });
-    const reader = {
-      read: vi
-        .fn()
-        .mockResolvedValueOnce({ done: false, value: 'partial' })
-        .mockRejectedValueOnce(abortError),
-      releaseLock: vi.fn(),
-    };
-    sessionMock.promptStreaming.mockReturnValue({ getReader: () => reader });
-    deps._input.value = 'test abort';
-    deps._actionBtn.click();
-    await new Promise((r) => setTimeout(r, 20));
-    // Find the model response element (last child of messages after 'user' message)
-    const responseEl = deps._messages.lastElementChild as HTMLElement;
-    expect(responseEl.textContent).toContain('[stopped]');
-    expect(reader.releaseLock).toHaveBeenCalled();
-  });
-
-  it('removes the typing indicator when the stream yields zero chunks', async () => {
-    await setupWithSession();
-    // Stream closes immediately with no values
-    const emptyStream = makeStream([]);
-    sessionMock.promptStreaming.mockReturnValue(emptyStream);
-    deps._input.value = 'will get an empty reply';
-    deps._actionBtn.click();
-    await new Promise((r) => setTimeout(r, 20));
-    // The model bubble is the last child; it must contain no `.ln-dot`
-    // descendants once the stream finishes.
-    const responseEl = deps._messages.lastElementChild as HTMLElement;
-    expect(responseEl.querySelectorAll('.ln-dot').length).toBe(0);
-  });
-
-  it('calls reader.releaseLock() even when stream errors', async () => {
-    await setupWithSession();
-    const reader = {
-      read: vi.fn().mockRejectedValue(new Error('stream error')),
-      releaseLock: vi.fn(),
-    };
-    sessionMock.promptStreaming.mockReturnValue({ getReader: () => reader });
-    deps._input.value = 'trigger error';
-    deps._actionBtn.click();
-    await new Promise((r) => setTimeout(r, 20));
-    expect(reader.releaseLock).toHaveBeenCalled();
-  });
-
-  it('persists model response after successful stream', async () => {
-    await setupWithSession();
-    const stream = makeStream(['hello world']);
-    sessionMock.promptStreaming.mockReturnValue(stream);
-    deps._input.value = 'user question';
-    deps._actionBtn.click();
-    await new Promise((r) => setTimeout(r, 20));
-    const storageKey = 'local-nano:history:https://example.com/page';
-    const stored = chromeMock.storage.local.store[storageKey] as Array<{
-      role: string;
-      text: string;
-    }>;
-    // Should have user + model entries
-    expect(stored.some((e) => e.role === 'user' && e.text === 'user question')).toBe(true);
-    expect(stored.some((e) => e.role === 'model')).toBe(true);
-  });
-
-  it('renders user message immediately when send is called', async () => {
-    await setupWithSession();
-    const stream = makeStream(['the answer']);
-    sessionMock.promptStreaming.mockReturnValue(stream);
-    deps._input.value = 'my question';
-    deps._actionBtn.click();
-    // Give one microtask tick — user message rendered synchronously before await
-    await new Promise((r) => setTimeout(r, 0));
-    const userEl = Array.from(deps._messages.children).find(
-      (el) => el.textContent === 'my question',
-    );
-    expect(userEl).toBeDefined();
-  });
-
-  it('clears input value after send', async () => {
-    await setupWithSession();
-    const stream = makeStream(['reply']);
-    sessionMock.promptStreaming.mockReturnValue(stream);
-    deps._input.value = 'some text';
-    deps._actionBtn.click();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(deps._input.value).toBe('');
-  });
-
-  it('respects MAX_HISTORY by not exceeding the cap in storage', async () => {
-    // Pre-populate history with MAX_HISTORY entries
-    const key = 'local-nano:history:https://example.com/page';
-    chromeMock.storage.local.store[key] = Array.from({ length: MAX_HISTORY }, (_, k) => ({
-      role: k % 2 === 0 ? 'user' : 'model',
-      text: `msg ${k}`,
+  it('caps in-memory history to MAX_HISTORY on restore', async () => {
+    const key = `local-nano:history:https://example.com/page`;
+    chromeMock.storage.local.store[key] = Array.from({ length: MAX_HISTORY + 50 }, (_, i) => ({
+      role: 'user' as const,
+      text: `msg ${i}`,
     }));
-
-    await setupWithSession();
-    const stream = makeStream(['new answer']);
-    sessionMock.promptStreaming.mockReturnValue(stream);
-    deps._input.value = 'new question';
-    deps._actionBtn.click();
-    await new Promise((r) => setTimeout(r, 20));
-    const stored = chromeMock.storage.local.store[key] as Array<{ role: string; text: string }>;
-    expect(stored.length).toBeLessThanOrEqual(MAX_HISTORY);
-  });
-
-  it('trims oversized restored history to MAX_HISTORY on the first persist', async () => {
-    // Storage somehow contains more than MAX_HISTORY entries (e.g. from a
-    // prior buggy write). Restore must clamp the in-memory array; otherwise
-    // the next persist re-writes the oversized history back to storage,
-    // and the array grows unbounded during the session.
-    const key = 'local-nano:history:https://example.com/page';
-    const oversized = MAX_HISTORY + 50;
-    chromeMock.storage.local.store[key] = Array.from({ length: oversized }, (_, k) => ({
-      role: k % 2 === 0 ? 'user' : 'model',
-      text: `msg ${k}`,
-    }));
-
-    await setupWithSession();
-    const stream = makeStream(['fresh answer']);
-    sessionMock.promptStreaming.mockReturnValue(stream);
-    deps._input.value = 'fresh question';
-    deps._actionBtn.click();
-    await new Promise((r) => setTimeout(r, 20));
-    const stored = chromeMock.storage.local.store[key] as Array<{ role: string; text: string }>;
-    expect(stored.length).toBe(MAX_HISTORY);
-    // Oldest entries dropped; newest (user + model) retained at the tail
-    expect(stored[stored.length - 2]).toEqual({ role: 'user', text: 'fresh question' });
-    expect(stored[stored.length - 1].role).toBe('model');
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    // The DOM should only have MAX_HISTORY rendered entries.
+    expect(deps._messages.children.length).toBe(MAX_HISTORY);
+    expect(deps._messages.children[0].textContent).toBe(`msg 50`);
   });
 });
 
 describe('initSession — toggle behavior', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    pending.length = 0;
   });
 
-  it('shows panel and calls ensureSession on toggle when hidden', async () => {
+  it('toggles panel visibility', () => {
     const deps = makeDeps();
-    mockLanguageModelCreate.mockResolvedValue(makeSessionMock());
     initSession(deps);
     const listener = getToggleListener();
+    // Currently hidden — toggle should show it
     deps._root.style.display = 'none';
     listener(TOGGLE_MESSAGE);
-    await new Promise((r) => setTimeout(r, 10));
     expect(deps._root.style.display).toBe('flex');
-    expect(mockLanguageModelCreate).toHaveBeenCalledTimes(1);
-  });
-
-  it('hides panel on toggle when visible', () => {
-    const deps = makeDeps();
-    mockLanguageModelCreate.mockResolvedValue(makeSessionMock());
-    initSession(deps);
-    const listener = getToggleListener();
-    deps._root.style.display = 'flex';
+    // Hidden again
     listener(TOGGLE_MESSAGE);
     expect(deps._root.style.display).toBe('none');
   });
 
-  it('ignores messages with a different action key', () => {
+  it('ignores messages that are not the toggle command', () => {
     const deps = makeDeps();
     initSession(deps);
-    const listener = getToggleListener() as unknown as (m: { a: string }) => void;
+    const listener = getToggleListener();
     deps._root.style.display = 'none';
-    listener({ a: 'unknown-action' });
+    listener({ a: 'something-else' } as unknown as typeof TOGGLE_MESSAGE);
     expect(deps._root.style.display).toBe('none');
   });
 
-  it('Enter key triggers send', async () => {
+  it('Enter key triggers send when input has content', async () => {
     const deps = makeDeps();
-    const session = makeSessionMock();
-    mockLanguageModelCreate.mockResolvedValue(session);
     initSession(deps);
-    const toggleListener = getToggleListener();
-    deps._root.style.display = 'none';
-    toggleListener(TOGGLE_MESSAGE);
-    await new Promise((r) => setTimeout(r, 10));
-    const stream = makeStream(['response']);
-    session.promptStreaming.mockReturnValue(stream);
-    deps._input.value = 'keyboard send';
-    const event = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: false, bubbles: true });
-    deps._input.dispatchEvent(event);
-    await new Promise((r) => setTimeout(r, 20));
-    expect(session.promptStreaming).toHaveBeenCalledTimes(1);
+    deps._input.value = 'hi';
+    const enter = new KeyboardEvent('keydown', { key: 'Enter' });
+    deps._input.dispatchEvent(enter);
+    const call = await awaitPending();
+    expect(call.prompt).toContain('hi');
+    call.resolve('hello there');
+    await flushMicrotasks();
   });
 
   it('Shift+Enter does not trigger send', async () => {
     const deps = makeDeps();
-    const session = makeSessionMock();
-    mockLanguageModelCreate.mockResolvedValue(session);
     initSession(deps);
-    const toggleListener = getToggleListener();
-    deps._root.style.display = 'none';
-    toggleListener(TOGGLE_MESSAGE);
-    await new Promise((r) => setTimeout(r, 10));
-    deps._input.value = 'should not send';
-    const event = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true });
-    deps._input.dispatchEvent(event);
-    await new Promise((r) => setTimeout(r, 0));
-    expect(session.promptStreaming).not.toHaveBeenCalled();
+    deps._input.value = 'hi';
+    const e = new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true });
+    deps._input.dispatchEvent(e);
+    await flushMicrotasks();
+    expect(streamPromptMock).not.toHaveBeenCalled();
   });
 
-  it('does not call ensureSession on hide toggle (panel visible)', async () => {
+  it('empty/whitespace input does not trigger send', async () => {
     const deps = makeDeps();
-    mockLanguageModelCreate.mockResolvedValue(makeSessionMock());
     initSession(deps);
-    const listener = getToggleListener();
-    // Toggle when visible — should hide, not trigger ensureSession
-    deps._root.style.display = 'flex';
-    listener(TOGGLE_MESSAGE);
-    await new Promise((r) => setTimeout(r, 10));
-    expect(deps._root.style.display).toBe('none');
-    expect(mockLanguageModelCreate).not.toHaveBeenCalled();
+    deps._input.value = '   ';
+    deps._actionBtn.click();
+    await flushMicrotasks();
+    expect(streamPromptMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('initSession — streaming', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+  });
+
+  it('prefixes the first turn with page context and sends just the text after', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+
+    // First send
+    deps._input.value = 'question one';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    expect(first.prompt).toContain('Page: Test Page');
+    expect(first.prompt).toContain('URL: https://example.com/page');
+    expect(first.prompt).toContain('question one');
+    first.resolve('answer one');
+    await flushMicrotasks();
+
+    // Second send
+    deps._input.value = 'question two';
+    deps._actionBtn.click();
+    const second = await awaitPending();
+    expect(second.prompt).toBe('question two');
+    expect(second.prompt).not.toContain('Page:');
+    second.resolve('answer two');
+    await flushMicrotasks();
+  });
+
+  it('renders chunks into the model response element via onChunk', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    expect(call.opts.onChunk).toBeTypeOf('function');
+    call.opts.onChunk?.('one ');
+    call.opts.onChunk?.('two ');
+    call.opts.onChunk?.('three');
+    // After 3 chunks fired, the model bubble should reflect the cumulative text
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('one two three');
+    call.resolve('one two three');
+    await flushMicrotasks();
+  });
+
+  it('persists model entry to history after a successful stream', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    // Wait for the initial restore() to complete before triggering a send.
+    // Otherwise the async restore can clobber the in-memory history mid-send
+    // and we drop the user entry from the persisted record.
+    await flushMicrotasks();
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('the response');
+    call.resolve('the response');
+    await flushMicrotasks();
+    const key = `local-nano:history:https://example.com/page`;
+    const stored = chromeMock.storage.local.store[key] as Array<{ role: string; text: string }>;
+    expect(stored).toHaveLength(2);
+    expect(stored[0]).toEqual({ role: 'user', text: 'hi' });
+    expect(stored[1]).toEqual({ role: 'model', text: 'the response' });
+  });
+
+  it('renders the error text in the model bubble when streamPrompt rejects', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.reject(new Error('model unavailable'));
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('model unavailable');
+  });
+
+  it('appends [stopped] when the user aborts mid-stream', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    // Simulate one chunk landing
+    call.opts.onChunk?.('partial');
+    // User clicks Stop — the button fires the abort
+    deps._actionBtn.click();
+    // The session's catch listens for AbortError specifically
+    call.reject(new DOMException('Aborted', 'AbortError'));
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toContain('partial');
+    expect(modelBubble?.textContent).toContain('[stopped]');
+  });
+
+  it('rebuilds the session and retries when the first attempt reports WebGPU device loss', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+
+    deps._input.value = 'why is the sky blue';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+
+    first.reject(
+      new Error(
+        'Model returned no output (likely WebGPU device loss after tab/window switch). Rebuilding session; try again.',
+      ),
+    );
+
+    const retry = await awaitPending();
+    // Retry drops the page-context prefix and resends just the user text.
+    expect(retry.prompt).toBe('why is the sky blue');
+
+    expect(rebuildSessionMock).toHaveBeenCalledTimes(1);
+    // History passed to rebuild excludes the just-added user turn (the
+    // retried prompt re-introduces it via the polyfill).
+    expect(rebuildSessionMock.mock.calls[0][0]).toEqual([]);
+
+    retry.opts.onChunk?.('blue light scatters');
+    retry.resolve('blue light scatters');
+    await flushMicrotasks();
+
+    // Rebuild hint was removed on the first retry chunk, so children
+    // are [user, model] with the model bubble holding the retry output.
+    const texts = Array.from(deps._messages.children).map((c) => c.textContent);
+    expect(texts).toContain('blue light scatters');
+  });
+
+  it('does not retry when the error is not a device-loss', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.reject(new Error('some other failure'));
+    await flushMicrotasks();
+    expect(rebuildSessionMock).not.toHaveBeenCalled();
+    expect(pending.length).toBe(0);
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('some other failure');
+  });
+
+  it('blocks a second send while the first stream is still in flight', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    deps._input.value = 'first';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    // Try to send again while first is pending
+    deps._input.value = 'second';
+    deps._actionBtn.click();
+    await flushMicrotasks();
+    expect(pending.length).toBe(0);
+    // Resolve the first
+    first.resolve('done');
+    await flushMicrotasks();
   });
 });

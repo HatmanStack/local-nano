@@ -1,14 +1,3 @@
-/**
- * Minimal typed surface for a LanguageModel session returned by the
- * Prompt API polyfill. Only the methods called in this extension are
- * declared; the full spec surface is larger.
- */
-export interface LanguageModelSession {
-  promptStreaming(input: string, options?: { signal?: AbortSignal }): ReadableStream<string>;
-  destroy(): void;
-}
-
-import type transformersConfigType from '../.env.json';
 import { TOGGLE_MESSAGE } from './background/handler.js';
 import {
   type Entry,
@@ -18,14 +7,25 @@ import {
   saveHistory as saveHistoryToStorage,
   storageKey,
 } from './history.js';
+import { rebuildSession, streamPrompt } from './offscreen/client.js';
 import { pageContext } from './pageContext.js';
-import { SYSTEM_INSTRUCTION } from './system.js';
 import { makeTypingIndicator, renderMessage } from './ui/messages.js';
 import { setGeneratingState, setIdleState } from './ui/state.js';
 
-// The transformers config shape — imported for type only; actual import
-// happens at build time in content.ts.
-type TransformersConfig = typeof transformersConfigType;
+/**
+ * Recognize the explicit failure offscreen.ts raises when the polyfill
+ * stream closes with zero chunks — typically caused by WebGPU device
+ * loss after the user switches tabs/windows. Matched on the message
+ * string because the polyfill swallows the underlying ORT error and the
+ * offscreen layer surfaces a sentinel string instead.
+ */
+function isDeviceLossError(err: unknown): boolean {
+  if (err === null || typeof err !== 'object') return false;
+  const name = (err as { name?: unknown }).name;
+  if (name === 'AbortError') return false;
+  const message = err instanceof Error ? err.message : '';
+  return message.includes('WebGPU device loss') || message.includes('Model returned no output');
+}
 
 /**
  * DOM elements and values that content.ts provides at injection time.
@@ -36,46 +36,13 @@ export interface SessionDeps {
   messages: HTMLElement;
   input: HTMLInputElement;
   actionBtn: HTMLButtonElement;
-  transformersConfig: TransformersConfig;
   location: Pick<Location, 'origin' | 'pathname' | 'href'>;
   document: Pick<Document, 'title'> & { body: { innerText: string } };
 }
 
-interface OnnxWasmEnv {
-  backends: { onnx: { wasm: { wasmPaths: string; numThreads: number } } };
-}
-
 export function initSession(deps: SessionDeps): void {
-  const { root, messages, input: i, actionBtn, transformersConfig, location, document } = deps;
+  const { root, messages, input: i, actionBtn, location, document } = deps;
   const STORAGE_KEY = storageKey(location);
-
-  // ---- Heavy module loader (lazy, singleton) ----
-  let heavyLoadPromise: Promise<{
-    LanguageModel: { create: (opts: unknown) => Promise<LanguageModelSession> };
-  }> | null = null;
-
-  function loadHeavy() {
-    if (heavyLoadPromise) return heavyLoadPromise;
-    heavyLoadPromise = (async () => {
-      const [tfMod, polyfillMod] = await Promise.all([
-        import('@huggingface/transformers'),
-        import('../vendor/prompt-api-polyfill/prompt-api-polyfill.js'),
-      ]);
-      const ortPath = chrome.runtime.getURL('dist/ort/');
-      (tfMod.env as unknown as OnnxWasmEnv).backends.onnx.wasm.wasmPaths = ortPath;
-      (tfMod.env as unknown as OnnxWasmEnv).backends.onnx.wasm.numThreads = 1;
-      (window as unknown as Record<string, unknown>).TRANSFORMERS_CONFIG = transformersConfig;
-      console.log('[local-nano] heavy modules loaded; ORT wasmPaths =', ortPath);
-      return {
-        LanguageModel: (
-          polyfillMod as unknown as {
-            LanguageModel: { create: (opts: unknown) => Promise<LanguageModelSession> };
-          }
-        ).LanguageModel,
-      };
-    })();
-    return heavyLoadPromise;
-  }
 
   // ---- History ----
   let history: Entry[] = [];
@@ -111,62 +78,30 @@ export function initSession(deps: SessionDeps): void {
     return el;
   }
 
-  // ---- Session state ----
-  let session: LanguageModelSession | null = null;
-  let creating = false;
-  // NOTE(isFirstTurn): This flag is not reset after restore() re-renders prior
-  // history. The restored messages are displayed in the UI but the new session
-  // has no access to them (the polyfill creates a fresh context). This means
-  // follow-up messages after a page reload produce contextless responses.
-  // Fixing this requires either replaying history into the session's
-  // initialPrompts on creation, or disabling isFirstTurn-based page context
-  // injection when prior history exists. Tracked as M7 — deferred to a future
-  // iteration because the correct fix depends on polyfill replay support.
-  let isFirstTurn = true;
-
-  async function ensureSession() {
-    if (session || creating) return;
-    creating = true;
-    i.disabled = true;
-    const status = addMessage('system', 'Loading model…');
-    try {
-      const { LanguageModel } = await loadHeavy();
-      const created = await LanguageModel.create({
-        expectedInputs: [{ type: 'text', languages: ['en'] }],
-        expectedOutputs: [{ type: 'text', languages: ['en'] }],
-        initialPrompts: [{ role: 'system', content: SYSTEM_INSTRUCTION }],
-        monitor(mon: EventTarget) {
-          mon.addEventListener('downloadprogress', (e) => {
-            const ev = e as Event & { loaded: number };
-            const v = ev.loaded;
-            const label = v <= 1 ? `${Math.round(v * 100)}%` : `${(v / 1_000_000).toFixed(1)} MB`;
-            status.textContent = `Loading model… ${label}`;
-          });
-        },
-      });
-      session = created;
-      status.textContent = 'Ready.';
-    } catch (e: unknown) {
-      console.error('[local-nano] LanguageModel.create failed:', e);
-      status.textContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
-      // Reset heavyLoadPromise so the user can retry by closing and reopening
-      // the panel. Without this, every subsequent ensureSession call returns
-      // the same rejected promise and the failure is permanent for the tab.
-      heavyLoadPromise = null;
-    } finally {
-      creating = false;
-      i.disabled = false;
-    }
-  }
-
   // ---- Send / Stop ----
+  // NOTE(isFirstTurn): This flag isn't reset after restore() re-renders
+  // prior history. The restored messages are displayed in the UI but the
+  // offscreen session has no knowledge of them (it holds a single
+  // long-lived context across tabs/URLs). The page-context prefix is only
+  // applied on the very first user turn of the lifetime of this content
+  // script. Cross-URL chat continuity needs a follow-up.
+  let isFirstTurn = true;
   let activeAbort: AbortController | null = null;
 
   async function send() {
-    if (!i.value.trim() || !session || activeAbort) return;
+    if (!i.value.trim() || activeAbort) return;
     const text = i.value.trim();
     i.value = '';
     addMessage('user', text);
+    // First-turn UX hint. The model upload to WebGPU runs in the offscreen
+    // doc and the user has no other signal that something is happening for
+    // the 30-90s that takes. Hint is a transient system message — not
+    // persisted — that's removed when the first chunk arrives, or replaced
+    // if generation fails.
+    const wasFirstTurn = isFirstTurn;
+    const firstTurnHint = wasFirstTurn
+      ? addMessage('system', 'Loading model… first response can take up to a minute.')
+      : null;
     const responseEl = renderMessage(messages, 'model', '');
     const indicator = makeTypingIndicator();
     responseEl.appendChild(indicator);
@@ -176,37 +111,67 @@ export function initSession(deps: SessionDeps): void {
     activeAbort = new AbortController();
     setGeneratingState(actionBtn, i);
 
+    // Accumulate inside onChunk so abort/error paths still see the partial
+    // text the user just watched stream in. The resolved value from
+    // streamPrompt would be identical on the happy path, but we don't
+    // rely on it.
     let modelText = '';
-    try {
-      const t0 = performance.now();
-      const stream = session.promptStreaming(prompt, { signal: activeAbort.signal });
-      const reader = stream.getReader();
-      let firstChunk = true;
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
-            console.log(`[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms`);
-            break;
-          }
-          if (firstChunk) {
-            console.log(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
-            responseEl.textContent = '';
-            firstChunk = false;
-          }
-          modelText += value;
-          responseEl.textContent = modelText;
-          messages.scrollTop = messages.scrollHeight;
-        }
-      } finally {
-        reader.releaseLock();
+    let firstChunk = true;
+    let rebuildHint: HTMLElement | null = null;
+    const t0 = performance.now();
+    const onChunk = (chunk: string) => {
+      if (firstChunk) {
+        console.log(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
+        // Drop the "Loading model…" / "GPU recovering…" hints now that
+        // tokens are flowing.
+        if (firstTurnHint?.parentNode) firstTurnHint.remove();
+        if (rebuildHint?.parentNode) rebuildHint.remove();
+        responseEl.textContent = '';
+        firstChunk = false;
       }
+      modelText += chunk;
+      responseEl.textContent = modelText;
+      messages.scrollTop = messages.scrollHeight;
+    };
+    try {
+      try {
+        await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+      } catch (err) {
+        if (!isDeviceLossError(err) || activeAbort.signal.aborted) throw err;
+        // The offscreen polyfill lost its WebGPU device (typically after a
+        // tab/window switch) and surfaced our explicit "no output" error.
+        // Re-seed a fresh session with the persisted conversation so the
+        // model wakes up knowing what was said, then retry the user's
+        // current prompt once. The just-added user turn is sliced off the
+        // reseed history — the polyfill will record it itself when we
+        // re-send below. Page-context prefix is dropped on retry: it was
+        // a first-turn UX nicety and never made it into our stored
+        // history, so re-sending it would be incoherent with the reseeded
+        // polyfill view.
+        rebuildHint = addMessage(
+          'system',
+          'GPU device lost — restoring session and retrying…',
+        );
+        modelText = '';
+        firstChunk = true;
+        const historyForReseed = history
+          .slice(0, -1)
+          .filter((entry): entry is { role: 'user' | 'model'; text: string } => entry.role !== 'system');
+        await rebuildSession(historyForReseed);
+        await streamPrompt(text, { signal: activeAbort.signal, onChunk });
+      }
+      console.log(
+        `[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms, chars=${modelText.length}, prompt.length=${prompt.length}`,
+      );
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') {
+      // DOMException isn't always `instanceof Error` in non-browser
+      // environments (e.g. jsdom), so check the name field directly.
+      const name = (err as { name?: unknown })?.name;
+      if (name === 'AbortError') {
         modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
         responseEl.textContent = modelText;
       } else {
-        modelText = String(err);
+        modelText = err instanceof Error ? err.message : String(err);
         responseEl.textContent = modelText;
       }
     } finally {
@@ -214,6 +179,18 @@ export function initSession(deps: SessionDeps): void {
       // runs when at least one chunk arrives; a stream that closes with
       // zero chunks would otherwise leave the bouncing dots in place.
       if (indicator.parentNode) indicator.remove();
+      // Drop the first-turn / rebuild hints if either is still attached
+      // (they survive if no chunk ever arrived — abort or error before
+      // generation started).
+      if (firstTurnHint?.parentNode) firstTurnHint.remove();
+      if (rebuildHint?.parentNode) rebuildHint.remove();
+      // A stream that completed successfully with zero chunks means the
+      // model emitted EOS immediately. Surface it as an explicit message
+      // rather than leaving an empty bubble that looks like the panel is
+      // broken.
+      if (!modelText) {
+        responseEl.textContent = '(no response — the model returned an empty answer)';
+      }
       if (modelText) {
         pushEntry({ role: 'model', text: modelText });
         persist();
@@ -253,7 +230,6 @@ export function initSession(deps: SessionDeps): void {
         convertedAnchor = true;
       }
       i.focus();
-      void ensureSession();
     } else {
       root.style.display = 'none';
     }

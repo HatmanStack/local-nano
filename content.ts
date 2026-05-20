@@ -1,4 +1,3 @@
-import transformersConfig from './.env.json';
 import { initSession } from './src/session.js';
 import { IDLE_BG } from './src/ui/state.js';
 
@@ -115,7 +114,6 @@ initSession({
   messages,
   input,
   actionBtn,
-  transformersConfig,
   location,
   document,
 });

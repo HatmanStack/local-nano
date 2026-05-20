@@ -15,7 +15,11 @@ describe('handleCommand', () => {
       { active: true, currentWindow: true },
       expect.any(Function),
     );
-    expect(chromeMock.tabs.sendMessage).toHaveBeenCalledWith(1, TOGGLE_MESSAGE);
+    expect(chromeMock.tabs.sendMessage).toHaveBeenCalledWith(
+      1,
+      TOGGLE_MESSAGE,
+      expect.any(Function),
+    );
   });
 
   it('does not send a message when the active tab has no id', () => {
