@@ -941,9 +941,9 @@ rewrite outputs bounded.
 
 **Verification Checklist:**
 
-- [ ] `package.json` and `manifest.json` both show `0.2.3`.
-- [ ] CHANGELOG entry placed above the existing `## [0.2.2]` block.
-- [ ] All local checks green.
+- [x] `package.json` and `manifest.json` both show `0.2.3`.
+- [x] CHANGELOG entry placed above the existing `## [0.2.2]` block.
+- [x] All local checks green.
 
 **Testing Instructions:**
 

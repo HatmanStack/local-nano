@@ -5,6 +5,31 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-05-19
+
+Restores selection-driven in-place rewrite, designed against the memory budget that killed v0.2.0. Highlight prose, type an instruction into the chat input, and the model rewrites the selection in place while tokens stream. A single-level Undo button on the resulting chat bubble restores the original text. Pressing Esc inside the input toggles to "Ask about selection" mode, which quotes the selection into a normal chat prompt without mutating the DOM.
+
+The feature reuses the v0.2.2 offscreen `LanguageModel` session; no second model is loaded into WebGPU. Selection payload is hard-capped at ~700 chars. The polyfill's 2048-token output ceiling is unchanged; a prompt-side soft cap computed from the input token count keeps real-world rewrite outputs bounded.
+
+### Added
+
+- `src/selection-rewrite.ts` — snapshot capture, prompt builders, in-place streaming into the captured `Range`, single-level undo.
+- New `count` channel in the offscreen protocol (`src/offscreen/protocol.ts`) and `countTokens()` export in `src/offscreen/client.ts`, racing the polyfill round-trip against a 100ms timeout with a `chars/3` heuristic fallback.
+- Esc-toggled "Ask about selection" mode that quotes the selection without mutating the DOM.
+- `docs/transform.md`.
+- New tests: `tests/selection-rewrite.test.ts`; extensions to `tests/offscreen-protocol.test.ts`, `tests/offscreen-client.test.ts`, and `tests/session.test.ts`.
+
+### Changed
+
+- `src/session.ts` — selection-aware placeholder swap, Esc handler, rewrite send path, undo button on the model bubble.
+- `content.ts` — installs the `selectionchange` listener and the selection-preview chip.
+- `package.json` and `manifest.json` version bumped 0.2.2 → 0.2.3.
+
+### Notes
+
+- The chat session and selection-rewrite share one `LanguageModel` instance by design; the v0.2.0 OOM root cause is foreclosed by construction.
+- `<input>`, `<textarea>`, and `contenteditable` regions are still unsupported. Queued for v0.3.0.
+
 ## [0.2.2] - 2026-05-19
 
 Moves the on-device `LanguageModel` session out of the content script and into a hidden offscreen document, so the model loads once and is shared across tabs/pages instead of reloading WebGPU on every navigation. Per-URL chat history continues to live in `chrome.storage.local`; the polyfill session is the shared resource.
