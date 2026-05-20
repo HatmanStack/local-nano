@@ -5,6 +5,31 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-05-19
+
+Moves the on-device `LanguageModel` session out of the content script and into a hidden offscreen document, so the model loads once and is shared across tabs/pages instead of reloading WebGPU on every navigation. Per-URL chat history continues to live in `chrome.storage.local`; the polyfill session is the shared resource.
+
+Adds explicit recovery for WebGPU device loss. When the offscreen doc loses its GPU device — typical after a tab/window switch — the polyfill swallows the underlying ONNX Runtime Web error and closes the stream with zero chunks. The offscreen layer now treats zero-chunk results as failure and tears the session down; the chat layer catches the failure, re-seeds a fresh session with the persisted conversation, and retries the prompt once. The user sees "GPU device lost — restoring session…" instead of an empty bubble and the conversation resumes in place.
+
+### Added
+
+- `offscreen.html` / `offscreen.ts` — hidden offscreen document that hosts the polyfill session and streams tokens over a `chrome.runtime.Port`.
+- `src/offscreen/protocol.ts` — wire types for `ENSURE_OFFSCREEN_*`, `STREAM_*`, and `REBUILD_SESSION_*` messages.
+- `src/offscreen/client.ts` and `src/offscreen/stream-client.ts` — content-script-facing client and the context-agnostic port-streaming helper it shares with the service worker.
+- `src/background/offscreen.ts` — service-worker side of the offscreen lifecycle (idempotent `ensureOffscreen`, dedupe of concurrent calls).
+- One-shot device-loss retry path in `src/session.ts`, including a transient "restoring session" hint.
+
+### Changed
+
+- `manifest.json` — adds the `offscreen` permission and a `content_security_policy` allowing `wasm-unsafe-eval` (required for ONNX Runtime Web's WebAssembly).
+- `manifest.json` version bumped 0.1.1 → 0.2.2 to catch up with `package.json` (the 0.2.1 revert bumped one but not the other).
+- `src/session.ts` — drops its direct polyfill imports; streams through the offscreen client.
+
+### Notes
+
+- Same model, same UX surface as 0.2.1; the change is architectural. No new commands, no new menus.
+- Cross-URL conversation continuity is still scoped to the offscreen session's lifetime — the polyfill session is shared, but UI history switches per URL.
+
 ## [0.2.1] - 2026-05-18
 
 Reverts the entire v0.2.0 DOM-aware-actions release. The feature was too ambitious for the in-browser GPU memory budget: spinning up a second `LanguageModel` session for every right-click action on top of the long-lived chat session pushed WebGPU into `VK_ERROR_OUT_OF_DEVICE_MEMORY` cascades during normal use. The tree is reset to the v0.1.1 baseline (chat-only, one model session per tab).
