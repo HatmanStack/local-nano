@@ -842,11 +842,11 @@ trailing punctuation. Fenced code blocks tagged (`text`, `bash`,
 
 **Verification Checklist:**
 
-- [ ] `markdownlint` passes (run via `npm run lint:ci` if the project
+- [x] `markdownlint` passes (run via `npm run lint:ci` if the project
       wires markdown lint into the script; otherwise run
       `npx markdownlint-cli2 docs/transform.md`).
-- [ ] No emojis, no em dashes, no AI-isms.
-- [ ] Cross-link added in `docs/architecture.md` if appropriate
+- [x] No emojis, no em dashes, no AI-isms.
+- [x] Cross-link added in `docs/architecture.md` if appropriate
       (consider it, do not force it).
 
 **Testing Instructions:**
