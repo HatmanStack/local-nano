@@ -164,10 +164,10 @@ number via the polyfill session's `measureContextUsage(text)`.
 
 **Verification Checklist:**
 
-- [ ] `npm run typecheck` passes.
-- [ ] `npm run lint:ci` passes.
-- [ ] Listener returns `true` so `sendResponse` works asynchronously.
-- [ ] Failures do not poison `sessionPromise`.
+- [x] `npm run typecheck` passes.
+- [x] `npm run lint:ci` passes.
+- [x] Listener returns `true` so `sendResponse` works asynchronously.
+- [x] Failures do not poison `sessionPromise`.
 
 **Testing Instructions:**
 

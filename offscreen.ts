@@ -19,7 +19,10 @@
 
 import transformersConfig from './.env.json';
 import {
+  COUNT_TOKENS_RESPONSE,
+  type CountTokensResponse,
   type HistoryTurn,
+  isCountTokensRequest,
   isRebuildSessionRequest,
   isStreamAbort,
   isStreamRequest,
@@ -34,6 +37,7 @@ import {
 
 interface LanguageModelSession {
   promptStreaming(input: string, options?: { signal?: AbortSignal }): ReadableStream<string>;
+  measureContextUsage(input: string): Promise<number>;
   destroy(): void;
 }
 
@@ -146,6 +150,30 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse(fail);
     },
   );
+  return true;
+});
+
+// Count-tokens channel. Best-effort: failures here do not destroy or
+// rebuild the session — the client side has a heuristic fallback so a
+// slow or broken count never blocks a transform.
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!isCountTokensRequest(msg)) return false;
+  (async () => {
+    try {
+      const session = await ensureSession();
+      const count = await session.measureContextUsage(msg.text);
+      const ok: CountTokensResponse = { type: COUNT_TOKENS_RESPONSE, ok: true, count };
+      sendResponse(ok);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      const fail: CountTokensResponse = {
+        type: COUNT_TOKENS_RESPONSE,
+        ok: false,
+        error: message,
+      };
+      sendResponse(fail);
+    }
+  })();
   return true;
 });
 
