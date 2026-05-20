@@ -226,11 +226,11 @@ on timeout (or any error) returns a heuristic count
 
 **Verification Checklist:**
 
-- [ ] `npm run typecheck` passes.
-- [ ] `npm run lint:ci` passes.
-- [ ] `countTokens` is exported and re-exported (if applicable) consistently
+- [x] `npm run typecheck` passes.
+- [x] `npm run lint:ci` passes.
+- [x] `countTokens` is exported and re-exported (if applicable) consistently
       with `streamPrompt`, `sendPrompt`, `rebuildSession`.
-- [ ] On any error condition, `countTokens` resolves (never rejects).
+- [x] On any error condition, `countTokens` resolves (never rejects).
 
 **Testing Instructions:**
 

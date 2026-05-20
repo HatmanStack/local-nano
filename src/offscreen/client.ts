@@ -8,9 +8,12 @@
  */
 
 import {
+  COUNT_TOKENS_REQUEST,
+  type CountTokensRequest,
   ENSURE_OFFSCREEN_REQUEST,
   type EnsureOffscreenRequest,
   type HistoryTurn,
+  isCountTokensResponse,
   isEnsureOffscreenResponse,
   isRebuildSessionResponse,
   REBUILD_SESSION_REQUEST,
@@ -19,6 +22,12 @@ import {
 import { type StreamPromptOptions, streamOverPort } from './stream-client.js';
 
 export type { StreamPromptOptions } from './stream-client.js';
+
+const DEFAULT_COUNT_TIMEOUT_MS = 100;
+
+function heuristicTokenCount(text: string): number {
+  return Math.ceil(text.length / 3);
+}
 
 async function ensureViaServiceWorker(): Promise<void> {
   const request: EnsureOffscreenRequest = { type: ENSURE_OFFSCREEN_REQUEST };
@@ -49,6 +58,69 @@ export function streamPrompt(prompt: string, opts: StreamPromptOptions = {}): Pr
  */
 export function sendPrompt(prompt: string): Promise<string> {
   return streamPrompt(prompt);
+}
+
+/**
+ * Ask the offscreen polyfill session to tokenize `text` and report the
+ * count. Races the round-trip against `timeoutMs` (default 100ms); on
+ * timeout, malformed reply, `ok: false`, or `chrome.runtime.lastError`,
+ * resolves with the heuristic `Math.ceil(text.length / 3)` instead of
+ * rejecting. The point is a usable number for downstream math, not a
+ * faithful surface of every transport error.
+ *
+ * Used by the selection-rewrite soft-cap computation; the brainstorm
+ * flagged that the polyfill's `measureContextUsage` may add real latency
+ * on Gemma-4, so the heuristic is the default UX guarantee.
+ */
+export async function countTokens(
+  text: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<number> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_COUNT_TIMEOUT_MS;
+  const fallback = heuristicTokenCount(text);
+
+  const roundTrip = (async (): Promise<number> => {
+    try {
+      await ensureViaServiceWorker();
+    } catch {
+      return fallback;
+    }
+    const request: CountTokensRequest = { type: COUNT_TOKENS_REQUEST, text };
+    let reply: unknown;
+    try {
+      reply = await chrome.runtime.sendMessage(request);
+    } catch {
+      return fallback;
+    }
+    const lastError = chrome.runtime.lastError;
+    if (lastError) {
+      console.warn(`[local-nano] countTokens: ${lastError.message ?? 'lastError set'}`);
+      return fallback;
+    }
+    if (!isCountTokensResponse(reply)) return fallback;
+    if (!reply.ok) return fallback;
+    return reply.count;
+  })();
+
+  return new Promise<number>((resolve) => {
+    let settled = false;
+    const finish = (value: number) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(fallback), timeoutMs);
+    roundTrip.then(
+      (value) => {
+        clearTimeout(timer);
+        finish(value);
+      },
+      () => {
+        clearTimeout(timer);
+        finish(fallback);
+      },
+    );
+  });
 }
 
 /**
