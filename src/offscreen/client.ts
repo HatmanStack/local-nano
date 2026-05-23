@@ -154,10 +154,16 @@ export async function countTokens(
  * handler then never calls `sendResponse` and this round-trip hangs
  * forever, leaving the panel stuck on "Loading…" with no error. The
  * timeout converts that hang into a rejection so the caller can surface
- * an error bubble + Retry. Default is generous because a cold first
- * load also downloads multi-GB weights.
+ * an error bubble + Retry.
+ *
+ * The window is short (a healthy cached load is ~10-30s) because timing
+ * out is cheap: the offscreen `ensureSession` is a singleton, so if the
+ * timeout fires while a legitimate cold download is still in progress,
+ * clicking Retry rejoins the same in-flight load rather than restarting
+ * it — nothing is lost. Better to surface "still working, keep waiting"
+ * quickly than to hide a real hang behind a two-minute spinner.
  */
-const WARMUP_TIMEOUT_MS = 120_000;
+const WARMUP_TIMEOUT_MS = 30_000;
 
 export async function warmupSession(opts: { timeoutMs?: number } = {}): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? WARMUP_TIMEOUT_MS;
@@ -181,7 +187,7 @@ export async function warmupSession(opts: { timeoutMs?: number } = {}): Promise<
     timer = setTimeout(() => {
       reject(
         new Error(
-          `Model load timed out after ${Math.round(timeoutMs / 1000)}s. The GPU is likely out of memory or the WebGPU device was lost during load — restart Chrome to reset the GPU process, or set "device": "wasm" in .env.json.`,
+          `Model load timed out after ${Math.round(timeoutMs / 1000)}s. On a first run it may still be downloading — click Retry to keep waiting. If it keeps timing out, the GPU is likely out of memory or the WebGPU device was lost; restart Chrome or set "device": "wasm" in .env.json.`,
         ),
       );
     }, timeoutMs);
