@@ -124,6 +124,31 @@ export async function countTokens(
 }
 
 /**
+ * Block-load the offscreen polyfill session so it's ready before the
+ * user sends their first message. Resolves once `ensureSession()` in
+ * the offscreen doc has finished (model weights uploaded to WebGPU and
+ * the polyfill session is live), or rejects if loading fails.
+ *
+ * Implemented as a count-tokens round-trip without the timeout race —
+ * we want to actually wait for the load to complete, not fall back to a
+ * heuristic. The offscreen side dedupes via its `sessionPromise`
+ * singleton, so multiple concurrent warmups across tabs share one load.
+ */
+export async function warmupSession(): Promise<void> {
+  await ensureViaServiceWorker();
+  const request: CountTokensRequest = { type: COUNT_TOKENS_REQUEST, text: '' };
+  const reply = (await chrome.runtime.sendMessage(request)) as unknown;
+  const lastError = chrome.runtime.lastError;
+  if (lastError) {
+    throw new Error(`warmup-session failed: ${lastError.message ?? 'unknown'}`);
+  }
+  if (!isCountTokensResponse(reply)) {
+    throw new Error('warmup-session: malformed reply from offscreen');
+  }
+  if (!reply.ok) throw new Error(reply.error);
+}
+
+/**
  * Force the offscreen polyfill session to rebuild, seeded with the given
  * conversation history. Used after a WebGPU device-loss event so the
  * model recovers without losing context.

@@ -7,7 +7,7 @@ import {
   saveHistory as saveHistoryToStorage,
   storageKey,
 } from './history.js';
-import { countTokens, rebuildSession, streamPrompt } from './offscreen/client.js';
+import { countTokens, rebuildSession, streamPrompt, warmupSession } from './offscreen/client.js';
 import { pageContext } from './pageContext.js';
 import {
   buildAskPrompt,
@@ -19,7 +19,7 @@ import {
   undoRewrite,
 } from './selection-rewrite.js';
 import { makeTypingIndicator, renderMessage } from './ui/messages.js';
-import { setGeneratingState, setIdleState } from './ui/state.js';
+import { setGeneratingState, setIdleState, setLoadingState } from './ui/state.js';
 
 /**
  * Recognize the explicit failure offscreen.ts raises when the polyfill
@@ -381,7 +381,7 @@ export function initSession(deps: SessionDeps): void {
   }
 
   async function send() {
-    if (!i.value.trim() || activeAbort) return;
+    if (!i.value.trim() || activeAbort || actionBtn.disabled) return;
     const text = i.value.trim();
     i.value = '';
     const snap = currentSelection;
@@ -424,6 +424,32 @@ export function initSession(deps: SessionDeps): void {
     }
   });
 
+  // ---- Model warmup ----
+  // The offscreen polyfill session is lazily created on first use, which
+  // would otherwise stall the user's first send for 30–90s while WebGPU
+  // uploads the model. Kicking warmup off when the panel first opens
+  // lets the load run in the background while the user reads the page
+  // or composes their prompt. Idempotent across panel toggles; the
+  // offscreen `ensureSession` singleton handles cross-tab dedupe.
+  let warmStarted = false;
+  async function ensureWarm(): Promise<void> {
+    if (warmStarted) return;
+    warmStarted = true;
+    setLoadingState(actionBtn, i);
+    try {
+      await warmupSession();
+    } catch (err) {
+      console.warn('[local-nano] warmup failed:', err);
+      // Allow a retry on the next panel open in case the failure was
+      // transient (offscreen doc creation race, sendMessage timing).
+      warmStarted = false;
+    } finally {
+      // Only return to idle if a real send didn't sneak in ahead of us.
+      // activeAbort is set inside the send paths, so respect it here.
+      if (!activeAbort) setIdleState(actionBtn, i);
+    }
+  }
+
   // ---- Toggle listener ----
   let convertedAnchor = false;
   chrome.runtime.onMessage.addListener((m: typeof TOGGLE_MESSAGE) => {
@@ -437,6 +463,7 @@ export function initSession(deps: SessionDeps): void {
         convertedAnchor = true;
       }
       i.focus();
+      void ensureWarm();
     } else {
       root.style.display = 'none';
     }

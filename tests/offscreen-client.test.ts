@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { countTokens, rebuildSession, sendPrompt, streamPrompt } from '../src/offscreen/client.js';
+import {
+  countTokens,
+  rebuildSession,
+  sendPrompt,
+  streamPrompt,
+  warmupSession,
+} from '../src/offscreen/client.js';
 import {
   COUNT_TOKENS_REQUEST,
   COUNT_TOKENS_RESPONSE,
@@ -298,5 +304,76 @@ describe('countTokens (content-script client)', () => {
     await expect(countTokens('abcd')).resolves.toBe(2); // ceil(4/3)=2
     await expect(countTokens('abcdefg')).resolves.toBe(3); // ceil(7/3)=3
     await expect(countTokens('')).resolves.toBe(0); // ceil(0/3)=0
+  });
+});
+
+describe('warmupSession (content-script client)', () => {
+  beforeEach(() => {
+    chromeMock.runtime.lastError = undefined;
+  });
+
+  it('ensures offscreen then sends an empty count-tokens request to force ensureSession', async () => {
+    const seen: unknown[] = [];
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      seen.push(msg);
+      const type = (msg as { type?: string })?.type;
+      if (type === ENSURE_OFFSCREEN_REQUEST) {
+        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+      }
+      if (type === COUNT_TOKENS_REQUEST) {
+        return { type: COUNT_TOKENS_RESPONSE, ok: true, count: 0 };
+      }
+      return undefined;
+    });
+
+    await expect(warmupSession()).resolves.toBeUndefined();
+    expect(seen).toEqual([
+      { type: ENSURE_OFFSCREEN_REQUEST },
+      { type: COUNT_TOKENS_REQUEST, text: '' },
+    ]);
+  });
+
+  it('rejects when the count-tokens reply is ok:false', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      const type = (msg as { type?: string })?.type;
+      if (type === ENSURE_OFFSCREEN_REQUEST) {
+        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+      }
+      return { type: COUNT_TOKENS_RESPONSE, ok: false, error: 'model failed to load' };
+    });
+    await expect(warmupSession()).rejects.toThrow('model failed to load');
+  });
+
+  it('rejects when the offscreen reply is malformed', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      const type = (msg as { type?: string })?.type;
+      if (type === ENSURE_OFFSCREEN_REQUEST) {
+        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+      }
+      return { type: 'something-else' };
+    });
+    await expect(warmupSession()).rejects.toThrow(/malformed/);
+  });
+
+  it('rejects when chrome.runtime.lastError is set on the count call', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      const type = (msg as { type?: string })?.type;
+      if (type === ENSURE_OFFSCREEN_REQUEST) {
+        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+      }
+      chromeMock.runtime.lastError = { message: 'port closed' };
+      return undefined;
+    });
+    await expect(warmupSession()).rejects.toThrow(/port closed/);
+    chromeMock.runtime.lastError = undefined;
+  });
+
+  it('rejects when the ensure step fails', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: ENSURE_OFFSCREEN_RESPONSE,
+      ok: false,
+      error: 'offscreen blocked',
+    }));
+    await expect(warmupSession()).rejects.toThrow('offscreen blocked');
   });
 });

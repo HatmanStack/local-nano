@@ -34,17 +34,20 @@ vi.mock('../src/offscreen/client.js', () => ({
   sendPrompt: vi.fn(),
   rebuildSession: vi.fn(() => Promise.resolve()),
   countTokens: vi.fn(async (text: string) => Math.ceil(text.length / 3)),
+  warmupSession: vi.fn(() => Promise.resolve()),
 }));
 
 import {
   countTokens as mockedCountTokens,
   rebuildSession as mockedRebuildSession,
   streamPrompt as mockedStreamPrompt,
+  warmupSession as mockedWarmupSession,
 } from '../src/offscreen/client.js';
 
 const streamPromptMock = mockedStreamPrompt as unknown as ReturnType<typeof vi.fn>;
 const rebuildSessionMock = mockedRebuildSession as unknown as ReturnType<typeof vi.fn>;
 const countTokensMock = mockedCountTokens as unknown as ReturnType<typeof vi.fn>;
+const warmupSessionMock = mockedWarmupSession as unknown as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -217,6 +220,84 @@ describe('initSession — toggle behavior', () => {
     deps._actionBtn.click();
     await flushMicrotasks();
     expect(streamPromptMock).not.toHaveBeenCalled();
+  });
+
+  it('fires warmupSession the first time the panel opens', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    expect(warmupSessionMock).not.toHaveBeenCalled();
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE);
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    await flushMicrotasks();
+  });
+
+  it('does not re-fire warmupSession on subsequent toggle-open while the prior warmup is still in flight or done', async () => {
+    let resolveWarm: (() => void) | undefined;
+    warmupSessionMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          resolveWarm = r;
+        }),
+    );
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE); // open
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    listener(TOGGLE_MESSAGE); // close
+    listener(TOGGLE_MESSAGE); // re-open
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    resolveWarm?.();
+    await flushMicrotasks();
+    listener(TOGGLE_MESSAGE); // close
+    listener(TOGGLE_MESSAGE); // re-open after warm done
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('gates the send button while warmupSession is in flight and re-enables it on completion', async () => {
+    let resolveWarm: (() => void) | undefined;
+    warmupSessionMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          resolveWarm = r;
+        }),
+    );
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE);
+    // Mid-warmup: button is disabled with the Loading label; input stays editable.
+    expect(deps._actionBtn.disabled).toBe(true);
+    expect(deps._actionBtn.textContent).toBe('Loading…');
+    expect(deps._input.disabled).toBe(false);
+    // An Enter keypress during warmup must NOT issue a stream request.
+    deps._input.value = 'hi';
+    deps._input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    await flushMicrotasks();
+    expect(streamPromptMock).not.toHaveBeenCalled();
+    expect(pending.length).toBe(0);
+    // Warmup completes -> button returns to idle.
+    resolveWarm?.();
+    await flushMicrotasks();
+    expect(deps._actionBtn.disabled).toBe(false);
+    expect(deps._actionBtn.textContent).toBe('Send');
+  });
+
+  it('allows a retry on the next open if warmupSession rejects', async () => {
+    warmupSessionMock.mockRejectedValueOnce(new Error('offscreen unavailable'));
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    // After failure the button is back to idle (not stuck on Loading…).
+    expect(deps._actionBtn.disabled).toBe(false);
+    // Closing and reopening retries the warmup.
+    listener(TOGGLE_MESSAGE);
+    listener(TOGGLE_MESSAGE);
+    expect(warmupSessionMock).toHaveBeenCalledTimes(2);
   });
 });
 
