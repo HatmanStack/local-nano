@@ -23,14 +23,14 @@
   <a href="docs/contributing.md">Contributing</a>
 </p>
 
-A Chrome extension that puts a small, **fully local** AI assistant on every page you visit. Press a keyboard shortcut, a chat panel slides in, and an in-browser language model answers questions about the page — or rewrites text you've highlighted, in place. No API keys, no servers, no data leaving your machine after the model is downloaded.
+A Chrome extension with a small, **fully local** AI assistant that **edits the page you're on**. Highlight any text, tell it how to change it, and an in-browser language model rewrites it in place — the new text streams straight into the page. It also answers questions about the page from the same panel. No API keys, no servers, no data leaving your machine after the model is downloaded.
 
 > Status: experimental. Tested in Chrome 120+ on desktop. Runs on WebGPU when available and falls back to WASM CPU — see [docs/models.md](docs/models.md) for model and dtype tradeoffs in each mode.
 
 ## Highlights
 
+- **Edits the live page.** Highlight text, type an instruction ("make this concise", "translate to French", "fix the grammar"), and the model rewrites it directly in the page — the tokens replace your selection in the DOM as they stream. Each edit gets Undo / Accept. Press `Esc` to ask *about* the selection instead of changing it. This is the core of the app; the chat is the complement.
 - **Runs in the browser, not the cloud.** Inference happens on-device via [Transformers.js](https://huggingface.co/docs/transformers.js) and the [ONNX Runtime Web](https://onnxruntime.ai/) WebAssembly/WebGPU backend.
-- **Highlight to rewrite.** Select text on the page, type an instruction, and the model rewrites it in place — tokens stream straight into the page. Each rewrite gets Undo / Accept. Press `Esc` to ask *about* the selection instead of editing it.
 - **One model, shared across tabs.** The model loads once into a background (offscreen) document and is reused on every page instead of reloading on each navigation. It preloads the moment you open the panel.
 - **Resilient on small GPUs.** Recovers from WebGPU out-of-memory by rebuilding the session, warns before the conversation outgrows your VRAM, and offers a one-click Clear conversation. See [docs/transform.md](docs/transform.md).
 - **Built on the proposed Prompt API.** Uses Google's [`prompt-api-polyfill`](https://github.com/GoogleChromeLabs/web-ai-demos/tree/main/prompt-api-polyfill) so the same code can target a native `LanguageModel` once browsers ship it.
