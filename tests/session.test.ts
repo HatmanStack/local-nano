@@ -275,13 +275,46 @@ describe('initSession — toggle behavior', () => {
     initSession(deps);
     const listener = getToggleListener();
     listener(TOGGLE_MESSAGE);
-    // System bubble lives while warmup is in flight.
+    // System bubble (with the elapsed counter) lives while warmup is in flight.
     const bubbleTexts = () => Array.from(deps._messages.children).map((c) => c.textContent ?? '');
-    expect(bubbleTexts().some((t) => t.includes('Loading model on first run'))).toBe(true);
+    expect(bubbleTexts().some((t) => t.includes('Loading model…'))).toBe(true);
     resolveWarm?.();
     await flushMicrotasks();
     // And is gone once warmup resolves.
-    expect(bubbleTexts().some((t) => t.includes('Loading model on first run'))).toBe(false);
+    expect(bubbleTexts().some((t) => t.includes('Loading model…'))).toBe(false);
+  });
+
+  it('ticks the elapsed counter and appends remedies if the load drags', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveWarm: (() => void) | undefined;
+      warmupSessionMock.mockImplementationOnce(
+        () =>
+          new Promise<void>((r) => {
+            resolveWarm = r;
+          }),
+      );
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      const bubble = () =>
+        Array.from(deps._messages.children)
+          .map((c) => c.textContent ?? '')
+          .find((t) => t.includes('Loading model…')) ?? '';
+      // Counter advances.
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(bubble()).toMatch(/Loading model… \ds/);
+      // After the slow-notice threshold, remedies appear but the load is
+      // not failed — the bubble still says it's loading.
+      await vi.advanceTimersByTimeAsync(45000);
+      expect(bubble()).toContain('Taking longer than usual');
+      expect(bubble()).toContain('wasm');
+      expect(bubble()).toContain('Loading model…');
+      resolveWarm?.();
+      await vi.runOnlyPendingTimersAsync();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('gates the send button while warmupSession is in flight and re-enables it on completion', async () => {

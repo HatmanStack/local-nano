@@ -148,56 +148,30 @@ export async function countTokens(
  * If that happens, switch this to a tiny throwaway `promptStreaming`
  * call instead.
  *
- * TIMEOUT: a GPU out-of-memory or device-loss during model load can be
- * reported by ONNX/Dawn out-of-band (WebGPU device error to the
- * console) while `LanguageModel.create()` never settles — the offscreen
- * handler then never calls `sendResponse` and this round-trip hangs
- * forever, leaving the panel stuck on "Loading…" with no error. The
- * timeout converts that hang into a rejection so the caller can surface
- * an error bubble + Retry.
- *
- * The window is short (a healthy cached load is ~10-30s) because timing
- * out is cheap: the offscreen `ensureSession` is a singleton, so if the
- * timeout fires while a legitimate cold download is still in progress,
- * clicking Retry rejoins the same in-flight load rather than restarting
- * it — nothing is lost. Better to surface "still working, keep waiting"
- * quickly than to hide a real hang behind a two-minute spinner.
+ * NO TIMEOUT: a first run downloads multi-GB weights and can legitimately
+ * take minutes, so a fixed timeout here false-fails a slow-but-healthy
+ * load. Instead the chat layer (`ensureWarm`) shows a live elapsed
+ * counter as proof-of-life and, if the load drags, appends remedies
+ * without giving up. A genuine failure still rejects this promise:
+ * the offscreen handler catches a load error and returns `ok: false`,
+ * which throws below. The only unhandled case is an out-of-band GPU
+ * error that hangs `LanguageModel.create()` without rejecting — that
+ * surfaces to the user as a stuck elapsed counter with remedies, which
+ * they can act on (reload / wasm) rather than being told a healthy load
+ * "failed".
  */
-const WARMUP_TIMEOUT_MS = 30_000;
-
-export async function warmupSession(opts: { timeoutMs?: number } = {}): Promise<void> {
-  const timeoutMs = opts.timeoutMs ?? WARMUP_TIMEOUT_MS;
+export async function warmupSession(): Promise<void> {
   await ensureViaServiceWorker();
   const request: CountTokensRequest = { type: COUNT_TOKENS_REQUEST, text: '' };
-
-  const roundTrip = (async (): Promise<void> => {
-    const reply = (await chrome.runtime.sendMessage(request)) as unknown;
-    const lastError = chrome.runtime.lastError;
-    if (lastError) {
-      throw new Error(`warmup-session failed: ${lastError.message ?? 'unknown'}`);
-    }
-    if (!isCountTokensResponse(reply)) {
-      throw new Error('warmup-session: malformed reply from offscreen');
-    }
-    if (!reply.ok) throw new Error(reply.error);
-  })();
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(
-        new Error(
-          `Model load timed out after ${Math.round(timeoutMs / 1000)}s. On a first run it may still be downloading — click Retry to keep waiting. If it keeps timing out, the GPU is likely out of memory or the WebGPU device was lost; restart Chrome or set "device": "wasm" in .env.json.`,
-        ),
-      );
-    }, timeoutMs);
-  });
-
-  try {
-    await Promise.race([roundTrip, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
+  const reply = (await chrome.runtime.sendMessage(request)) as unknown;
+  const lastError = chrome.runtime.lastError;
+  if (lastError) {
+    throw new Error(`warmup-session failed: ${lastError.message ?? 'unknown'}`);
   }
+  if (!isCountTokensResponse(reply)) {
+    throw new Error('warmup-session: malformed reply from offscreen');
+  }
+  if (!reply.ok) throw new Error(reply.error);
 }
 
 /**

@@ -70,6 +70,14 @@ const RECENT_HISTORY_FOR_REBUILD = 4;
 const HISTORY_TOKEN_WARN_THRESHOLD_DEFAULT = 1500;
 
 /**
+ * How long the model-load elapsed counter ticks before it appends
+ * "taking longer than usual" remedies. The load is never auto-failed on
+ * a timer (a slow first download must not be killed); this only changes
+ * the wording so a genuinely stuck load gets actionable guidance.
+ */
+const WARMUP_SLOW_NOTICE_MS = 45_000;
+
+/**
  * Map a GPU-info snapshot to a token-history warning threshold.
  * Lifted to module scope so it's unit-testable without going through
  * initSession.
@@ -698,17 +706,30 @@ export function initSession(deps: SessionDeps): void {
     if (warmStarted) return;
     warmStarted = true;
     setLoadingState(actionBtn, i);
-    // A transient system bubble while the long upload runs — static
-    // "Loading" on the button felt hung. The bubble auto-clears when
-    // warmup resolves (success or failure) and is not persisted to
-    // chrome.storage (system messages are skipped by addMessage).
-    const warmHint = addMessage(
-      'system',
-      'Loading model on first run. This can take 30–90 seconds, then chat is instant.',
-    );
+    // A live elapsed counter while the model loads. We deliberately do
+    // NOT auto-fail on a timer: the first run downloads multi-GB weights
+    // and a hard timeout false-fails a slow-but-healthy load (which is
+    // exactly what a fixed 30s cap did). The ticking counter is the
+    // proof-of-life that a static "Loading" lacked, and after
+    // WARMUP_SLOW_NOTICE_MS we append remedies in case it really is
+    // stuck — without giving up. A genuine load failure still rejects
+    // warmupSession (offscreen returns ok:false) and surfaces the error
+    // bubble below.
+    const warmHint = addMessage('system', 'Loading model… 0s');
+    const startedAt = Date.now();
+    const renderHint = () => {
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      warmHint.textContent =
+        Date.now() - startedAt >= WARMUP_SLOW_NOTICE_MS
+          ? `Loading model… ${secs}s. Taking longer than usual. A first run downloads a few GB, so this can be slow — it's still working. If it seems truly stuck, reload the extension from chrome://extensions, or set "device": "wasm" in .env.json for a CPU fallback.`
+          : `Loading model… ${secs}s (first run downloads the model; later loads start from cache).`;
+    };
+    renderHint();
+    const ticker = setInterval(renderHint, 1000);
     try {
       await warmupSession();
       modelReady = true;
+      clearInterval(ticker);
       if (warmHint.parentNode) warmHint.remove();
       // Once the model is up, size the history-warning threshold to
       // the actual adapter. Failures here are non-fatal — the default
@@ -728,6 +749,7 @@ export function initSession(deps: SessionDeps): void {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn('[local-nano] warmup failed:', message);
+      clearInterval(ticker);
       if (warmHint.parentNode) warmHint.remove();
       // Allow a retry on the next panel toggle (the offscreen-side
       // session promise also resets to null on failure, so the next
@@ -736,6 +758,7 @@ export function initSession(deps: SessionDeps): void {
       warmStarted = false;
       attachWarmupErrorBubble(message);
     } finally {
+      clearInterval(ticker);
       // Only return to idle if a real send didn't sneak in ahead of us.
       // activeAbort is set inside the send paths, so respect it here.
       if (!activeAbort) setIdleState(actionBtn, i);

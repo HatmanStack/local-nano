@@ -374,29 +374,6 @@ describe('warmupSession (content-script client)', () => {
     chromeMock.runtime.lastError = undefined;
   });
 
-  it('rejects with a timeout message when the count round-trip never settles', async () => {
-    vi.useFakeTimers();
-    try {
-      chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
-        const type = (msg as { type?: string })?.type;
-        if (type === ENSURE_OFFSCREEN_REQUEST) {
-          return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
-        }
-        // Simulate a hung model load: the count-tokens request never
-        // resolves (offscreen ensureSession() never settled).
-        return new Promise(() => {});
-      });
-      const p = warmupSession({ timeoutMs: 5000 });
-      // Attach a rejection handler before advancing timers so the
-      // rejection isn't flagged as unhandled.
-      const assertion = expect(p).rejects.toThrow(/timed out after 5s/);
-      await vi.advanceTimersByTimeAsync(5001);
-      await assertion;
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it('rejects when the ensure step fails', async () => {
     chromeMock.runtime.sendMessage.mockImplementation(async () => ({
       type: ENSURE_OFFSCREEN_RESPONSE,
