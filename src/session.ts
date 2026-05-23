@@ -505,17 +505,45 @@ export function initSession(deps: SessionDeps): void {
     try {
       await warmupSession();
       modelReady = true;
-    } catch (err) {
-      console.warn('[local-nano] warmup failed:', err);
-      // Allow a retry on the next panel open in case the failure was
-      // transient (offscreen doc creation race, sendMessage timing).
-      warmStarted = false;
-    } finally {
       if (warmHint.parentNode) warmHint.remove();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[local-nano] warmup failed:', message);
+      if (warmHint.parentNode) warmHint.remove();
+      // Allow a retry on the next panel toggle (the offscreen-side
+      // session promise also resets to null on failure, so the next
+      // attempt rebuilds from cached weights instead of inheriting a
+      // half-initialised session).
+      warmStarted = false;
+      attachWarmupErrorBubble(message);
+    } finally {
       // Only return to idle if a real send didn't sneak in ahead of us.
       // activeAbort is set inside the send paths, so respect it here.
       if (!activeAbort) setIdleState(actionBtn, i);
     }
+  }
+
+  /**
+   * Render a persistent system bubble describing why the model load
+   * failed, with a Retry button that re-runs `ensureWarm()`. Kept here
+   * instead of inside the catch so the error path stays readable.
+   */
+  function attachWarmupErrorBubble(message: string): void {
+    const trimmed = message.length > 240 ? `${message.slice(0, 240)}…` : message;
+    const bubble = addMessage(
+      'system',
+      `Model load failed.\n\n${trimmed}\n\nCommon causes: WebGPU memory pressure (close other tabs and retry), a partial model cache (reload the extension), or a transient driver hiccup. Switching device to "wasm" in .env.json is a slower fallback that avoids the GPU entirely.`,
+    );
+    const retryBtn = window.document.createElement('button');
+    retryBtn.textContent = 'Retry model load';
+    retryBtn.style.cssText =
+      'margin-top: 6px; padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
+    retryBtn.addEventListener('click', () => {
+      bubble.remove();
+      void ensureWarm();
+    });
+    bubble.appendChild(window.document.createElement('br'));
+    bubble.appendChild(retryBtn);
   }
 
   // ---- Toggle listener ----
