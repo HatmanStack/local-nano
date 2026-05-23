@@ -17,9 +17,24 @@ await mkdir(outDir, { recursive: true });
 await rm(outPath, { force: true });
 
 // -r recurse, -X drop extra file attributes for a reproducible archive.
+// icon-source.png is the high-res artwork the icon PNGs are generated
+// from; it isn't referenced at runtime, so keep it out of the upload.
 execFileSync(
   'zip',
-  ['-r', '-X', outPath, 'manifest.json', 'dist', 'icons', '-x', '*.map', '-x', '*.DS_Store'],
+  [
+    '-r',
+    '-X',
+    outPath,
+    'manifest.json',
+    'dist',
+    'icons',
+    '-x',
+    '*.map',
+    '-x',
+    '*.DS_Store',
+    '-x',
+    'icons/icon-source.png',
+  ],
   { stdio: 'inherit' },
 );
 

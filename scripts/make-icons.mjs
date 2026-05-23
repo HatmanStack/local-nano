@@ -1,17 +1,20 @@
-// Rasterize icons/icon.svg into the PNG sizes Chrome requires.
-// MV3 manifest icons must be raster PNGs (SVG is not supported), so the
-// SVG is the source of truth and the PNGs are generated artifacts.
-// Run with: node scripts/make-icons.mjs
-import { readFile } from 'node:fs/promises';
+// Regenerate the Chrome extension icon PNGs from the source artwork.
+// MV3 manifest icons must be square raster PNGs at 16/32/48/128 px;
+// icons/icon-source.png is the high-res source of truth (square) and
+// these are lanczos downscales of it. Requires ffmpeg on PATH.
+// Run with: npm run icons
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import sharp from 'sharp';
 
-const root = new URL('../icons/', import.meta.url);
-const svg = await readFile(new URL('icon.svg', root));
+const dir = new URL('../icons/', import.meta.url);
+const source = fileURLToPath(new URL('icon-source.png', dir));
 
 for (const size of [16, 32, 48, 128]) {
-  const out = fileURLToPath(new URL(`icon${size}.png`, root));
-  // High density so the SVG renders crisp before downscaling.
-  await sharp(svg, { density: 512 }).resize(size, size).png().toFile(out);
+  const out = fileURLToPath(new URL(`icon${size}.png`, dir));
+  execFileSync(
+    'ffmpeg',
+    ['-y', '-loglevel', 'error', '-i', source, '-vf', `scale=${size}:${size}:flags=lanczos`, out],
+    { stdio: 'inherit' },
+  );
   console.log(`wrote icons/icon${size}.png`);
 }
