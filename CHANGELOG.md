@@ -5,6 +5,33 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-05-23
+
+Hardens the selection-rewrite release for real-world GPUs and prepares the first Chrome Web Store submission. The headline is resilience: a memory-constrained adapter that used to fail silently now recovers, warns ahead of trouble, and tells the user what to do.
+
+### Added
+
+- **Model preloads when the panel opens.** Previously the first message ate the 30–90s WebGPU upload. Now opening the panel (Ctrl/Cmd+Shift+K) kicks off the load in the background with a live "Loading…" indicator (bouncing dots + a system bubble); the input stays editable while the Send button is gated until the model is ready.
+- **GPU out-of-memory resilience.** When a turn fails because the WebGPU device was lost or ran out of memory (the polyfill reports it as a zero-chunk stream), the offscreen layer tears the session down and the chat layer rebuilds it with a trimmed history, then retries once. If the retry also fails, an in-panel system bubble explains the likely cause and lists remedies (close GPU-heavy tabs, restart Chrome, switch to `wasm`).
+- **Proactive "Clear conversation" warning.** The panel tracks how large the conversation has grown and warns before the next turn is likely to exhaust VRAM, with a one-click button to reset the session. The warning threshold is derived per-session from the actual WebGPU adapter (or `device` / an optional `historyTokenWarnThreshold` in `.env.json`).
+- **Undo / Accept on rewrites.** A finished rewrite now offers both Undo (restore the original text) and Accept (commit and reset selection state for the next edit), instead of Undo alone.
+- **Model-load failure surfacing.** A failed or hung load shows a system bubble with the error and a Retry button rather than an indefinite spinner; the warmup has a 30s timeout so an out-of-band GPU error can't hang the panel forever.
+- **Brand icon** (`icons/`) and an `npm run package` step that zips a Web-Store-ready upload (manifest + `dist/` + icons).
+
+### Changed
+
+- Reduced requested permissions to `["storage", "offscreen"]`. Removed `activeTab` and `scripting` (the declarative `<all_urls>` content script already grants the page access the extension uses; nothing calls the `chrome.scripting` API) and the `cdn.jsdelivr.net` host permission (ONNX Runtime WASM loads from the bundled `dist/ort/`, never jsdelivr).
+
+### Fixed
+
+- Highlighting text then clicking into the chat input no longer drops the selection — focus-shift `selectionchange` events are ignored so the captured snapshot survives.
+- The rewrite path now trims reseed history on a GPU-error retry (matching the chat path), so a retry doesn't immediately hit the same out-of-memory wall.
+
+### Notes
+
+- All inference still runs on-device; the only network access remains the one-time model-weights download from Hugging Face. No new permissions touch the network beyond what 0.2.2 already declared (and jsdelivr was dropped).
+- See [docs/chrome-web-store.md](docs/chrome-web-store.md) for the submission checklist and permission justifications.
+
 ## [0.2.3] - 2026-05-19
 
 Restores selection-driven in-place rewrite, designed against the memory budget that killed v0.2.0. Highlight prose, type an instruction into the chat input, and the model rewrites the selection in place while tokens stream. A single-level Undo button on the resulting chat bubble restores the original text. Pressing Esc inside the input toggles to "Ask about selection" mode, which quotes the selection into a normal chat prompt without mutating the DOM.

@@ -13,6 +13,7 @@
 
 <p align="center">
   <a href="docs/architecture.md">Architecture</a> ·
+  <a href="docs/transform.md">Selection rewrite</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
   <a href="docs/models.md">Models</a> ·
   <a href="docs/privacy.md">Privacy</a> ·
@@ -22,13 +23,16 @@
   <a href="docs/contributing.md">Contributing</a>
 </p>
 
-A Chrome extension that puts a small, **fully local** AI assistant on every page you visit. Press a keyboard shortcut, a chat panel slides in, and an in-browser language model answers questions about the page you're reading — no API keys, no servers, no data leaving your machine after the model is downloaded.
+A Chrome extension that puts a small, **fully local** AI assistant on every page you visit. Press a keyboard shortcut, a chat panel slides in, and an in-browser language model answers questions about the page — or rewrites text you've highlighted, in place. No API keys, no servers, no data leaving your machine after the model is downloaded.
 
 > Status: experimental. Tested in Chrome 120+ on desktop. Runs on WebGPU when available and falls back to WASM CPU — see [docs/models.md](docs/models.md) for model and dtype tradeoffs in each mode.
 
 ## Highlights
 
 - **Runs in the browser, not the cloud.** Inference happens on-device via [Transformers.js](https://huggingface.co/docs/transformers.js) and the [ONNX Runtime Web](https://onnxruntime.ai/) WebAssembly/WebGPU backend.
+- **Highlight to rewrite.** Select text on the page, type an instruction, and the model rewrites it in place — tokens stream straight into the page. Each rewrite gets Undo / Accept. Press `Esc` to ask *about* the selection instead of editing it.
+- **One model, shared across tabs.** The model loads once into a background (offscreen) document and is reused on every page instead of reloading on each navigation. It preloads the moment you open the panel.
+- **Resilient on small GPUs.** Recovers from WebGPU out-of-memory by rebuilding the session, warns before the conversation outgrows your VRAM, and offers a one-click Clear conversation. See [docs/transform.md](docs/transform.md).
 - **Built on the proposed Prompt API.** Uses Google's [`prompt-api-polyfill`](https://github.com/GoogleChromeLabs/web-ai-demos/tree/main/prompt-api-polyfill) so the same code can target a native `LanguageModel` once browsers ship it.
 - **Per-tab chat history.** Conversations are scoped per URL and persisted in `chrome.storage.local`.
 - **Streaming + stop.** Tokens stream in as they're generated; you can interrupt mid-response.
@@ -53,7 +57,14 @@ Then in Chrome:
 3. Click **Load unpacked** and pick this repository's root directory.
 4. (Optional) bind the keyboard shortcut at `chrome://extensions/shortcuts`. Default is **Ctrl + Shift + K** (Cmd + Shift + K on macOS).
 
-Open any page, press the shortcut, and ask away. The first time you toggle the panel the model downloads (hundreds of MB to a few GB depending on which one you chose) — subsequent loads are cached.
+Open any page, press the shortcut, and ask away. The first time you toggle the panel the model downloads (hundreds of MB to a few GB depending on which one you chose) and loads — subsequent loads are cached and start in the background as soon as the panel opens.
+
+## Using it
+
+- **Chat about the page.** Open the panel and type. The first turn includes the page's title, URL, and a body excerpt as context.
+- **Rewrite a selection.** Highlight text on the page, then open the panel — the input switches to "Edit selection…" and a preview chip appears. Type an instruction ("make this concise", "translate to French") and press Enter; the rewrite streams into the page. Use **Undo** to revert or **Accept** to commit and move on.
+- **Ask about a selection.** With text highlighted, press `Esc` in the input to flip to "Ask about selection…" — sending now answers a question about the text instead of editing it, leaving the page untouched.
+- **Manage memory.** On a small GPU the panel warns when the conversation grows large enough to risk an out-of-memory error and offers **Clear conversation** to start fresh. If a turn fails on GPU memory, it rebuilds and retries automatically and surfaces what to try next.
 
 ## Configuration
 
@@ -88,6 +99,7 @@ The model weights are fetched from Hugging Face's CDN on first run. After that, 
 ## Documentation
 
 - [Architecture](docs/architecture.md) — components and data flow
+- [Selection rewrite](docs/transform.md) — highlight-to-edit flow, undo, GPU-memory handling
 - [Development](docs/development.md) — local setup, build, debugging
 - [Configuration](docs/configuration.md) — model, device, dtype
 - [Models & runtime notes](docs/models.md) — picking a model, running without WebGPU, ONNX op gotchas
