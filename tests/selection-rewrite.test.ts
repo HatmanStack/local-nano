@@ -197,7 +197,7 @@ describe('snapshotSelection', () => {
 // decideSnapshot -----------------------------------------------------------
 
 describe('decideSnapshot', () => {
-  it('returns null when activeEl === inputEl, regardless of selection', () => {
+  it('returns {action:"ignore"} when activeEl === inputEl, regardless of selection', () => {
     const inputEl = document.createElement('input');
     document.body.appendChild(inputEl);
     const p = document.createElement('p');
@@ -206,10 +206,12 @@ describe('decideSnapshot', () => {
     const text = p.firstChild as Text;
     const range = makeRangeFor(text, 0, 5);
     const sel = makeSelection(range);
-    expect(decideSnapshot({ activeEl: inputEl, inputEl, selection: sel })).toBeNull();
+    expect(decideSnapshot({ activeEl: inputEl, inputEl, selection: sel })).toEqual({
+      action: 'ignore',
+    });
   });
 
-  it('returns snapshotSelection(selection) when activeEl !== inputEl', () => {
+  it('returns {action:"set", snapshot} when activeEl !== inputEl and a selection exists', () => {
     const inputEl = document.createElement('input');
     document.body.appendChild(inputEl);
     const otherEl = document.createElement('div');
@@ -220,16 +222,22 @@ describe('decideSnapshot', () => {
     const text = p.firstChild as Text;
     const range = makeRangeFor(text, 0, 5);
     const sel = makeSelection(range);
-    const snap = decideSnapshot({ activeEl: otherEl, inputEl, selection: sel });
-    expect(snap).not.toBeNull();
-    expect(snap?.text).toBe('hello');
+    const decision = decideSnapshot({ activeEl: otherEl, inputEl, selection: sel });
+    expect(decision.action).toBe('set');
+    if (decision.action === 'set') {
+      expect(decision.snapshot.text).toBe('hello');
+    }
   });
 
-  it('returns null when selection is null regardless of activeEl', () => {
+  it('returns {action:"clear"} when selection is null and the input is not focused', () => {
     const inputEl = document.createElement('input');
     document.body.appendChild(inputEl);
-    expect(decideSnapshot({ activeEl: null, inputEl, selection: null })).toBeNull();
-    expect(decideSnapshot({ activeEl: document.body, inputEl, selection: null })).toBeNull();
+    expect(decideSnapshot({ activeEl: null, inputEl, selection: null })).toEqual({
+      action: 'clear',
+    });
+    expect(decideSnapshot({ activeEl: document.body, inputEl, selection: null })).toEqual({
+      action: 'clear',
+    });
   });
 });
 

@@ -137,6 +137,16 @@ export async function countTokens(
  * we want to actually wait for the load to complete, not fall back to a
  * heuristic. The offscreen side dedupes via its `sessionPromise`
  * singleton, so multiple concurrent warmups across tabs share one load.
+ *
+ * DEPENDENCY NOTE: this relies on the offscreen count-tokens handler
+ * calling `ensureSession()` (which loads the model) before measuring.
+ * It assumes `measureContextUsage` exercises the same initialization
+ * path as `promptStreaming`. If a future polyfill bump makes
+ * `measureContextUsage` cheaper / lazier such that it no longer forces
+ * a full model load, this probe will resolve before the model is
+ * actually ready and the first real prompt will eat the warmup cost.
+ * If that happens, switch this to a tiny throwaway `promptStreaming`
+ * call instead.
  */
 export async function warmupSession(): Promise<void> {
   await ensureViaServiceWorker();

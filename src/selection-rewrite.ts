@@ -110,7 +110,6 @@ function collectBeforeContext(
   const pieces: string[] = [];
   let remaining = budget;
   let reached = false;
-  let lastFromEnd = '';
   // Collect all text nodes up to and including endNode.
   const nodes: Text[] = [];
   let n: Node | null = walker.nextNode();
@@ -129,14 +128,8 @@ function collectBeforeContext(
   // Walk nodes in reverse to gather up to `budget` chars.
   for (let i = nodes.length - 1; i >= 0 && remaining > 0; i--) {
     const node = nodes[i];
-    let content: string;
-    if (i === nodes.length - 1) {
-      // Last node — only take up to endOffset.
-      content = node.data.slice(0, endOffset);
-      lastFromEnd = content;
-    } else {
-      content = node.data;
-    }
+    // Last node — only take up to endOffset (the selection start).
+    const content = i === nodes.length - 1 ? node.data.slice(0, endOffset) : node.data;
     if (content.length <= remaining) {
       pieces.unshift(content);
       remaining -= content.length;
@@ -145,8 +138,6 @@ function collectBeforeContext(
       remaining = 0;
     }
   }
-  // Silence unused-var lint for the intermediate variable.
-  void lastFromEnd;
   return pieces.join('');
 }
 
@@ -261,19 +252,39 @@ export function snapshotSelection(sel: Selection): SelectionSnapshot | null {
 }
 
 /**
- * Pure function wrapping ADR-007's input-focus suppression rule. Returns
- * null when the chat input is focused (so a `selectionchange` fired from
- * the focus shift does not clobber the previously captured snapshot);
- * otherwise delegates to `snapshotSelection`.
+ * Outcome of evaluating a `selectionchange` event (ADR-007). Three
+ * distinct actions, which is the whole point of the tri-state: a naive
+ * "snapshot | null" collapses "ignore this event" and "clear the
+ * selection" into the same `null`, and the consumer can't tell them
+ * apart — which is how the input-focus event ended up clobbering the
+ * captured snapshot.
+ *
+ * - `set`: a real page selection was captured; replace the snapshot.
+ * - `clear`: the page selection is genuinely gone; drop the snapshot.
+ * - `ignore`: the event came from focus moving into the chat input
+ *   (the page selection collapses on focus shift). Do nothing — the
+ *   previously captured snapshot must survive.
+ */
+export type SnapshotDecision =
+  | { action: 'set'; snapshot: SelectionSnapshot }
+  | { action: 'clear' }
+  | { action: 'ignore' };
+
+/**
+ * Pure function wrapping ADR-007's input-focus suppression rule. This is
+ * the single source of truth for whether a `selectionchange` event
+ * updates, clears, or is ignored — the content-script listener just
+ * acts on the returned action with no branching of its own.
  */
 export function decideSnapshot(args: {
   activeEl: Element | null;
   inputEl: Element;
   selection: Selection | null;
-}): SelectionSnapshot | null {
-  if (args.activeEl === args.inputEl) return null;
-  if (!args.selection) return null;
-  return snapshotSelection(args.selection);
+}): SnapshotDecision {
+  if (args.activeEl === args.inputEl) return { action: 'ignore' };
+  if (!args.selection) return { action: 'clear' };
+  const snapshot = snapshotSelection(args.selection);
+  return snapshot ? { action: 'set', snapshot } : { action: 'clear' };
 }
 
 /**

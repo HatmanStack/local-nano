@@ -124,29 +124,22 @@ closeBtn.addEventListener('click', () => {
   root.style.display = 'none';
 });
 
-// Selection capture. The pure decision logic lives in
-// `decideSnapshot`; this listener forwards to the session callback for
-// real page-selection events.
-//
-// The browser fires `selectionchange` when the user clicks into the
-// chat input because the page selection collapses on focus shift. That
-// event must NOT propagate to the session — otherwise the callback
-// would clobber the previously captured snapshot with null. Skip the
-// callback entirely when the input is the active element; the prior
-// snapshot survives until the user actually changes the page
-// selection (clicks back on the page, highlights something else, or
-// clears the selection on the page itself).
+// Selection capture. All the decision logic — including the input-focus
+// suppression rule (ADR-007) — lives in the pure `decideSnapshot`; this
+// listener just acts on the returned action. `ignore` means the event
+// came from focus moving into the chat input (the page selection
+// collapses on focus shift) and the prior snapshot must survive, so we
+// do nothing; `set`/`clear` forward a snapshot or null to the session.
 let selectionCb: ((snap: SelectionSnapshot | null) => void) | null = null;
 document.addEventListener('selectionchange', () => {
   if (!selectionCb) return;
-  if (document.activeElement === input) return;
-  selectionCb(
-    decideSnapshot({
-      activeEl: document.activeElement,
-      inputEl: input,
-      selection: window.getSelection(),
-    }),
-  );
+  const decision = decideSnapshot({
+    activeEl: document.activeElement,
+    inputEl: input,
+    selection: window.getSelection(),
+  });
+  if (decision.action === 'ignore') return;
+  selectionCb(decision.action === 'set' ? decision.snapshot : null);
 });
 
 initSession({

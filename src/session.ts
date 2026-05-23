@@ -203,15 +203,16 @@ export function initSession(deps: SessionDeps): void {
     if (!snap) askMode = false;
     updatePlaceholder();
     updateChip();
-    // Diagnostic: confirms whether selectionchange round-trips after a
-    // rewrite. Keep DevTools console open while reproducing
-    // subsequent-rewrite issues — a missing log on a re-highlight means
-    // the listener never fired.
+    // Diagnostic at debug level: selectionchange fires continuously
+    // while dragging a selection, so this would flood the default
+    // console. Surfaced via console.debug — visible when the user
+    // raises the DevTools log level to debug while reproducing
+    // subsequent-rewrite issues, hidden otherwise.
     if (snap) {
       const preview = snap.text.length > 40 ? `${snap.text.slice(0, 40)}…` : snap.text;
-      console.log(`[local-nano] selection captured: "${preview}"`);
+      console.debug(`[local-nano] selection captured: "${preview}"`);
     } else {
-      console.log('[local-nano] selection cleared');
+      console.debug('[local-nano] selection cleared');
     }
   });
 
@@ -418,6 +419,14 @@ export function initSession(deps: SessionDeps): void {
       if (name === 'AbortError') {
         modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
         responseEl.textContent = modelText;
+      } else if (isDeviceLossError(err)) {
+        // Asks are short prompts and rarely OOM, so we don't bother with
+        // a rebuild-retry (and there's no DOM mutation to recover). But
+        // if the GPU does fail, give the user the same actionable
+        // remedy guidance instead of a bare error string.
+        addMessage('system', GPU_OOM_REMEDY_TEXT);
+        modelText = '[GPU error — see system message above]';
+        responseEl.textContent = modelText;
       } else {
         modelText = err instanceof Error ? err.message : String(err);
         responseEl.textContent = modelText;
@@ -464,8 +473,10 @@ export function initSession(deps: SessionDeps): void {
     let modelText = '';
     let firstChunk = true;
     let succeeded = false;
+    let rebuildHint: HTMLElement | null = null;
     const onChunk = (chunk: string) => {
       if (firstChunk) {
+        if (rebuildHint?.parentNode) rebuildHint.remove();
         responseEl.textContent = '';
         firstChunk = false;
       }
@@ -481,13 +492,22 @@ export function initSession(deps: SessionDeps): void {
       } catch (err) {
         if (!isDeviceLossError(err) || activeAbort.signal.aborted) throw err;
         didRebuildRetry = true;
+        rebuildHint = addMessage(
+          'system',
+          'GPU error (device loss or out-of-memory). Trimming history and retrying once…',
+        );
         modelText = '';
         firstChunk = true;
+        // Same trim as sendChat: a long accumulated polyfill history is
+        // a typical OOM trigger, so reseed with only the recent turns
+        // rather than dragging the full history (and the same memory
+        // pressure) into the fresh session.
         const historyForReseed = history
           .slice(0, -1)
           .filter(
             (entry): entry is { role: 'user' | 'model'; text: string } => entry.role !== 'system',
-          );
+          )
+          .slice(-RECENT_HISTORY_FOR_REBUILD);
         await rebuildSession(historyForReseed);
         await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
       }
@@ -497,12 +517,19 @@ export function initSession(deps: SessionDeps): void {
       if (name === 'AbortError') {
         modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
         responseEl.textContent = modelText;
+      } else if (didRebuildRetry && isDeviceLossError(err)) {
+        // Rebuild + trimmed history didn't help — the GPU is genuinely
+        // out of resources for this rewrite. Surface the remedy bubble.
+        addMessage('system', GPU_OOM_REMEDY_TEXT);
+        modelText = '[GPU error — see system message above]';
+        responseEl.textContent = modelText;
       } else {
         modelText = err instanceof Error ? err.message : String(err);
         responseEl.textContent = modelText;
       }
     } finally {
       if (indicator.parentNode) indicator.remove();
+      if (rebuildHint?.parentNode) rebuildHint.remove();
       if (!modelText) {
         responseEl.textContent = '(no response — the model returned an empty answer)';
       }

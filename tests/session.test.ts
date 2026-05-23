@@ -786,6 +786,71 @@ describe('initSession — selection mode', () => {
     expect(undoBtn?.textContent).toContain('Undone');
   });
 
+  it('rewrite rebuild-retry trims reseed history to the last 4 entries and retries the same prompt', async () => {
+    const key = `local-nano:history:https://example.com/page`;
+    chromeMock.storage.local.store[key] = [
+      { role: 'user', text: 'u1' },
+      { role: 'model', text: 'm1' },
+      { role: 'user', text: 'u2' },
+      { role: 'model', text: 'm2' },
+      { role: 'user', text: 'u3' },
+      { role: 'model', text: 'm3' },
+    ];
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+
+    deps._fireSelectionChange(makeFakeSnapshot({ text: 'target' }));
+    deps._input.value = 'make it bold';
+    deps._actionBtn.click();
+
+    const first = await awaitPending();
+    const rewritePrompt = first.prompt;
+    first.reject(
+      new Error(
+        'Model returned no output. Likely cause: WebGPU device loss, GPU out-of-memory (Vulkan VK_ERROR_OUT_OF_DEVICE_MEMORY), or a polyfill backend error.',
+      ),
+    );
+
+    const retry = await awaitPending();
+    // Rewrite retry resends the SAME framed prompt (unlike chat, which
+    // resends bare text) because the rewrite prompt is self-contained.
+    expect(retry.prompt).toBe(rewritePrompt);
+    expect(rebuildSessionMock).toHaveBeenCalledTimes(1);
+    // History reseed: [u1..m3, "make it bold"] → drop the just-added
+    // user turn → keep last 4 → [u2, m2, u3, m3].
+    expect(rebuildSessionMock.mock.calls[0][0]).toEqual([
+      { role: 'user', text: 'u2' },
+      { role: 'model', text: 'm2' },
+      { role: 'user', text: 'u3' },
+      { role: 'model', text: 'm3' },
+    ]);
+    retry.opts.onChunk?.('BOLD');
+    retry.resolve('BOLD');
+    await flushMicrotasks();
+  });
+
+  it('rewrite shows the GPU OOM remedy bubble when the rebuild retry also fails', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._fireSelectionChange(makeFakeSnapshot({ text: 'target' }));
+    deps._input.value = 'make it bold';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    first.reject(
+      new Error('GPU out-of-memory (VK_ERROR_OUT_OF_DEVICE_MEMORY). Model returned no output.'),
+    );
+    const retry = await awaitPending();
+    retry.reject(new Error('Model returned no output. WebGPU device loss again.'));
+    await flushMicrotasks();
+    const remedy = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('GPU could not run this prompt'),
+    );
+    expect(remedy).toBeTruthy();
+    expect(remedy?.textContent).toContain('device": "wasm"');
+  });
+
   it('rewrite send on success persists both turns to chrome.storage.local under the per-URL key', async () => {
     const deps = makeDeps();
     initSession(deps);
