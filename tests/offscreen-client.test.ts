@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   countTokens,
+  getGpuInfo,
   rebuildSession,
   sendPrompt,
   streamPrompt,
@@ -11,6 +12,8 @@ import {
   COUNT_TOKENS_RESPONSE,
   ENSURE_OFFSCREEN_REQUEST,
   ENSURE_OFFSCREEN_RESPONSE,
+  GPU_INFO_REQUEST,
+  GPU_INFO_RESPONSE,
   REBUILD_SESSION_REQUEST,
   REBUILD_SESSION_RESPONSE,
   STREAM_CHUNK,
@@ -375,5 +378,76 @@ describe('warmupSession (content-script client)', () => {
       error: 'offscreen blocked',
     }));
     await expect(warmupSession()).rejects.toThrow('offscreen blocked');
+  });
+});
+
+describe('getGpuInfo (content-script client)', () => {
+  beforeEach(() => {
+    chromeMock.runtime.lastError = undefined;
+  });
+
+  it('ensures offscreen then returns the GPU snapshot', async () => {
+    const seen: unknown[] = [];
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      seen.push(msg);
+      const type = (msg as { type?: string })?.type;
+      if (type === ENSURE_OFFSCREEN_REQUEST) {
+        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+      }
+      if (type === GPU_INFO_REQUEST) {
+        return {
+          type: GPU_INFO_RESPONSE,
+          ok: true,
+          device: 'webgpu',
+          isFallback: false,
+          maxBufferSize: 2147483648,
+          configuredThreshold: null,
+        };
+      }
+      return undefined;
+    });
+    await expect(getGpuInfo()).resolves.toEqual({
+      device: 'webgpu',
+      isFallback: false,
+      maxBufferSize: 2147483648,
+      configuredThreshold: null,
+    });
+    expect(seen[0]).toEqual({ type: ENSURE_OFFSCREEN_REQUEST });
+    expect(seen[1]).toEqual({ type: GPU_INFO_REQUEST });
+  });
+
+  it('rejects when the offscreen reply is ok:false', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      const type = (msg as { type?: string })?.type;
+      if (type === ENSURE_OFFSCREEN_REQUEST) {
+        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+      }
+      return { type: GPU_INFO_RESPONSE, ok: false, error: 'gpu unavailable' };
+    });
+    await expect(getGpuInfo()).rejects.toThrow('gpu unavailable');
+  });
+
+  it('rejects when the reply is malformed', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      const type = (msg as { type?: string })?.type;
+      if (type === ENSURE_OFFSCREEN_REQUEST) {
+        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+      }
+      return { type: 'something-else' };
+    });
+    await expect(getGpuInfo()).rejects.toThrow(/malformed/);
+  });
+
+  it('rejects when chrome.runtime.lastError is set', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      const type = (msg as { type?: string })?.type;
+      if (type === ENSURE_OFFSCREEN_REQUEST) {
+        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+      }
+      chromeMock.runtime.lastError = { message: 'port closed' };
+      return undefined;
+    });
+    await expect(getGpuInfo()).rejects.toThrow(/port closed/);
+    chromeMock.runtime.lastError = undefined;
   });
 });

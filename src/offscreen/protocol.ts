@@ -89,6 +89,57 @@ export function isRebuildSessionResponse(value: unknown): value is RebuildSessio
   return false;
 }
 
+export const GPU_INFO_REQUEST = 'offscreen/gpu-info-request' as const;
+export const GPU_INFO_RESPONSE = 'offscreen/gpu-info-response' as const;
+
+/**
+ * Snapshot of the offscreen environment used by the chat layer to size
+ * its memory-pressure warning threshold to the actual hardware. Queried
+ * once per session after warmup completes.
+ *
+ * `device` mirrors `.env.json` (`webgpu` or `wasm`). `isFallback` is
+ * true when the WebGPU adapter is the software fallback (Dawn's SwANGLE
+ * path), which is heavily constrained. `maxBufferSize` is the WebGPU
+ * adapter's single-allocation ceiling in bytes — not total VRAM, but a
+ * usable proxy for hardware class. `configuredThreshold` mirrors an
+ * optional `historyTokenWarnThreshold` field in `.env.json` so power
+ * users can override the derived default.
+ */
+export interface GpuInfoSnapshot {
+  device: 'webgpu' | 'wasm';
+  isFallback: boolean;
+  maxBufferSize: number | null;
+  configuredThreshold: number | null;
+}
+
+export interface GpuInfoRequest {
+  type: typeof GPU_INFO_REQUEST;
+}
+
+export type GpuInfoResponse =
+  | ({ type: typeof GPU_INFO_RESPONSE; ok: true } & GpuInfoSnapshot)
+  | { type: typeof GPU_INFO_RESPONSE; ok: false; error: string };
+
+export function isGpuInfoRequest(value: unknown): value is GpuInfoRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  return (value as Record<string, unknown>).type === GPU_INFO_REQUEST;
+}
+
+export function isGpuInfoResponse(value: unknown): value is GpuInfoResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== GPU_INFO_RESPONSE) return false;
+  if (v.ok === true) {
+    if (v.device !== 'webgpu' && v.device !== 'wasm') return false;
+    if (typeof v.isFallback !== 'boolean') return false;
+    if (v.maxBufferSize !== null && typeof v.maxBufferSize !== 'number') return false;
+    if (v.configuredThreshold !== null && typeof v.configuredThreshold !== 'number') return false;
+    return true;
+  }
+  if (v.ok === false) return typeof v.error === 'string';
+  return false;
+}
+
 export const COUNT_TOKENS_REQUEST = 'offscreen/count-tokens-request' as const;
 export const COUNT_TOKENS_RESPONSE = 'offscreen/count-tokens-response' as const;
 

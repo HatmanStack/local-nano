@@ -12,9 +12,13 @@ import {
   type CountTokensRequest,
   ENSURE_OFFSCREEN_REQUEST,
   type EnsureOffscreenRequest,
+  GPU_INFO_REQUEST,
+  type GpuInfoRequest,
+  type GpuInfoSnapshot,
   type HistoryTurn,
   isCountTokensResponse,
   isEnsureOffscreenResponse,
+  isGpuInfoResponse,
   isRebuildSessionResponse,
   REBUILD_SESSION_REQUEST,
   type RebuildSessionRequest,
@@ -146,6 +150,38 @@ export async function warmupSession(): Promise<void> {
     throw new Error('warmup-session: malformed reply from offscreen');
   }
   if (!reply.ok) throw new Error(reply.error);
+}
+
+/**
+ * Query the offscreen environment for runtime info: device type
+ * (webgpu/wasm), whether the WebGPU adapter is the software fallback,
+ * the adapter's max single-buffer allocation (a usable proxy for VRAM
+ * class), and any explicit override from `.env.json`. The chat layer
+ * uses this to size its memory-pressure warning threshold to the
+ * actual hardware.
+ *
+ * Queried once per session after warmup. Failures resolve with a
+ * conservative shape (webgpu / fallback / no buffer info) rather than
+ * rejecting, so a transient transport hiccup doesn't break warmup.
+ */
+export async function getGpuInfo(): Promise<GpuInfoSnapshot> {
+  await ensureViaServiceWorker();
+  const request: GpuInfoRequest = { type: GPU_INFO_REQUEST };
+  const reply = (await chrome.runtime.sendMessage(request)) as unknown;
+  const lastError = chrome.runtime.lastError;
+  if (lastError) {
+    throw new Error(`gpu-info failed: ${lastError.message ?? 'unknown'}`);
+  }
+  if (!isGpuInfoResponse(reply)) {
+    throw new Error('gpu-info: malformed reply from offscreen');
+  }
+  if (!reply.ok) throw new Error(reply.error);
+  return {
+    device: reply.device,
+    isFallback: reply.isFallback,
+    maxBufferSize: reply.maxBufferSize,
+    configuredThreshold: reply.configuredThreshold,
+  };
 }
 
 /**

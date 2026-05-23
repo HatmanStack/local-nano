@@ -21,8 +21,11 @@ import transformersConfig from './.env.json';
 import {
   COUNT_TOKENS_RESPONSE,
   type CountTokensResponse,
+  GPU_INFO_RESPONSE,
+  type GpuInfoResponse,
   type HistoryTurn,
   isCountTokensRequest,
+  isGpuInfoRequest,
   isRebuildSessionRequest,
   isStreamAbort,
   isStreamRequest,
@@ -132,6 +135,91 @@ async function rebuildSession(history: HistoryTurn[]): Promise<void> {
   sessionPromise = null;
   await ensureSession(history);
 }
+
+interface MaybeGpuAdapter {
+  isFallbackAdapter?: boolean;
+  limits?: { maxBufferSize?: number };
+}
+
+async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
+  const cfg = transformersConfig as { device?: string; historyTokenWarnThreshold?: number };
+  const device: 'webgpu' | 'wasm' = cfg.device === 'wasm' ? 'wasm' : 'webgpu';
+  const configuredThreshold =
+    typeof cfg.historyTokenWarnThreshold === 'number' &&
+    Number.isFinite(cfg.historyTokenWarnThreshold)
+      ? cfg.historyTokenWarnThreshold
+      : null;
+
+  if (device === 'wasm') {
+    return {
+      type: GPU_INFO_RESPONSE,
+      ok: true,
+      device,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold,
+    };
+  }
+
+  const gpu = (
+    navigator as unknown as { gpu?: { requestAdapter?: () => Promise<MaybeGpuAdapter | null> } }
+  ).gpu;
+  if (!gpu?.requestAdapter) {
+    return {
+      type: GPU_INFO_RESPONSE,
+      ok: true,
+      device,
+      isFallback: true,
+      maxBufferSize: null,
+      configuredThreshold,
+    };
+  }
+  try {
+    const adapter = await gpu.requestAdapter();
+    if (!adapter) {
+      return {
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device,
+        isFallback: true,
+        maxBufferSize: null,
+        configuredThreshold,
+      };
+    }
+    const maxBufferSize =
+      typeof adapter.limits?.maxBufferSize === 'number' ? adapter.limits.maxBufferSize : null;
+    return {
+      type: GPU_INFO_RESPONSE,
+      ok: true,
+      device,
+      isFallback: Boolean(adapter.isFallbackAdapter),
+      maxBufferSize,
+      configuredThreshold,
+    };
+  } catch {
+    return {
+      type: GPU_INFO_RESPONSE,
+      ok: true,
+      device,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold,
+    };
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!isGpuInfoRequest(msg)) return false;
+  collectGpuInfo().then(
+    (reply) => sendResponse(reply),
+    (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      const fail: GpuInfoResponse = { type: GPU_INFO_RESPONSE, ok: false, error: message };
+      sendResponse(fail);
+    },
+  );
+  return true;
+});
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!isRebuildSessionRequest(msg)) return false;

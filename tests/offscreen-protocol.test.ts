@@ -4,10 +4,14 @@ import {
   COUNT_TOKENS_RESPONSE,
   ENSURE_OFFSCREEN_REQUEST,
   ENSURE_OFFSCREEN_RESPONSE,
+  GPU_INFO_REQUEST,
+  GPU_INFO_RESPONSE,
   isCountTokensRequest,
   isCountTokensResponse,
   isEnsureOffscreenRequest,
   isEnsureOffscreenResponse,
+  isGpuInfoRequest,
+  isGpuInfoResponse,
   isRebuildSessionRequest,
   isRebuildSessionResponse,
   isStreamAbort,
@@ -45,6 +49,96 @@ describe('protocol discriminators', () => {
   it('keeps count-tokens constants stable', () => {
     expect(COUNT_TOKENS_REQUEST).toBe('offscreen/count-tokens-request');
     expect(COUNT_TOKENS_RESPONSE).toBe('offscreen/count-tokens-response');
+  });
+
+  it('keeps gpu-info constants stable', () => {
+    expect(GPU_INFO_REQUEST).toBe('offscreen/gpu-info-request');
+    expect(GPU_INFO_RESPONSE).toBe('offscreen/gpu-info-response');
+  });
+});
+
+describe('isGpuInfoRequest', () => {
+  it('accepts a well-formed request', () => {
+    expect(isGpuInfoRequest({ type: GPU_INFO_REQUEST })).toBe(true);
+  });
+  it('rejects null and wrong discriminator', () => {
+    expect(isGpuInfoRequest(null)).toBe(false);
+    expect(isGpuInfoRequest({ type: 'other' })).toBe(false);
+  });
+});
+
+describe('isGpuInfoResponse', () => {
+  it('accepts a full ok:true snapshot', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'webgpu',
+        isFallback: false,
+        maxBufferSize: 2147483648,
+        configuredThreshold: 1500,
+      }),
+    ).toBe(true);
+  });
+
+  it('accepts null maxBufferSize and configuredThreshold', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'wasm',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects unknown device strings', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'metal',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects non-numeric maxBufferSize', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'webgpu',
+        isFallback: false,
+        maxBufferSize: '4 GiB',
+        configuredThreshold: null,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects ok:true with non-boolean isFallback', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'webgpu',
+        isFallback: 'no',
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(false);
+  });
+
+  it('accepts ok:false with error string', () => {
+    expect(isGpuInfoResponse({ type: GPU_INFO_RESPONSE, ok: false, error: 'boom' })).toBe(true);
+  });
+
+  it('rejects wrong discriminator', () => {
+    expect(isGpuInfoResponse({ type: 'other', ok: true })).toBe(false);
   });
 });
 

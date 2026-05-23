@@ -54,6 +54,19 @@ Not every model publishes every variant — check the model's `onnx/` folder on 
 
 Unused by the Transformers.js backend. Kept in the shape because the upstream polyfill supports cloud backends (firebase / gemini / openai) that need real keys; the slimmed `backends-registry.js` in this repo only ships the Transformers.js backend.
 
+### `historyTokenWarnThreshold` (number, optional)
+
+Override for the conversation-history token threshold above which the panel surfaces a "Clear conversation" warning. When absent, the panel queries the WebGPU adapter at warmup and derives a threshold automatically:
+
+- `wasm` device — `8000` (CPU has gigabytes of system RAM)
+- WebGPU software fallback — `800` (very constrained)
+- WebGPU `maxBufferSize` &lt; 512 MiB — `1000`
+- WebGPU `maxBufferSize` &lt; 1 GiB — `1500`
+- WebGPU `maxBufferSize` &lt; 2 GiB — `2500`
+- WebGPU `maxBufferSize` &ge; 2 GiB — `4000`
+
+Set this field if the auto-derived value is wrong for your hardware. The number is in estimated tokens (`chars / 3` over persisted history text); typical chat turn is ~100-300 tokens, typical rewrite turn ~400-600.
+
 ## Changing the keyboard shortcut
 
 The shortcut isn't in `.env.json` — it's in `manifest.json` under `commands.toggle_ai_palette.suggested_key`. To override per-user, go to `chrome://extensions/shortcuts` and rebind there; you don't need to rebuild.

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TOGGLE_MESSAGE } from '../src/background/handler.js';
 import { MAX_HISTORY } from '../src/history.js';
 import type { SelectionSnapshot } from '../src/selection-rewrite.js';
-import { initSession, type SessionDeps } from '../src/session.js';
+import { deriveHistoryThreshold, initSession, type SessionDeps } from '../src/session.js';
 import { chromeMock } from './setup.js';
 
 // ---------------------------------------------------------------------------
@@ -35,10 +35,17 @@ vi.mock('../src/offscreen/client.js', () => ({
   rebuildSession: vi.fn(() => Promise.resolve()),
   countTokens: vi.fn(async (text: string) => Math.ceil(text.length / 3)),
   warmupSession: vi.fn(() => Promise.resolve()),
+  getGpuInfo: vi.fn(async () => ({
+    device: 'webgpu' as const,
+    isFallback: false,
+    maxBufferSize: null,
+    configuredThreshold: null,
+  })),
 }));
 
 import {
   countTokens as mockedCountTokens,
+  getGpuInfo as mockedGetGpuInfo,
   rebuildSession as mockedRebuildSession,
   streamPrompt as mockedStreamPrompt,
   warmupSession as mockedWarmupSession,
@@ -48,6 +55,7 @@ const streamPromptMock = mockedStreamPrompt as unknown as ReturnType<typeof vi.f
 const rebuildSessionMock = mockedRebuildSession as unknown as ReturnType<typeof vi.fn>;
 const countTokensMock = mockedCountTokens as unknown as ReturnType<typeof vi.fn>;
 const warmupSessionMock = mockedWarmupSession as unknown as ReturnType<typeof vi.fn>;
+const getGpuInfoMock = mockedGetGpuInfo as unknown as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1085,6 +1093,67 @@ describe('initSession — history pressure tracking', () => {
     expect(secondCount).toBe(1);
   });
 
+  it('uses the GPU-info derived threshold (low for fallback adapter) instead of the default', async () => {
+    // Fallback adapter → threshold drops to 800. Pre-seed enough
+    // history to land between 800 and 1500 (default) so the warning
+    // only fires under the lower threshold.
+    getGpuInfoMock.mockResolvedValueOnce({
+      device: 'webgpu',
+      isFallback: true,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+    const key = `local-nano:history:https://example.com/page`;
+    chromeMock.storage.local.store[key] = [
+      { role: 'user', text: 'x'.repeat(1500) },
+      { role: 'model', text: 'x'.repeat(1500) },
+    ]; // ~1000 tokens via chars/3 — above 800, below 1500.
+
+    const deps = makeDeps();
+    initSession(deps);
+    // Trigger warmup so getGpuInfo + threshold derivation runs.
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+
+    deps._input.value = 'next';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('ok');
+    call.resolve('ok');
+    await flushMicrotasks();
+
+    const bubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    );
+    expect(bubble).toBeTruthy();
+  });
+
+  it('honors a configuredThreshold from .env.json over any derivation', async () => {
+    getGpuInfoMock.mockResolvedValueOnce({
+      device: 'webgpu',
+      isFallback: false,
+      maxBufferSize: 4 * 1024 * 1024 * 1024,
+      configuredThreshold: 300,
+    });
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    // ~333-token history (1000 chars / 3) — above the 300 configured
+    // threshold but well below any auto-derived value for a 4 GiB
+    // adapter.
+    deps._input.value = 'x'.repeat(1000);
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('ok');
+    call.resolve('ok');
+    await flushMicrotasks();
+    const bubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    );
+    expect(bubble).toBeTruthy();
+  });
+
   it('clicking Clear conversation calls rebuildSession with empty history, wipes UI and storage', async () => {
     const key = `local-nano:history:https://example.com/page`;
     chromeMock.storage.local.store[key] = Array.from({ length: 6 }, (_, idx) => ({
@@ -1114,5 +1183,72 @@ describe('initSession — history pressure tracking', () => {
     expect(after.some((t) => t?.includes('one more'))).toBe(false);
     // Persisted history is reset.
     expect(chromeMock.storage.local.store[key]).toEqual([]);
+  });
+});
+
+describe('deriveHistoryThreshold', () => {
+  it('honors an explicit configuredThreshold above everything else', () => {
+    expect(
+      deriveHistoryThreshold({
+        device: 'webgpu',
+        isFallback: true,
+        maxBufferSize: 0,
+        configuredThreshold: 42,
+      }),
+    ).toBe(42);
+    expect(
+      deriveHistoryThreshold({
+        device: 'wasm',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: 12345,
+      }),
+    ).toBe(12345);
+  });
+
+  it('returns a generous threshold for WASM (CPU has system RAM)', () => {
+    expect(
+      deriveHistoryThreshold({
+        device: 'wasm',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(8000);
+  });
+
+  it('drops the threshold sharply for the software fallback adapter', () => {
+    expect(
+      deriveHistoryThreshold({
+        device: 'webgpu',
+        isFallback: true,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(800);
+  });
+
+  it('falls back to the default when maxBufferSize is unknown', () => {
+    expect(
+      deriveHistoryThreshold({
+        device: 'webgpu',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(1500);
+  });
+
+  it('scales the threshold with maxBufferSize bands', () => {
+    const mk = (mb: number) => ({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: mb * 1024 * 1024,
+      configuredThreshold: null,
+    });
+    expect(deriveHistoryThreshold(mk(256))).toBe(1000); // <512 MiB → 1000
+    expect(deriveHistoryThreshold(mk(768))).toBe(1500); // <1 GiB → 1500
+    expect(deriveHistoryThreshold(mk(1536))).toBe(2500); // <2 GiB → 2500
+    expect(deriveHistoryThreshold(mk(4096))).toBe(4000); // >=2 GiB → 4000
   });
 });

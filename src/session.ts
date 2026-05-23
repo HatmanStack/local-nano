@@ -7,7 +7,14 @@ import {
   saveHistory as saveHistoryToStorage,
   storageKey,
 } from './history.js';
-import { countTokens, rebuildSession, streamPrompt, warmupSession } from './offscreen/client.js';
+import {
+  countTokens,
+  getGpuInfo,
+  rebuildSession,
+  streamPrompt,
+  warmupSession,
+} from './offscreen/client.js';
+import type { GpuInfoSnapshot } from './offscreen/protocol.js';
 import { pageContext } from './pageContext.js';
 import {
   buildAskPrompt,
@@ -53,20 +60,41 @@ const CHIP_MAX_CHARS = 60;
 const RECENT_HISTORY_FOR_REBUILD = 4;
 
 /**
- * Heuristic threshold (in estimated tokens) at which we warn the user
- * that the accumulated conversation history is large enough to risk
- * GPU memory pressure on the next turn. The heuristic is `chars / 3`
- * over the persisted history text, matching the fallback the
- * count-tokens channel uses when the polyfill round-trip times out;
- * underestimates a little (no system prompt, no chat-template tokens)
- * which is fine — we'd rather warn slightly early than slightly late.
- *
- * Tune for the most-constrained adapter you expect users to run on.
- * 1500 ≈ the threshold at which a turn-4 rewrite was OOMing for the
- * user who reported VK_ERROR_OUT_OF_DEVICE_MEMORY on integrated
- * graphics; ~2000-token KV cache plus weights crossed the cliff.
+ * Default heuristic threshold (in estimated tokens) for warning when
+ * accumulated history risks GPU memory pressure. Used only as a
+ * fallback — the actual threshold is normally derived per-session
+ * from the queried WebGPU adapter limits (see deriveHistoryThreshold).
+ * If `.env.json` defines a `historyTokenWarnThreshold` field, that
+ * overrides everything.
  */
-const HISTORY_TOKEN_WARN_THRESHOLD = 1500;
+const HISTORY_TOKEN_WARN_THRESHOLD_DEFAULT = 1500;
+
+/**
+ * Map a GPU-info snapshot to a token-history warning threshold.
+ * Lifted to module scope so it's unit-testable without going through
+ * initSession.
+ *
+ * Reasoning:
+ * - WASM device → CPU does the inference, system RAM is in the gigabytes,
+ *   raise the threshold so we effectively never warn for normal sessions.
+ * - Fallback adapter (Dawn SwANGLE) → very constrained, warn early.
+ * - WebGPU with a known maxBufferSize → step down with the adapter:
+ *   integrated GPUs cap around 256-512 MiB single buffers, mid-range
+ *   discrete sits at 1-2 GiB, high-end and Apple Silicon at 4+ GiB.
+ *   These don't map directly to VRAM total but correlate strongly with
+ *   hardware class.
+ */
+export function deriveHistoryThreshold(info: GpuInfoSnapshot): number {
+  if (info.configuredThreshold !== null) return info.configuredThreshold;
+  if (info.device === 'wasm') return 8000;
+  if (info.isFallback) return 800;
+  if (info.maxBufferSize === null) return HISTORY_TOKEN_WARN_THRESHOLD_DEFAULT;
+  const mb = info.maxBufferSize / (1024 * 1024);
+  if (mb < 512) return 1000;
+  if (mb < 1024) return 1500;
+  if (mb < 2048) return 2500;
+  return 4000;
+}
 
 const GPU_OOM_REMEDY_TEXT =
   'GPU could not run this prompt even after rebuilding the session with a trimmed history. The most common cause is WebGPU memory pressure — Gemma-4 q4 needs about 1.6 GB of weights plus a KV cache that grows with each turn. To recover:\n\n• Close other GPU-heavy tabs (other AI extensions, video, WebGL) and try again.\n• Restart Chrome to fully reset the GPU process.\n• Switch to CPU-only by setting "device": "wasm" in .env.json, then npm run build and reload the extension. Slower per token but uses system RAM instead of VRAM.';
@@ -504,8 +532,10 @@ export function initSession(deps: SessionDeps): void {
   // ---- History pressure tracking ----
   // Once warned, suppress until the user actually clears (or rebuilds);
   // we don't want a warning bubble on every turn after the threshold is
-  // crossed.
+  // crossed. The threshold itself is set per-session from the queried
+  // GPU info; until that resolves (or if it fails) we use the default.
   let warnedAboutHistory = false;
+  let historyThreshold = HISTORY_TOKEN_WARN_THRESHOLD_DEFAULT;
   function estimateHistoryTokens(): number {
     let totalChars = 0;
     for (const entry of history) totalChars += entry.text.length;
@@ -515,7 +545,7 @@ export function initSession(deps: SessionDeps): void {
   function checkHistoryPressure(): void {
     if (warnedAboutHistory) return;
     const tokens = estimateHistoryTokens();
-    if (tokens < HISTORY_TOKEN_WARN_THRESHOLD) return;
+    if (tokens < historyThreshold) return;
     warnedAboutHistory = true;
     attachHistoryPressureBubble(tokens);
   }
@@ -622,6 +652,21 @@ export function initSession(deps: SessionDeps): void {
       await warmupSession();
       modelReady = true;
       if (warmHint.parentNode) warmHint.remove();
+      // Once the model is up, size the history-warning threshold to
+      // the actual adapter. Failures here are non-fatal — the default
+      // already covers the typical integrated-GPU case.
+      try {
+        const info = await getGpuInfo();
+        historyThreshold = deriveHistoryThreshold(info);
+        console.log(
+          `[local-nano] history threshold: ${historyThreshold} (device=${info.device}, isFallback=${info.isFallback}, maxBufferSize=${info.maxBufferSize ?? 'n/a'}, configured=${info.configuredThreshold ?? 'n/a'})`,
+        );
+      } catch (gpuErr) {
+        console.warn(
+          '[local-nano] gpu-info query failed; using default history threshold:',
+          gpuErr,
+        );
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn('[local-nano] warmup failed:', message);
