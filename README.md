@@ -75,7 +75,7 @@ Configuration lives in `.env.json` at the repo root. See [`.env.example.json`](.
 {
   "apiKey": "dummy",
   "device": "webgpu",
-  "dtype": "q4",
+  "dtype": "q4f16",
   "modelName": "onnx-community/gemma-4-E2B-it-ONNX"
 }
 ```

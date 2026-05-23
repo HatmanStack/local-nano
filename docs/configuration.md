@@ -10,7 +10,7 @@ cp .env.example.json .env.json
 {
   "apiKey": "dummy",
   "device": "webgpu",
-  "dtype": "q4",
+  "dtype": "q4f16",
   "modelName": "onnx-community/gemma-4-E2B-it-ONNX"
 }
 ```
@@ -44,9 +44,9 @@ If WebGPU isn't available the polyfill will surface an error in the chat panel; 
 
 Quantization level for model weights. Smaller dtypes mean smaller download, lower memory, and slightly worse quality. Common values:
 
-- `"q4"` — 4-bit, the most aggressive quantization.
-- `"q4f16"` — 4-bit weights with fp16 activations; the polyfill's default.
-- `"q8"` / `"fp16"` / `"fp32"` — increasingly precise, increasingly heavy.
+- `"q4f16"` — 4-bit weights with fp16 activations. **Recommended default.**
+- `"q4"` — 4-bit, the most aggressive quantization. **Avoid on WebGPU:** the `q4` ONNX kernel has hit a WebAssembly `SIGILL` (illegal instruction) inside ONNX Runtime Web's SIMD path on some Chrome/Dawn builds, crashing the offscreen document during model load. `q4f16` uses different kernels and avoids it. See the 0.2.4 CHANGELOG note.
+- `"q8"` / `"fp16"` / `"fp32"` — increasingly precise, increasingly heavy. Good alternatives if `q4f16` ever regresses.
 
 Not every model publishes every variant — check the model's `onnx/` folder on the Hub.
 

@@ -121,9 +121,10 @@ function ensureSession(history?: HistoryTurn[]): Promise<LanguageModelSession> {
 
 /**
  * Tear down the current polyfill session and create a fresh one seeded
- * with the provided history. Invoked when the chat layer detects a
- * device-loss failure (zero-chunk stream) and wants to recover without
- * losing conversational context.
+ * with the provided history. Invoked from the user-initiated "Clear
+ * conversation" path in the chat layer (the automatic device-loss
+ * rebuild/retry guard was removed); lets the user reset the session
+ * while keeping the prior conversation as context.
  */
 async function rebuildSession(history: HistoryTurn[]): Promise<void> {
   try {

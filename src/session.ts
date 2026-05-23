@@ -622,7 +622,6 @@ export function initSession(deps: SessionDeps): void {
     try {
       await warmupSession();
       modelReady = true;
-      clearInterval(ticker);
       if (warmHint.parentNode) warmHint.remove();
       // Once the model is up, size the history-warning threshold to
       // the actual adapter. Failures here are non-fatal — the default
@@ -640,19 +639,19 @@ export function initSession(deps: SessionDeps): void {
         );
       }
     } catch (err) {
-      // Preload is best-effort: a failed warmup must NOT raise the
-      // operational GPU guard. The model load is resource-heavy, and a
-      // failure here (e.g. transient VRAM pressure on panel open) should
-      // degrade quietly to lazy loading rather than alarm the user.
+      // Preload is best-effort: a failed warmup must NOT alarm the user.
+      // The load is resource-heavy, and a failure here (e.g. transient
+      // VRAM pressure on panel open) degrades quietly to lazy loading.
       // warmStarted is reset so the next panel toggle retries the
-      // preload, and the model otherwise loads on the first send — where
-      // the real send-path guard (rebuild/retry/remedy) applies.
+      // preload; otherwise the model loads on the first send, where any
+      // error surfaces plainly in the response bubble.
       const message = err instanceof Error ? err.message : String(err);
       console.warn('[local-nano] warmup failed (will load lazily on first send):', message);
-      clearInterval(ticker);
       if (warmHint.parentNode) warmHint.remove();
       warmStarted = false;
     } finally {
+      // Single cleanup point — the interval is cleared exactly once here
+      // regardless of success or failure above.
       clearInterval(ticker);
       // Only return to idle if a real send didn't sneak in ahead of us.
       // activeAbort is set inside the send paths, so respect it here.

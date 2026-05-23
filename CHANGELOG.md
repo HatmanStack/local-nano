@@ -19,6 +19,7 @@ Polishes the selection-rewrite UX and prepares the first Chrome Web Store submis
 ### Changed
 
 - Reduced requested permissions to `["storage", "offscreen"]`. Removed `activeTab` and `scripting` (the declarative `<all_urls>` content script already grants the page access the extension uses; nothing calls the `chrome.scripting` API) and the `cdn.jsdelivr.net` host permission (ONNX Runtime WASM loads from the bundled `dist/ort/`, never jsdelivr).
+- Default `dtype` changed from `q4` to `q4f16` in `.env.example.json`. See the Notes below — the `q4` ONNX kernel hits an illegal-instruction crash in ONNX Runtime Web's WASM SIMD path on some Chrome/Dawn builds; `q4f16` routes through different kernels and avoids it, with slightly better quality (fp16 activations, same 4-bit weights).
 
 ### Removed
 
@@ -32,6 +33,7 @@ Polishes the selection-rewrite UX and prepares the first Chrome Web Store submis
 
 - All inference still runs on-device; the only network access remains the one-time model-weights download from Hugging Face. No new permissions touch the network beyond what 0.2.2 already declared (and jsdelivr was dropped).
 - See [docs/chrome-web-store.md](docs/chrome-web-store.md) for the submission checklist and permission justifications.
+- **`q4` kernel crash (debugging note).** A model load with `dtype: "q4"` was crashing the offscreen document with a WebAssembly `SIGILL` (illegal instruction) inside ONNX Runtime Web's quantized-matmul SIMD kernel — reproducible in a bare webpage with no extension, so it's upstream of this project (a V8/Dawn codegen issue on the affected device, not our code, the model, or the GPU; raw WebGPU buffer allocation and dependency integrity both checked out). `q4f16` uses different kernels and sidesteps the bad instruction. If `q4f16` ever regresses similarly, `fp16` and `q8` are the next dtypes to try.
 
 ## [0.2.3] - 2026-05-19
 
