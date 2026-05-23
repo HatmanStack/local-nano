@@ -255,6 +255,27 @@ describe('initSession — toggle behavior', () => {
     expect(warmupSessionMock).toHaveBeenCalledTimes(1);
   });
 
+  it('shows a transient system bubble during warmup and removes it on completion', async () => {
+    let resolveWarm: (() => void) | undefined;
+    warmupSessionMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          resolveWarm = r;
+        }),
+    );
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE);
+    // System bubble lives while warmup is in flight.
+    const bubbleTexts = () => Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+    expect(bubbleTexts().some((t) => t.includes('Loading model on first run'))).toBe(true);
+    resolveWarm?.();
+    await flushMicrotasks();
+    // And is gone once warmup resolves.
+    expect(bubbleTexts().some((t) => t.includes('Loading model on first run'))).toBe(false);
+  });
+
   it('gates the send button while warmupSession is in flight and re-enables it on completion', async () => {
     let resolveWarm: (() => void) | undefined;
     warmupSessionMock.mockImplementationOnce(
@@ -269,7 +290,8 @@ describe('initSession — toggle behavior', () => {
     listener(TOGGLE_MESSAGE);
     // Mid-warmup: button is disabled with the Loading label; input stays editable.
     expect(deps._actionBtn.disabled).toBe(true);
-    expect(deps._actionBtn.textContent).toBe('Loading…');
+    expect(deps._actionBtn.textContent).toBe('Loading ');
+    expect(deps._actionBtn.querySelectorAll('.ln-dot')).toHaveLength(3);
     expect(deps._input.disabled).toBe(false);
     // An Enter keypress during warmup must NOT issue a stream request.
     deps._input.value = 'hi';
@@ -681,6 +703,97 @@ describe('initSession — selection mode', () => {
     expect(stored).toHaveLength(2);
     expect(stored[0]).toEqual({ role: 'user', text: 'tighten this' });
     expect(stored[1]).toEqual({ role: 'model', text: 'TIGHT' });
+  });
+
+  it('rewrite success: model bubble has both Undo and Accept buttons in that order', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'original';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'original',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'original',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'fix';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('NEW');
+    call.resolve('NEW');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    const buttons = modelBubble.querySelectorAll('button');
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].textContent).toBe('Undo');
+    expect(buttons[1].textContent).toBe('Accept');
+  });
+
+  it('Accept button removes the action bar and resets selection state', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'original';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'original',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'original',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'fix';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('NEW');
+    call.resolve('NEW');
+    await flushMicrotasks();
+
+    // Simulate a stale snapshot lingering in session state — what would
+    // happen if a selectionchange fired between sendRewrite finishing
+    // and the user clicking Accept.
+    deps._fireSelectionChange({
+      ...snap,
+      text: 'stale',
+    });
+    expect(deps._selectionChip.style.display).toBe('block');
+
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    const acceptBtn = modelBubble.querySelectorAll('button')[1] as HTMLButtonElement;
+    acceptBtn.click();
+
+    // Bar is gone (no more buttons on this bubble).
+    expect(modelBubble.querySelectorAll('button')).toHaveLength(0);
+    // Selection state reset: chip hidden, placeholder back to chat.
+    expect(deps._selectionChip.style.display).toBe('none');
+    expect(deps._input.placeholder).not.toContain('Edit selection');
+    expect(deps._input.placeholder).not.toContain('Ask about selection');
   });
 
   it('undo button after container removal changes to Undo failed', async () => {

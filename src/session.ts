@@ -145,6 +145,16 @@ export function initSession(deps: SessionDeps): void {
     if (!snap) askMode = false;
     updatePlaceholder();
     updateChip();
+    // Diagnostic: confirms whether selectionchange round-trips after a
+    // rewrite. Keep DevTools console open while reproducing
+    // subsequent-rewrite issues — a missing log on a re-highlight means
+    // the listener never fired.
+    if (snap) {
+      const preview = snap.text.length > 40 ? `${snap.text.slice(0, 40)}…` : snap.text;
+      console.log(`[local-nano] selection captured: "${preview}"`);
+    } else {
+      console.log('[local-nano] selection cleared');
+    }
   });
 
   // ---- Send / Stop ----
@@ -157,32 +167,79 @@ export function initSession(deps: SessionDeps): void {
   let isFirstTurn = true;
   let activeAbort: AbortController | null = null;
 
-  function attachUndoButton(modelBubble: HTMLElement, snap: SelectionSnapshot): void {
+  function makeActionButton(label: string): HTMLButtonElement {
     const btn = window.document.createElement('button');
-    btn.textContent = 'Undo';
+    btn.textContent = label;
     btn.style.cssText =
-      'margin-top: 4px; padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
-    btn.addEventListener('click', () => {
+      'padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
+    return btn;
+  }
+
+  /**
+   * After a rewrite finishes, attach a small Undo + Accept button bar to
+   * the model bubble.
+   *
+   * Undo restores the original text from the snapshot.
+   *
+   * Accept commits the rewrite. It removes both buttons, clears any
+   * stale browser selection that may still be pointing at the
+   * now-replaced nodes, and resets session selection state so the next
+   * highlight on the page starts from a clean slate — the user
+   * reported that subsequent rewrites felt stuck without an explicit
+   * "I'm done with this one" signal.
+   */
+  function attachRewriteActions(modelBubble: HTMLElement, snap: SelectionSnapshot): void {
+    const bar = window.document.createElement('div');
+    bar.style.cssText = 'margin-top: 6px; display: flex; gap: 6px;';
+
+    const undoBtn = makeActionButton('Undo');
+    undoBtn.addEventListener('click', () => {
       const result = undoRewrite(snap);
-      btn.disabled = true;
+      undoBtn.disabled = true;
       if (result.ok) {
-        btn.textContent = 'Undone';
+        undoBtn.textContent = 'Undone';
         console.log('[local-nano] undo: restored original selection');
       } else {
-        btn.textContent = 'Undo failed';
+        undoBtn.textContent = 'Undo failed';
         console.warn(`[local-nano] undo failed: ${result.reason ?? 'unknown'}`);
       }
     });
-    modelBubble.appendChild(window.document.createElement('br'));
-    modelBubble.appendChild(btn);
+
+    const acceptBtn = makeActionButton('Accept');
+    acceptBtn.addEventListener('click', () => {
+      bar.remove();
+      // Clear the page's stale Selection (its Range may reference nodes
+      // that were just replaced by the rewrite). Without this, the
+      // browser keeps the dangling Selection around and subsequent
+      // `selectionchange` events can misfire.
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch {
+        // jsdom or restricted contexts may throw; the visible state
+        // resets below either way.
+      }
+      currentSelection = null;
+      askMode = false;
+      updatePlaceholder();
+      updateChip();
+      console.log('[local-nano] rewrite accepted; selection state reset');
+    });
+
+    bar.append(undoBtn, acceptBtn);
+    modelBubble.appendChild(bar);
   }
 
   async function sendChat(text: string): Promise<void> {
     addMessage('user', text);
     const wasFirstTurn = isFirstTurn;
-    const firstTurnHint = wasFirstTurn
-      ? addMessage('system', 'Loading model… first response can take up to a minute.')
-      : null;
+    // The panel-open warmup normally covers the model-load wait. The
+    // first-turn hint stays only as a fallback for the case where
+    // warmup failed silently and the model is loading for the first
+    // time on the send path instead.
+    const firstTurnHint =
+      wasFirstTurn && !modelReady
+        ? addMessage('system', 'Loading model… first response can take up to a minute.')
+        : null;
     const responseEl = renderMessage(messages, 'model', '');
     const indicator = makeTypingIndicator();
     responseEl.appendChild(indicator);
@@ -372,7 +429,7 @@ export function initSession(deps: SessionDeps): void {
       }
       if (succeeded) {
         rewrite.finalize();
-        attachUndoButton(responseEl, snap);
+        attachRewriteActions(responseEl, snap);
       }
       setIdleState(actionBtn, i);
       activeAbort = null;
@@ -432,18 +489,29 @@ export function initSession(deps: SessionDeps): void {
   // or composes their prompt. Idempotent across panel toggles; the
   // offscreen `ensureSession` singleton handles cross-tab dedupe.
   let warmStarted = false;
+  let modelReady = false;
   async function ensureWarm(): Promise<void> {
     if (warmStarted) return;
     warmStarted = true;
     setLoadingState(actionBtn, i);
+    // A transient system bubble while the long upload runs — static
+    // "Loading" on the button felt hung. The bubble auto-clears when
+    // warmup resolves (success or failure) and is not persisted to
+    // chrome.storage (system messages are skipped by addMessage).
+    const warmHint = addMessage(
+      'system',
+      'Loading model on first run. This can take 30–90 seconds, then chat is instant.',
+    );
     try {
       await warmupSession();
+      modelReady = true;
     } catch (err) {
       console.warn('[local-nano] warmup failed:', err);
       // Allow a retry on the next panel open in case the failure was
       // transient (offscreen doc creation race, sendMessage timing).
       warmStarted = false;
     } finally {
+      if (warmHint.parentNode) warmHint.remove();
       // Only return to idle if a real send didn't sneak in ahead of us.
       // activeAbort is set inside the send paths, so respect it here.
       if (!activeAbort) setIdleState(actionBtn, i);
