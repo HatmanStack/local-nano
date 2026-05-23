@@ -30,6 +30,7 @@ A Chrome extension with a small, **fully local** AI assistant that **edits the p
 ## Highlights
 
 - **Edits the live page.** Highlight text, type an instruction ("make this concise", "translate to French", "fix the grammar"), and the model rewrites it directly in the page — the tokens replace your selection in the DOM as they stream. Each edit gets Undo / Accept. Press `Esc` to ask *about* the selection instead of changing it. This is the core of the app; the chat is the complement.
+- **Text in, text out.** It reads the page's text and writes text back — rewrites, edits, and answers. It does **not** read images on the page or generate any. The Gemma family is multimodal-capable upstream, but this build wires the model text-only; "rewrite this paragraph" works, "describe this photo" or "make me an image" do not.
 - **Runs in the browser, not the cloud.** Inference happens on-device via [Transformers.js](https://huggingface.co/docs/transformers.js) and the [ONNX Runtime Web](https://onnxruntime.ai/) WebAssembly/WebGPU backend.
 - **One model, shared across tabs.** The model loads once into a background (offscreen) document and is reused on every page instead of reloading on each navigation. It preloads the moment you open the panel.
 - **Resilient on small GPUs.** Recovers from WebGPU out-of-memory by rebuilding the session, warns before the conversation outgrows your VRAM, and offers a one-click Clear conversation. See [docs/transform.md](docs/transform.md).
