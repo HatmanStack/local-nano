@@ -52,6 +52,22 @@ const CHIP_MAX_CHARS = 60;
  */
 const RECENT_HISTORY_FOR_REBUILD = 4;
 
+/**
+ * Heuristic threshold (in estimated tokens) at which we warn the user
+ * that the accumulated conversation history is large enough to risk
+ * GPU memory pressure on the next turn. The heuristic is `chars / 3`
+ * over the persisted history text, matching the fallback the
+ * count-tokens channel uses when the polyfill round-trip times out;
+ * underestimates a little (no system prompt, no chat-template tokens)
+ * which is fine — we'd rather warn slightly early than slightly late.
+ *
+ * Tune for the most-constrained adapter you expect users to run on.
+ * 1500 ≈ the threshold at which a turn-4 rewrite was OOMing for the
+ * user who reported VK_ERROR_OUT_OF_DEVICE_MEMORY on integrated
+ * graphics; ~2000-token KV cache plus weights crossed the cliff.
+ */
+const HISTORY_TOKEN_WARN_THRESHOLD = 1500;
+
 const GPU_OOM_REMEDY_TEXT =
   'GPU could not run this prompt even after rebuilding the session with a trimmed history. The most common cause is WebGPU memory pressure — Gemma-4 q4 needs about 1.6 GB of weights plus a KV cache that grows with each turn. To recover:\n\n• Close other GPU-heavy tabs (other AI extensions, video, WebGL) and try again.\n• Restart Chrome to fully reset the GPU process.\n• Switch to CPU-only by setting "device": "wasm" in .env.json, then npm run build and reload the extension. Slower per token but uses system RAM instead of VRAM.';
 
@@ -472,18 +488,91 @@ export function initSession(deps: SessionDeps): void {
     if (snap && askMode) {
       // Snapshot reference is fine — ask mode does not mutate the DOM.
       await sendAsk(text, snap);
-      return;
-    }
-    if (snap) {
+    } else if (snap) {
       // Detach the snapshot from session state so a later selectionchange
       // does not clobber the in-flight rewrite's anchor.
       currentSelection = null;
       updatePlaceholder();
       updateChip();
       await sendRewrite(text, snap);
-      return;
+    } else {
+      await sendChat(text);
     }
-    await sendChat(text);
+    checkHistoryPressure();
+  }
+
+  // ---- History pressure tracking ----
+  // Once warned, suppress until the user actually clears (or rebuilds);
+  // we don't want a warning bubble on every turn after the threshold is
+  // crossed.
+  let warnedAboutHistory = false;
+  function estimateHistoryTokens(): number {
+    let totalChars = 0;
+    for (const entry of history) totalChars += entry.text.length;
+    return Math.ceil(totalChars / 3);
+  }
+
+  function checkHistoryPressure(): void {
+    if (warnedAboutHistory) return;
+    const tokens = estimateHistoryTokens();
+    if (tokens < HISTORY_TOKEN_WARN_THRESHOLD) return;
+    warnedAboutHistory = true;
+    attachHistoryPressureBubble(tokens);
+  }
+
+  function attachHistoryPressureBubble(tokens: number): void {
+    const bubble = addMessage(
+      'system',
+      `Conversation history is around ${tokens} tokens. WebGPU memory pressure may cause the next turn to fail with an out-of-memory error. Click "Clear conversation" to start fresh — the model will reload (~15–40s).`,
+    );
+    const btn = window.document.createElement('button');
+    btn.textContent = 'Clear conversation';
+    btn.style.cssText =
+      'margin-top: 6px; padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
+    btn.addEventListener('click', () => {
+      bubble.remove();
+      void clearConversation();
+    });
+    bubble.appendChild(window.document.createElement('br'));
+    bubble.appendChild(btn);
+  }
+
+  /**
+   * Rebuild the polyfill session with no prior history and reset all
+   * local state that referenced the prior conversation. Slow (~15–40s
+   * for the model reload) but reclaims all VRAM and gives the next
+   * turn a fresh KV cache.
+   */
+  async function clearConversation(): Promise<void> {
+    setLoadingState(actionBtn, i);
+    const hint = addMessage('system', 'Clearing conversation — model is reloading (~15–40s)…');
+    try {
+      await rebuildSession([]);
+      // Reset local state. The persisted chrome.storage entry under the
+      // per-URL key is replaced with an empty array so the next panel
+      // open doesn't restore the cleared turns.
+      history = [];
+      isFirstTurn = true;
+      warnedAboutHistory = false;
+      // Wipe rendered bubbles. Leaves the panel empty so the next turn
+      // shows up at the top — matches the user's expectation of "fresh
+      // conversation".
+      while (messages.firstChild) messages.removeChild(messages.firstChild);
+      persist();
+      if (hint.parentNode) hint.remove();
+      addMessage('system', 'Conversation cleared. The model has a fresh slate.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[local-nano] clearConversation failed:', message);
+      if (hint.parentNode) hint.remove();
+      addMessage(
+        'system',
+        `Failed to clear conversation: ${message}. Reloading the extension from chrome://extensions has the same effect.`,
+      );
+    } finally {
+      setIdleState(actionBtn, i);
+      i.focus();
+    }
   }
 
   // ---- Event wiring ----

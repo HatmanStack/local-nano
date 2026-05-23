@@ -1002,3 +1002,117 @@ describe('initSession — selection mode', () => {
     expect(deps._selectionChip.style.display).toBe('none');
   });
 });
+
+describe('initSession — history pressure tracking', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+  });
+
+  it('warns with a Clear-conversation bubble after a turn pushes estimated history above the threshold', async () => {
+    // Pre-seed history with about 4500 chars (~1500 estimated tokens
+    // at chars/3) so a single turn crosses the threshold immediately.
+    const key = `local-nano:history:https://example.com/page`;
+    chromeMock.storage.local.store[key] = Array.from({ length: 6 }, (_, idx) => ({
+      role: idx % 2 === 0 ? ('user' as const) : ('model' as const),
+      text: 'x'.repeat(750),
+    }));
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'next';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('ok');
+    call.resolve('ok');
+    await flushMicrotasks();
+
+    const bubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    );
+    expect(bubble).toBeTruthy();
+    const btn = bubble?.querySelector('button');
+    expect(btn?.textContent).toBe('Clear conversation');
+  });
+
+  it('does not warn when history is well under the threshold', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    deps._input.value = 'short hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('hi back');
+    call.resolve('hi back');
+    await flushMicrotasks();
+    const bubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    );
+    expect(bubble).toBeUndefined();
+  });
+
+  it('only warns once per session even if subsequent turns also cross the threshold', async () => {
+    const key = `local-nano:history:https://example.com/page`;
+    chromeMock.storage.local.store[key] = Array.from({ length: 6 }, (_, idx) => ({
+      role: idx % 2 === 0 ? ('user' as const) : ('model' as const),
+      text: 'x'.repeat(750),
+    }));
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+
+    // First turn → warning fires.
+    deps._input.value = 'a';
+    deps._actionBtn.click();
+    let call = await awaitPending();
+    call.opts.onChunk?.('A');
+    call.resolve('A');
+    await flushMicrotasks();
+    const firstCount = Array.from(deps._messages.children).filter((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    ).length;
+    expect(firstCount).toBe(1);
+
+    // Second turn → no additional warning despite still being above threshold.
+    deps._input.value = 'b';
+    deps._actionBtn.click();
+    call = await awaitPending();
+    call.opts.onChunk?.('B');
+    call.resolve('B');
+    await flushMicrotasks();
+    const secondCount = Array.from(deps._messages.children).filter((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    ).length;
+    expect(secondCount).toBe(1);
+  });
+
+  it('clicking Clear conversation calls rebuildSession with empty history, wipes UI and storage', async () => {
+    const key = `local-nano:history:https://example.com/page`;
+    chromeMock.storage.local.store[key] = Array.from({ length: 6 }, (_, idx) => ({
+      role: idx % 2 === 0 ? ('user' as const) : ('model' as const),
+      text: 'x'.repeat(750),
+    }));
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'one more';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('ok');
+    call.resolve('ok');
+    await flushMicrotasks();
+
+    const bubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    );
+    const btn = bubble?.querySelector('button') as HTMLButtonElement;
+    btn.click();
+    await flushMicrotasks();
+    expect(rebuildSessionMock).toHaveBeenCalledWith([]);
+    // UI fully wiped except for the post-clear confirmation bubble.
+    const after = Array.from(deps._messages.children).map((c) => c.textContent);
+    expect(after.some((t) => t?.includes('Conversation cleared'))).toBe(true);
+    expect(after.some((t) => t?.includes('one more'))).toBe(false);
+    // Persisted history is reset.
+    expect(chromeMock.storage.local.store[key]).toEqual([]);
+  });
+});
