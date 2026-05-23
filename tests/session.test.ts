@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TOGGLE_MESSAGE } from '../src/background/handler.js';
 import { MAX_HISTORY } from '../src/history.js';
 import type { SelectionSnapshot } from '../src/selection-rewrite.js';
-import { deriveHistoryThreshold, initSession, type SessionDeps } from '../src/session.js';
+import {
+  deriveHistoryThreshold,
+  initSession,
+  preflightWarning,
+  type SessionDeps,
+} from '../src/session.js';
 import { chromeMock } from './setup.js';
 
 // ---------------------------------------------------------------------------
@@ -236,8 +241,8 @@ describe('initSession — toggle behavior', () => {
     expect(warmupSessionMock).not.toHaveBeenCalled();
     const listener = getToggleListener();
     listener(TOGGLE_MESSAGE);
+    await flushMicrotasks(); // getGpuInfo preflight resolves before warmupSession is invoked
     expect(warmupSessionMock).toHaveBeenCalledTimes(1);
-    await flushMicrotasks();
   });
 
   it('does not re-fire warmupSession on subsequent toggle-open while the prior warmup is still in flight or done', async () => {
@@ -252,14 +257,17 @@ describe('initSession — toggle behavior', () => {
     initSession(deps);
     const listener = getToggleListener();
     listener(TOGGLE_MESSAGE); // open
+    await flushMicrotasks(); // preflight resolves, then warmupSession is invoked
     expect(warmupSessionMock).toHaveBeenCalledTimes(1);
     listener(TOGGLE_MESSAGE); // close
     listener(TOGGLE_MESSAGE); // re-open
+    await flushMicrotasks();
     expect(warmupSessionMock).toHaveBeenCalledTimes(1);
     resolveWarm?.();
     await flushMicrotasks();
     listener(TOGGLE_MESSAGE); // close
     listener(TOGGLE_MESSAGE); // re-open after warm done
+    await flushMicrotasks();
     expect(warmupSessionMock).toHaveBeenCalledTimes(1);
   });
 
@@ -278,6 +286,7 @@ describe('initSession — toggle behavior', () => {
     // System bubble (with the elapsed counter) lives while warmup is in flight.
     const bubbleTexts = () => Array.from(deps._messages.children).map((c) => c.textContent ?? '');
     expect(bubbleTexts().some((t) => t.includes('Loading model…'))).toBe(true);
+    await flushMicrotasks(); // preflight resolves so warmupSession is invoked (sets resolveWarm)
     resolveWarm?.();
     await flushMicrotasks();
     // And is gone once warmup resolves.
@@ -360,6 +369,7 @@ describe('initSession — toggle behavior', () => {
     // Closing and reopening retries the warmup.
     listener(TOGGLE_MESSAGE);
     listener(TOGGLE_MESSAGE);
+    await flushMicrotasks();
     expect(warmupSessionMock).toHaveBeenCalledTimes(2);
   });
 
@@ -1176,5 +1186,23 @@ describe('deriveHistoryThreshold', () => {
     expect(deriveHistoryThreshold(mk(768))).toBe(1500); // <1 GiB → 1500
     expect(deriveHistoryThreshold(mk(1536))).toBe(2500); // <2 GiB → 2500
     expect(deriveHistoryThreshold(mk(4096))).toBe(4000); // >=2 GiB → 4000
+  });
+});
+
+describe('preflightWarning', () => {
+  const base = { device: 'webgpu' as const, isFallback: false, maxBufferSize: null, configuredThreshold: null };
+  it('returns null for wasm device (no GPU needed)', () => {
+    expect(preflightWarning({ ...base, device: 'wasm' })).toBeNull();
+  });
+  it('warns on a software fallback adapter', () => {
+    expect(preflightWarning({ ...base, isFallback: true })).toContain('software fallback');
+  });
+  it('warns when maxBufferSize is under 1 GiB', () => {
+    const w = preflightWarning({ ...base, maxBufferSize: 256 * 1024 * 1024 });
+    expect(w).toContain('256 MiB');
+  });
+  it('returns null for a capable webgpu adapter (>=1 GiB) or unknown buffer size', () => {
+    expect(preflightWarning({ ...base, maxBufferSize: 4 * 1024 * 1024 * 1024 })).toBeNull();
+    expect(preflightWarning(base)).toBeNull(); // maxBufferSize null → no warning
   });
 });

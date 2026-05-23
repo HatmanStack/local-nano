@@ -79,6 +79,27 @@ export function deriveHistoryThreshold(info: GpuInfoSnapshot): number {
 }
 
 /**
+ * Preflight capability check. Given the queried GPU info, return an
+ * upfront advisory string if the device looks unlikely to load the
+ * model on WebGPU — so the user gets a clear heads-up instead of a
+ * silent crash mid-load. Returns null when nothing looks wrong.
+ * Advisory only: the load is still attempted (the snapshot can
+ * false-negative), but the user knows what to try if it fails.
+ * Exported for unit testing.
+ */
+export function preflightWarning(info: GpuInfoSnapshot): string | null {
+  if (info.device !== 'webgpu') return null;
+  if (info.isFallback) {
+    return 'Heads up: no hardware WebGPU adapter detected (software fallback). The model may fail to load on this device — if it does, set "device": "wasm" in .env.json (CPU, slower but reliable).';
+  }
+  if (info.maxBufferSize !== null && info.maxBufferSize < 1024 * 1024 * 1024) {
+    const mb = Math.round(info.maxBufferSize / (1024 * 1024));
+    return `Heads up: this GPU's max buffer is ~${mb} MiB, which may be too small to load the model. If it fails, try a smaller model or "device": "wasm" in .env.json.`;
+  }
+  return null;
+}
+
+/**
  * DOM elements and values that content.ts provides at injection time.
  * session.ts does not touch document directly.
  */
@@ -620,24 +641,24 @@ export function initSession(deps: SessionDeps): void {
     renderHint();
     const ticker = setInterval(renderHint, 1000);
     try {
-      await warmupSession();
-      modelReady = true;
-      if (warmHint.parentNode) warmHint.remove();
-      // Once the model is up, size the history-warning threshold to
-      // the actual adapter. Failures here are non-fatal — the default
-      // already covers the typical integrated-GPU case.
+      // Preflight: query the adapter BEFORE the heavy load so an
+      // unsupported device gets an upfront advisory instead of a silent
+      // crash mid-upload. Doubles as sizing the history threshold.
+      // Non-fatal — the default threshold covers the typical case.
       try {
         const info = await getGpuInfo();
         historyThreshold = deriveHistoryThreshold(info);
         console.log(
           `[local-nano] history threshold: ${historyThreshold} (device=${info.device}, isFallback=${info.isFallback}, maxBufferSize=${info.maxBufferSize ?? 'n/a'}, configured=${info.configuredThreshold ?? 'n/a'})`,
         );
+        const advisory = preflightWarning(info);
+        if (advisory) addMessage('system', advisory);
       } catch (gpuErr) {
-        console.warn(
-          '[local-nano] gpu-info query failed; using default history threshold:',
-          gpuErr,
-        );
+        console.warn('[local-nano] gpu-info preflight failed; proceeding:', gpuErr);
       }
+      await warmupSession();
+      modelReady = true;
+      if (warmHint.parentNode) warmHint.remove();
     } catch (err) {
       // Preload is best-effort: a failed warmup must NOT alarm the user.
       // The load is resource-heavy, and a failure here (e.g. transient
