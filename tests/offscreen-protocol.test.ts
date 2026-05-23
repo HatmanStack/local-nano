@@ -1,9 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
+  COUNT_TOKENS_REQUEST,
+  COUNT_TOKENS_RESPONSE,
   ENSURE_OFFSCREEN_REQUEST,
   ENSURE_OFFSCREEN_RESPONSE,
+  GPU_INFO_REQUEST,
+  GPU_INFO_RESPONSE,
+  isCountTokensRequest,
+  isCountTokensResponse,
   isEnsureOffscreenRequest,
   isEnsureOffscreenResponse,
+  isGpuInfoRequest,
+  isGpuInfoResponse,
   isRebuildSessionRequest,
   isRebuildSessionResponse,
   isStreamAbort,
@@ -36,6 +44,137 @@ describe('protocol discriminators', () => {
   it('keeps rebuild-session constants stable', () => {
     expect(REBUILD_SESSION_REQUEST).toBe('offscreen/rebuild-session-request');
     expect(REBUILD_SESSION_RESPONSE).toBe('offscreen/rebuild-session-response');
+  });
+
+  it('keeps count-tokens constants stable', () => {
+    expect(COUNT_TOKENS_REQUEST).toBe('offscreen/count-tokens-request');
+    expect(COUNT_TOKENS_RESPONSE).toBe('offscreen/count-tokens-response');
+  });
+
+  it('keeps gpu-info constants stable', () => {
+    expect(GPU_INFO_REQUEST).toBe('offscreen/gpu-info-request');
+    expect(GPU_INFO_RESPONSE).toBe('offscreen/gpu-info-response');
+  });
+});
+
+describe('isGpuInfoRequest', () => {
+  it('accepts a well-formed request', () => {
+    expect(isGpuInfoRequest({ type: GPU_INFO_REQUEST })).toBe(true);
+  });
+  it('rejects null and wrong discriminator', () => {
+    expect(isGpuInfoRequest(null)).toBe(false);
+    expect(isGpuInfoRequest({ type: 'other' })).toBe(false);
+  });
+});
+
+describe('isGpuInfoResponse', () => {
+  it('accepts a full ok:true snapshot', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'webgpu',
+        isFallback: false,
+        maxBufferSize: 2147483648,
+        configuredThreshold: 1500,
+      }),
+    ).toBe(true);
+  });
+
+  it('accepts null maxBufferSize and configuredThreshold', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'wasm',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects unknown device strings', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'metal',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects non-numeric maxBufferSize', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'webgpu',
+        isFallback: false,
+        maxBufferSize: '4 GiB',
+        configuredThreshold: null,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects ok:true with non-boolean isFallback', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'webgpu',
+        isFallback: 'no',
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects non-finite maxBufferSize (NaN / Infinity)', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(
+        isGpuInfoResponse({
+          type: GPU_INFO_RESPONSE,
+          ok: true,
+          device: 'webgpu',
+          isFallback: false,
+          maxBufferSize: bad,
+          configuredThreshold: null,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it('rejects non-finite configuredThreshold (NaN / Infinity)', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(
+        isGpuInfoResponse({
+          type: GPU_INFO_RESPONSE,
+          ok: true,
+          device: 'wasm',
+          isFallback: false,
+          maxBufferSize: null,
+          configuredThreshold: bad,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it('accepts ok:false with error string', () => {
+    expect(isGpuInfoResponse({ type: GPU_INFO_RESPONSE, ok: false, error: 'boom' })).toBe(true);
+  });
+
+  it('rejects ok:false with a non-string error', () => {
+    expect(isGpuInfoResponse({ type: GPU_INFO_RESPONSE, ok: false, error: 123 })).toBe(false);
+    expect(isGpuInfoResponse({ type: GPU_INFO_RESPONSE, ok: false, error: null })).toBe(false);
+    expect(isGpuInfoResponse({ type: GPU_INFO_RESPONSE, ok: false })).toBe(false);
+  });
+
+  it('rejects wrong discriminator', () => {
+    expect(isGpuInfoResponse({ type: 'other', ok: true })).toBe(false);
   });
 });
 
@@ -101,13 +240,88 @@ describe('isRebuildSessionResponse', () => {
 
   it('rejects ok:false without error string', () => {
     expect(isRebuildSessionResponse({ type: REBUILD_SESSION_RESPONSE, ok: false })).toBe(false);
-    expect(
-      isRebuildSessionResponse({ type: REBUILD_SESSION_RESPONSE, ok: false, error: 42 }),
-    ).toBe(false);
+    expect(isRebuildSessionResponse({ type: REBUILD_SESSION_RESPONSE, ok: false, error: 42 })).toBe(
+      false,
+    );
   });
 
   it('rejects wrong type', () => {
     expect(isRebuildSessionResponse({ type: 'other', ok: true })).toBe(false);
+  });
+});
+
+describe('isCountTokensRequest', () => {
+  it('accepts a well-formed request', () => {
+    expect(isCountTokensRequest({ type: COUNT_TOKENS_REQUEST, text: 'hello' })).toBe(true);
+    expect(isCountTokensRequest({ type: COUNT_TOKENS_REQUEST, text: '' })).toBe(true);
+  });
+
+  it('rejects null and primitives', () => {
+    expect(isCountTokensRequest(null)).toBe(false);
+    expect(isCountTokensRequest(undefined)).toBe(false);
+    expect(isCountTokensRequest('foo')).toBe(false);
+  });
+
+  it('rejects wrong discriminator', () => {
+    expect(isCountTokensRequest({ type: 'other', text: 'hi' })).toBe(false);
+  });
+
+  it('rejects missing or non-string text', () => {
+    expect(isCountTokensRequest({ type: COUNT_TOKENS_REQUEST })).toBe(false);
+    expect(isCountTokensRequest({ type: COUNT_TOKENS_REQUEST, text: 42 })).toBe(false);
+    expect(isCountTokensRequest({ type: COUNT_TOKENS_REQUEST, text: null })).toBe(false);
+  });
+});
+
+describe('isCountTokensResponse', () => {
+  it('accepts ok:true with finite count', () => {
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: true, count: 0 })).toBe(true);
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: true, count: 42 })).toBe(true);
+  });
+
+  it('accepts ok:false with error string', () => {
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: false, error: 'boom' })).toBe(
+      true,
+    );
+  });
+
+  it('rejects ok:true with non-numeric count', () => {
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: true })).toBe(false);
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: true, count: '5' })).toBe(
+      false,
+    );
+  });
+
+  it('rejects ok:true with non-finite count', () => {
+    expect(
+      isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: true, count: Number.NaN }),
+    ).toBe(false);
+    expect(
+      isCountTokensResponse({
+        type: COUNT_TOKENS_RESPONSE,
+        ok: true,
+        count: Number.POSITIVE_INFINITY,
+      }),
+    ).toBe(false);
+    expect(
+      isCountTokensResponse({
+        type: COUNT_TOKENS_RESPONSE,
+        ok: true,
+        count: Number.NEGATIVE_INFINITY,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects ok:false without error string', () => {
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: false })).toBe(false);
+    expect(isCountTokensResponse({ type: COUNT_TOKENS_RESPONSE, ok: false, error: 42 })).toBe(
+      false,
+    );
+  });
+
+  it('rejects null and wrong discriminator', () => {
+    expect(isCountTokensResponse(null)).toBe(false);
+    expect(isCountTokensResponse({ type: 'other', ok: true, count: 1 })).toBe(false);
   });
 });
 

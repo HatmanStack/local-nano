@@ -1,3 +1,4 @@
+import { decideSnapshot, type SelectionSnapshot } from './src/selection-rewrite.js';
 import { initSession } from './src/session.js';
 import { IDLE_BG } from './src/ui/state.js';
 
@@ -57,6 +58,20 @@ messages.style.cssText = `
   display: flex; flex-direction: column; gap: 8px;
 `;
 
+// Selection-preview chip sits above the input. Hidden by default; the
+// session shows it when a supported selection is captured. Palette
+// matches the header background at `header` above so it reads as part
+// of the panel.
+const selectionChip = document.createElement('div');
+selectionChip.style.cssText = `
+  margin: 6px 8px 0; padding: 2px 8px;
+  background: #333; color: #eee;
+  border-radius: 4px;
+  font-size: 12px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+  display: none; flex-shrink: 0;
+`;
+
 const inputWrap = document.createElement('div');
 inputWrap.style.cssText = `
   padding: 8px; border-top: 1px solid #444; flex-shrink: 0;
@@ -79,7 +94,7 @@ actionBtn.style.background = IDLE_BG;
 actionBtn.textContent = 'Send';
 inputWrap.append(input, actionBtn);
 
-root.append(header, messages, inputWrap);
+root.append(header, messages, selectionChip, inputWrap);
 document.body.appendChild(root);
 
 // --- Dragging ---
@@ -109,11 +124,33 @@ closeBtn.addEventListener('click', () => {
   root.style.display = 'none';
 });
 
+// Selection capture. All the decision logic — including the input-focus
+// suppression rule (ADR-007) — lives in the pure `decideSnapshot`; this
+// listener just acts on the returned action. `ignore` means the event
+// came from focus moving into the chat input (the page selection
+// collapses on focus shift) and the prior snapshot must survive, so we
+// do nothing; `set`/`clear` forward a snapshot or null to the session.
+let selectionCb: ((snap: SelectionSnapshot | null) => void) | null = null;
+document.addEventListener('selectionchange', () => {
+  if (!selectionCb) return;
+  const decision = decideSnapshot({
+    activeEl: document.activeElement,
+    inputEl: input,
+    selection: window.getSelection(),
+  });
+  if (decision.action === 'ignore') return;
+  selectionCb(decision.action === 'set' ? decision.snapshot : null);
+});
+
 initSession({
   root,
   messages,
   input,
   actionBtn,
+  selectionChip,
+  onSelectionChange: (cb) => {
+    selectionCb = cb;
+  },
   location,
   document,
 });

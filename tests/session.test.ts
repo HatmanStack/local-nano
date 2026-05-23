@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TOGGLE_MESSAGE } from '../src/background/handler.js';
 import { MAX_HISTORY } from '../src/history.js';
-import { initSession, type SessionDeps } from '../src/session.js';
+import type { SelectionSnapshot } from '../src/selection-rewrite.js';
+import { deriveHistoryThreshold, initSession, type SessionDeps } from '../src/session.js';
 import { chromeMock } from './setup.js';
 
 // ---------------------------------------------------------------------------
@@ -32,39 +33,69 @@ vi.mock('../src/offscreen/client.js', () => ({
   }),
   sendPrompt: vi.fn(),
   rebuildSession: vi.fn(() => Promise.resolve()),
+  countTokens: vi.fn(async (text: string) => Math.ceil(text.length / 3)),
+  warmupSession: vi.fn(() => Promise.resolve()),
+  getGpuInfo: vi.fn(async () => ({
+    device: 'webgpu' as const,
+    isFallback: false,
+    maxBufferSize: null,
+    configuredThreshold: null,
+  })),
 }));
 
 import {
+  countTokens as mockedCountTokens,
+  getGpuInfo as mockedGetGpuInfo,
   rebuildSession as mockedRebuildSession,
   streamPrompt as mockedStreamPrompt,
+  warmupSession as mockedWarmupSession,
 } from '../src/offscreen/client.js';
 
 const streamPromptMock = mockedStreamPrompt as unknown as ReturnType<typeof vi.fn>;
 const rebuildSessionMock = mockedRebuildSession as unknown as ReturnType<typeof vi.fn>;
+const countTokensMock = mockedCountTokens as unknown as ReturnType<typeof vi.fn>;
+const warmupSessionMock = mockedWarmupSession as unknown as ReturnType<typeof vi.fn>;
+const getGpuInfoMock = mockedGetGpuInfo as unknown as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+type SelectionChangeListener = (snap: SelectionSnapshot | null) => void;
 
 function makeDeps(): SessionDeps & {
   _root: HTMLDivElement;
   _messages: HTMLDivElement;
   _input: HTMLInputElement;
   _actionBtn: HTMLButtonElement;
+  _selectionChip: HTMLDivElement;
+  _fireSelectionChange: (snap: SelectionSnapshot | null) => void;
 } {
   const _root = document.createElement('div');
   _root.style.display = 'none';
   const _messages = document.createElement('div');
   const _input = document.createElement('input');
   const _actionBtn = document.createElement('button');
-  _root.append(_messages, _input, _actionBtn);
+  const _selectionChip = document.createElement('div');
+  _selectionChip.style.display = 'none';
+  _root.append(_messages, _input, _actionBtn, _selectionChip);
   document.body.appendChild(_root);
+
+  let captured: SelectionChangeListener | null = null;
+  const onSelectionChange = (cb: SelectionChangeListener) => {
+    captured = cb;
+  };
+  const fireSelectionChange: SelectionChangeListener = (snap) => {
+    if (captured) captured(snap);
+  };
 
   return {
     root: _root,
     messages: _messages,
     input: _input,
     actionBtn: _actionBtn,
+    selectionChip: _selectionChip,
+    onSelectionChange,
     location: {
       origin: 'https://example.com',
       pathname: '/page',
@@ -78,6 +109,8 @@ function makeDeps(): SessionDeps & {
     _messages,
     _input,
     _actionBtn,
+    _selectionChip,
+    _fireSelectionChange: fireSelectionChange,
   };
 }
 
@@ -196,6 +229,160 @@ describe('initSession — toggle behavior', () => {
     await flushMicrotasks();
     expect(streamPromptMock).not.toHaveBeenCalled();
   });
+
+  it('fires warmupSession the first time the panel opens', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    expect(warmupSessionMock).not.toHaveBeenCalled();
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE);
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    await flushMicrotasks();
+  });
+
+  it('does not re-fire warmupSession on subsequent toggle-open while the prior warmup is still in flight or done', async () => {
+    let resolveWarm: (() => void) | undefined;
+    warmupSessionMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          resolveWarm = r;
+        }),
+    );
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE); // open
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    listener(TOGGLE_MESSAGE); // close
+    listener(TOGGLE_MESSAGE); // re-open
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    resolveWarm?.();
+    await flushMicrotasks();
+    listener(TOGGLE_MESSAGE); // close
+    listener(TOGGLE_MESSAGE); // re-open after warm done
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a transient system bubble during warmup and removes it on completion', async () => {
+    let resolveWarm: (() => void) | undefined;
+    warmupSessionMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          resolveWarm = r;
+        }),
+    );
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE);
+    // System bubble (with the elapsed counter) lives while warmup is in flight.
+    const bubbleTexts = () => Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+    expect(bubbleTexts().some((t) => t.includes('Loading model…'))).toBe(true);
+    resolveWarm?.();
+    await flushMicrotasks();
+    // And is gone once warmup resolves.
+    expect(bubbleTexts().some((t) => t.includes('Loading model…'))).toBe(false);
+  });
+
+  it('ticks the elapsed counter and appends remedies if the load drags', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveWarm: (() => void) | undefined;
+      warmupSessionMock.mockImplementationOnce(
+        () =>
+          new Promise<void>((r) => {
+            resolveWarm = r;
+          }),
+      );
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      const bubble = () =>
+        Array.from(deps._messages.children)
+          .map((c) => c.textContent ?? '')
+          .find((t) => t.includes('Loading model…')) ?? '';
+      // Counter advances.
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(bubble()).toMatch(/Loading model… \ds/);
+      // After the slow-notice threshold, remedies appear but the load is
+      // not failed — the bubble still says it's loading.
+      await vi.advanceTimersByTimeAsync(45000);
+      expect(bubble()).toContain('Taking longer than usual');
+      expect(bubble()).toContain('wasm');
+      expect(bubble()).toContain('Loading model…');
+      resolveWarm?.();
+      await vi.runOnlyPendingTimersAsync();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gates the send button while warmupSession is in flight and re-enables it on completion', async () => {
+    let resolveWarm: (() => void) | undefined;
+    warmupSessionMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          resolveWarm = r;
+        }),
+    );
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE);
+    // Mid-warmup: button is disabled with the Loading label; input stays editable.
+    expect(deps._actionBtn.disabled).toBe(true);
+    expect(deps._actionBtn.textContent).toBe('Loading ');
+    expect(deps._actionBtn.querySelectorAll('.ln-dot')).toHaveLength(3);
+    expect(deps._input.disabled).toBe(false);
+    // An Enter keypress during warmup must NOT issue a stream request.
+    deps._input.value = 'hi';
+    deps._input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    await flushMicrotasks();
+    expect(streamPromptMock).not.toHaveBeenCalled();
+    expect(pending.length).toBe(0);
+    // Warmup completes -> button returns to idle.
+    resolveWarm?.();
+    await flushMicrotasks();
+    expect(deps._actionBtn.disabled).toBe(false);
+    expect(deps._actionBtn.textContent).toBe('Send');
+  });
+
+  it('allows a retry on the next open if warmupSession rejects', async () => {
+    warmupSessionMock.mockRejectedValueOnce(new Error('offscreen unavailable'));
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    // After failure the button is back to idle (not stuck on Loading…).
+    expect(deps._actionBtn.disabled).toBe(false);
+    // Closing and reopening retries the warmup.
+    listener(TOGGLE_MESSAGE);
+    listener(TOGGLE_MESSAGE);
+    expect(warmupSessionMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('degrades silently on a warmup failure — no error guard on the load path', async () => {
+    warmupSessionMock.mockRejectedValueOnce(
+      new Error(
+        'Deserialize tensor model_embed_tokens_weight_quant failed. Failed to load external data file "embed_tokens_q4.onnx_data", error: Unknown error occurred in memory copy.',
+      ),
+    );
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    // The preload guard must NOT fire on the load path: no "Model load
+    // failed" bubble, no remedies, no Retry button, no leftover loading
+    // bubble. The model loads lazily on the first send instead.
+    const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+    expect(texts.some((t) => t.includes('Model load failed'))).toBe(false);
+    expect(texts.some((t) => t.includes('Loading model'))).toBe(false);
+    // Button is back to idle so the user can send (which lazy-loads).
+    expect(deps._actionBtn.disabled).toBe(false);
+    expect(deps._actionBtn.textContent).toBe('Send');
+  });
 });
 
 describe('initSession — streaming', () => {
@@ -295,41 +482,26 @@ describe('initSession — streaming', () => {
     expect(modelBubble?.textContent).toContain('[stopped]');
   });
 
-  it('rebuilds the session and retries when the first attempt reports WebGPU device loss', async () => {
+  it('surfaces a stream error plainly and never rebuilds the session (guard removed)', async () => {
     const deps = makeDeps();
     initSession(deps);
     await flushMicrotasks();
-
     deps._input.value = 'why is the sky blue';
     deps._actionBtn.click();
-    const first = await awaitPending();
-
-    first.reject(
-      new Error(
-        'Model returned no output (likely WebGPU device loss after tab/window switch). Rebuilding session; try again.',
-      ),
+    const call = await awaitPending();
+    // Even a device-loss / OOM-shaped error no longer triggers an
+    // automatic rebuild + retry — the guard was removed.
+    call.reject(
+      new Error('Model returned no output. WebGPU device loss / VK_ERROR_OUT_OF_DEVICE_MEMORY.'),
     );
-
-    const retry = await awaitPending();
-    // Retry drops the page-context prefix and resends just the user text.
-    expect(retry.prompt).toBe('why is the sky blue');
-
-    expect(rebuildSessionMock).toHaveBeenCalledTimes(1);
-    // History passed to rebuild excludes the just-added user turn (the
-    // retried prompt re-introduces it via the polyfill).
-    expect(rebuildSessionMock.mock.calls[0][0]).toEqual([]);
-
-    retry.opts.onChunk?.('blue light scatters');
-    retry.resolve('blue light scatters');
     await flushMicrotasks();
-
-    // Rebuild hint was removed on the first retry chunk, so children
-    // are [user, model] with the model bubble holding the retry output.
-    const texts = Array.from(deps._messages.children).map((c) => c.textContent);
-    expect(texts).toContain('blue light scatters');
+    expect(rebuildSessionMock).not.toHaveBeenCalled();
+    expect(pending.length).toBe(0); // no retry queued
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    expect(modelBubble?.textContent).toContain('WebGPU device loss');
   });
 
-  it('does not retry when the error is not a device-loss', async () => {
+  it('surfaces a non-device-loss error plainly without rebuilding', async () => {
     const deps = makeDeps();
     initSession(deps);
     deps._input.value = 'hi';
@@ -357,5 +529,652 @@ describe('initSession — streaming', () => {
     // Resolve the first
     first.resolve('done');
     await flushMicrotasks();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Selection mode — placeholder swap, Esc toggle, rewrite, ask, undo, chip
+// ---------------------------------------------------------------------------
+
+function makeFakeSnapshot(args: {
+  text: string;
+  before?: string;
+  after?: string;
+  container?: HTMLElement;
+}): SelectionSnapshot {
+  // Build a real DOM range so streamRewriteIntoRange can mutate it.
+  const host = args.container ?? document.createElement('p');
+  host.textContent = args.text;
+  if (!args.container) document.body.appendChild(host);
+  const textNode = host.firstChild as Text;
+  const range = document.createRange();
+  range.setStart(textNode, 0);
+  range.setEnd(textNode, args.text.length);
+  return {
+    text: args.text,
+    before: args.before ?? '',
+    after: args.after ?? '',
+    range,
+    undoAnchor: {
+      startContainer: range.startContainer,
+      startOffset: range.startOffset,
+      endContainer: range.endContainer,
+      endOffset: range.endOffset,
+      originalText: args.text,
+      insertedNode: null,
+    },
+  };
+}
+
+describe('initSession — selection mode', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    countTokensMock.mockImplementation(async (text: string) => Math.ceil(text.length / 3));
+  });
+
+  it('swaps the placeholder to Edit mode when a snapshot arrives', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const snap = makeFakeSnapshot({ text: 'hello world' });
+    deps._fireSelectionChange(snap);
+    expect(deps._input.placeholder).toContain('Edit selection');
+  });
+
+  it('swaps back to chat default when snapshot becomes null', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    deps._fireSelectionChange(makeFakeSnapshot({ text: 'hi' }));
+    deps._fireSelectionChange(null);
+    expect(deps._input.placeholder).toContain('Ask anything');
+  });
+
+  it('Esc toggles to Ask mode when a selection is present', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    deps._fireSelectionChange(makeFakeSnapshot({ text: 'foo' }));
+    const esc = new KeyboardEvent('keydown', { key: 'Escape' });
+    deps._input.dispatchEvent(esc);
+    expect(deps._input.placeholder).toContain('Ask about selection');
+    deps._input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(deps._input.placeholder).toContain('Edit selection');
+  });
+
+  it('Esc with no selection is a no-op', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const original = deps._input.placeholder;
+    deps._input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(deps._input.placeholder).toBe(original);
+  });
+
+  it('rewrite send: prompt includes selection text, instruction, and soft-cap number', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const snap = makeFakeSnapshot({
+      text: 'the quick brown fox',
+      before: 'before-context',
+      after: 'after-context',
+    });
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'make it crisper';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    expect(call.prompt).toContain('the quick brown fox');
+    expect(call.prompt).toContain('make it crisper');
+    // soft cap = max(256, ceil(payload.length/3) * 2). For our payload,
+    // that's well over 256 so the prompt should contain a numeric token
+    // hint of some kind.
+    expect(call.prompt).toMatch(/\d+ tokens/);
+    call.opts.onChunk?.('CRISPER');
+    call.resolve('CRISPER');
+    await flushMicrotasks();
+  });
+
+  it('rewrite send: chunks land in both the chat bubble and the captured Range', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'original';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'original',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'original',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'rewrite please';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('REW');
+    call.opts.onChunk?.('RITTEN');
+    expect(host.textContent).toBe('REWRITTEN');
+    call.resolve('REWRITTEN');
+    await flushMicrotasks();
+    // The model bubble holds the streamed model text plus an Undo button.
+    // Read the text from the first text node to ignore the button label.
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    const firstTextNode = Array.from(modelBubble.childNodes).find((n) => n.nodeType === 3);
+    expect(firstTextNode?.textContent).toBe('REWRITTEN');
+    expect(modelBubble.querySelector('button')).not.toBeNull();
+  });
+
+  it('rewrite send on success: Undo button appears and restores the original text', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'original';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'original',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'original',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'fix';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('NEW');
+    call.resolve('NEW');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    const undoBtn = modelBubble.querySelector('button');
+    expect(undoBtn).not.toBeNull();
+    expect(host.textContent).toBe('NEW');
+    undoBtn?.click();
+    expect(host.textContent).toBe('original');
+    expect(undoBtn?.textContent).toContain('Undone');
+  });
+
+  it('rewrite surfaces a GPU error plainly and never rebuilds the session (guard removed)', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._fireSelectionChange(makeFakeSnapshot({ text: 'target' }));
+    deps._input.value = 'make it bold';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.reject(
+      new Error('GPU out-of-memory (VK_ERROR_OUT_OF_DEVICE_MEMORY). Model returned no output.'),
+    );
+    await flushMicrotasks();
+    expect(rebuildSessionMock).not.toHaveBeenCalled();
+    expect(pending.length).toBe(0); // no retry queued
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    expect(modelBubble?.textContent).toContain('VK_ERROR_OUT_OF_DEVICE_MEMORY');
+  });
+
+  it('rewrite send on success persists both turns to chrome.storage.local under the per-URL key', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    const host = document.createElement('p');
+    host.textContent = 'orig';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'orig',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'orig',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'tighten this';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('TIGHT');
+    call.resolve('TIGHT');
+    await flushMicrotasks();
+    const key = `local-nano:history:https://example.com/page`;
+    const stored = chromeMock.storage.local.store[key] as Array<{ role: string; text: string }>;
+    expect(stored).toBeTruthy();
+    expect(stored).toHaveLength(2);
+    expect(stored[0]).toEqual({ role: 'user', text: 'tighten this' });
+    expect(stored[1]).toEqual({ role: 'model', text: 'TIGHT' });
+  });
+
+  it('rewrite success: model bubble has both Undo and Accept buttons in that order', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'original';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'original',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'original',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'fix';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('NEW');
+    call.resolve('NEW');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    const buttons = modelBubble.querySelectorAll('button');
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].textContent).toBe('Undo');
+    expect(buttons[1].textContent).toBe('Accept');
+  });
+
+  it('Accept button removes the action bar and resets selection state', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'original';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'original',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'original',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'fix';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('NEW');
+    call.resolve('NEW');
+    await flushMicrotasks();
+
+    // Simulate a stale snapshot lingering in session state — what would
+    // happen if a selectionchange fired between sendRewrite finishing
+    // and the user clicking Accept.
+    deps._fireSelectionChange({
+      ...snap,
+      text: 'stale',
+    });
+    expect(deps._selectionChip.style.display).toBe('block');
+
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    const acceptBtn = modelBubble.querySelectorAll('button')[1] as HTMLButtonElement;
+    acceptBtn.click();
+
+    // Bar is gone (no more buttons on this bubble).
+    expect(modelBubble.querySelectorAll('button')).toHaveLength(0);
+    // Selection state reset: chip hidden, placeholder back to chat.
+    expect(deps._selectionChip.style.display).toBe('none');
+    expect(deps._input.placeholder).not.toContain('Edit selection');
+    expect(deps._input.placeholder).not.toContain('Ask about selection');
+  });
+
+  it('undo button after container removal changes to Undo failed', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'original';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'original',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'original',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    deps._input.value = 'go';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('NEW');
+    call.resolve('NEW');
+    await flushMicrotasks();
+    // Remove the host paragraph so the snapshot is detached.
+    host.remove();
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    const undoBtn = modelBubble.querySelector('button');
+    undoBtn?.click();
+    expect(undoBtn?.textContent).toContain('Undo failed');
+  });
+
+  it('Ask-mode send: prompt is the ask shape and does not mutate the DOM', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const host = document.createElement('p');
+    host.textContent = 'photosynthesis';
+    document.body.appendChild(host);
+    const textNode = host.firstChild as Text;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, textNode.data.length);
+    const snap: SelectionSnapshot = {
+      text: 'photosynthesis',
+      before: '',
+      after: '',
+      range,
+      undoAnchor: {
+        startContainer: range.startContainer,
+        startOffset: 0,
+        endContainer: range.endContainer,
+        endOffset: textNode.data.length,
+        originalText: 'photosynthesis',
+        insertedNode: null,
+      },
+    };
+    deps._fireSelectionChange(snap);
+    // Toggle to ask mode.
+    deps._input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    deps._input.value = 'what does this mean?';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    expect(call.prompt).toContain('photosynthesis');
+    expect(call.prompt).toContain('what does this mean?');
+    expect(call.prompt.toLowerCase()).not.toContain('rewrite');
+    call.opts.onChunk?.('A plant process.');
+    call.resolve('A plant process.');
+    await flushMicrotasks();
+    // DOM should NOT have been mutated.
+    expect(host.textContent).toBe('photosynthesis');
+    // After the ask turn completes, mode resets to Edit.
+    expect(deps._input.placeholder).toContain('Edit selection');
+  });
+
+  it('empty snapshot hides the chip; non-null snapshot shows a truncated preview', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    expect(deps._selectionChip.style.display).toBe('none');
+    const longText = 'x'.repeat(120);
+    deps._fireSelectionChange(makeFakeSnapshot({ text: longText }));
+    expect(deps._selectionChip.style.display).not.toBe('none');
+    expect(deps._selectionChip.textContent?.length).toBeLessThanOrEqual(63);
+    deps._fireSelectionChange(null);
+    expect(deps._selectionChip.style.display).toBe('none');
+  });
+});
+
+describe('initSession — history pressure tracking', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+  });
+
+  it('warns with a Clear-conversation bubble after a turn pushes sent-chars above the threshold', async () => {
+    // One send of ~5000 chars prompt + 100 chars response = ~5100 chars
+    // = ~1700 estimated tokens, crossing the default 1500 threshold.
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'x'.repeat(5000);
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('A'.repeat(100));
+    call.resolve('A'.repeat(100));
+    await flushMicrotasks();
+
+    const bubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    );
+    expect(bubble).toBeTruthy();
+    const btn = bubble?.querySelector('button');
+    expect(btn?.textContent).toBe('Clear conversation');
+  });
+
+  it('does not warn when history is well under the threshold', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    deps._input.value = 'short hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('hi back');
+    call.resolve('hi back');
+    await flushMicrotasks();
+    const bubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    );
+    expect(bubble).toBeUndefined();
+  });
+
+  it('only warns once per session even if subsequent turns also cross the threshold', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+
+    // First turn — long enough to cross the threshold in one shot.
+    deps._input.value = 'x'.repeat(5000);
+    deps._actionBtn.click();
+    let call = await awaitPending();
+    call.opts.onChunk?.('A');
+    call.resolve('A');
+    await flushMicrotasks();
+    const firstCount = Array.from(deps._messages.children).filter((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    ).length;
+    expect(firstCount).toBe(1);
+
+    // Second turn → no additional warning despite still being above threshold.
+    deps._input.value = 'x'.repeat(5000);
+    deps._actionBtn.click();
+    call = await awaitPending();
+    call.opts.onChunk?.('B');
+    call.resolve('B');
+    await flushMicrotasks();
+    const secondCount = Array.from(deps._messages.children).filter((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    ).length;
+    expect(secondCount).toBe(1);
+  });
+
+  it('uses the GPU-info derived threshold (low for fallback adapter) instead of the default', async () => {
+    // Fallback adapter → threshold drops to 800. A 2500-char send
+    // lands above 800 but below 1500, so the warning only fires under
+    // the lower threshold.
+    getGpuInfoMock.mockResolvedValueOnce({
+      device: 'webgpu',
+      isFallback: true,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+    const deps = makeDeps();
+    initSession(deps);
+    // Trigger warmup so getGpuInfo + threshold derivation runs.
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+
+    deps._input.value = 'x'.repeat(2500);
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('ok');
+    call.resolve('ok');
+    await flushMicrotasks();
+
+    const bubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    );
+    expect(bubble).toBeTruthy();
+  });
+
+  it('honors a configuredThreshold from .env.json over any derivation', async () => {
+    getGpuInfoMock.mockResolvedValueOnce({
+      device: 'webgpu',
+      isFallback: false,
+      maxBufferSize: 4 * 1024 * 1024 * 1024,
+      configuredThreshold: 300,
+    });
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    // ~333-token history (1000 chars / 3) — above the 300 configured
+    // threshold but well below any auto-derived value for a 4 GiB
+    // adapter.
+    deps._input.value = 'x'.repeat(1000);
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('ok');
+    call.resolve('ok');
+    await flushMicrotasks();
+    const bubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    );
+    expect(bubble).toBeTruthy();
+  });
+
+  it('clicking Clear conversation calls rebuildSession with empty history, wipes UI and storage', async () => {
+    const key = `local-nano:history:https://example.com/page`;
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    // Long send to push past the default threshold so the warning bubble
+    // and its Clear button materialize.
+    deps._input.value = 'x'.repeat(5000);
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('ok');
+    call.resolve('ok');
+    await flushMicrotasks();
+
+    const bubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('Conversation history is around'),
+    );
+    const btn = bubble?.querySelector('button') as HTMLButtonElement;
+    btn.click();
+    await flushMicrotasks();
+    expect(rebuildSessionMock).toHaveBeenCalledWith([]);
+    // UI fully wiped except for the post-clear confirmation bubble.
+    const after = Array.from(deps._messages.children).map((c) => c.textContent);
+    expect(after.some((t) => t?.includes('Conversation cleared'))).toBe(true);
+    expect(after.some((t) => t?.includes('one more'))).toBe(false);
+    // Persisted history is reset.
+    expect(chromeMock.storage.local.store[key]).toEqual([]);
+  });
+});
+
+describe('deriveHistoryThreshold', () => {
+  it('honors an explicit configuredThreshold above everything else', () => {
+    expect(
+      deriveHistoryThreshold({
+        device: 'webgpu',
+        isFallback: true,
+        maxBufferSize: 0,
+        configuredThreshold: 42,
+      }),
+    ).toBe(42);
+    expect(
+      deriveHistoryThreshold({
+        device: 'wasm',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: 12345,
+      }),
+    ).toBe(12345);
+  });
+
+  it('returns a generous threshold for WASM (CPU has system RAM)', () => {
+    expect(
+      deriveHistoryThreshold({
+        device: 'wasm',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(8000);
+  });
+
+  it('drops the threshold sharply for the software fallback adapter', () => {
+    expect(
+      deriveHistoryThreshold({
+        device: 'webgpu',
+        isFallback: true,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(800);
+  });
+
+  it('falls back to the default when maxBufferSize is unknown', () => {
+    expect(
+      deriveHistoryThreshold({
+        device: 'webgpu',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(1500);
+  });
+
+  it('scales the threshold with maxBufferSize bands', () => {
+    const mk = (mb: number) => ({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: mb * 1024 * 1024,
+      configuredThreshold: null,
+    });
+    expect(deriveHistoryThreshold(mk(256))).toBe(1000); // <512 MiB → 1000
+    expect(deriveHistoryThreshold(mk(768))).toBe(1500); // <1 GiB → 1500
+    expect(deriveHistoryThreshold(mk(1536))).toBe(2500); // <2 GiB → 2500
+    expect(deriveHistoryThreshold(mk(4096))).toBe(4000); // >=2 GiB → 4000
   });
 });

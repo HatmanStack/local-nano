@@ -10,7 +10,7 @@ cp .env.example.json .env.json
 {
   "apiKey": "dummy",
   "device": "webgpu",
-  "dtype": "q4",
+  "dtype": "q4f16",
   "modelName": "onnx-community/gemma-4-E2B-it-ONNX"
 }
 ```
@@ -44,15 +44,28 @@ If WebGPU isn't available the polyfill will surface an error in the chat panel; 
 
 Quantization level for model weights. Smaller dtypes mean smaller download, lower memory, and slightly worse quality. Common values:
 
-- `"q4"` — 4-bit, the most aggressive quantization.
-- `"q4f16"` — 4-bit weights with fp16 activations; the polyfill's default.
-- `"q8"` / `"fp16"` / `"fp32"` — increasingly precise, increasingly heavy.
+- `"q4f16"` — 4-bit weights with fp16 activations. **Recommended default.**
+- `"q4"` — 4-bit, the most aggressive quantization. **Avoid on WebGPU:** the `q4` ONNX kernel has hit a WebAssembly `SIGILL` (illegal instruction) inside ONNX Runtime Web's SIMD path on some Chrome/Dawn builds, crashing the offscreen document during model load. `q4f16` uses different kernels and avoids it. See the 0.2.4 CHANGELOG note.
+- `"q8"` / `"fp16"` / `"fp32"` — increasingly precise, increasingly heavy. Good alternatives if `q4f16` ever regresses.
 
 Not every model publishes every variant — check the model's `onnx/` folder on the Hub.
 
 ### `apiKey` (string)
 
 Unused by the Transformers.js backend. Kept in the shape because the upstream polyfill supports cloud backends (firebase / gemini / openai) that need real keys; the slimmed `backends-registry.js` in this repo only ships the Transformers.js backend.
+
+### `historyTokenWarnThreshold` (number, optional)
+
+Override for the conversation-history token threshold above which the panel surfaces a "Clear conversation" warning. When absent, the panel queries the WebGPU adapter at warmup and derives a threshold automatically:
+
+- `wasm` device — `8000` (CPU has gigabytes of system RAM)
+- WebGPU software fallback — `800` (very constrained)
+- WebGPU `maxBufferSize` &lt; 512 MiB — `1000`
+- WebGPU `maxBufferSize` &lt; 1 GiB — `1500`
+- WebGPU `maxBufferSize` &lt; 2 GiB — `2500`
+- WebGPU `maxBufferSize` &ge; 2 GiB — `4000`
+
+Set this field if the auto-derived value is wrong for your hardware. The number is in estimated tokens (`chars / 3` over persisted history text); typical chat turn is ~100-300 tokens, typical rewrite turn ~400-600.
 
 ## Changing the keyboard shortcut
 

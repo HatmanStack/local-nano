@@ -5,6 +5,62 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-05-23
+
+Polishes the selection-rewrite UX and prepares the first Chrome Web Store submission. An earlier automatic GPU-OOM "guard" (zero-chunk-as-failure + session teardown + rebuild-and-retry) was removed: on a memory-constrained adapter the session churn tended to make out-of-memory worse, not better. The session now loads once and is never auto-destroyed; GPU errors surface plainly instead.
+
+### Added
+
+- **Model preloads when the panel opens.** Previously the first message ate the 30–90s WebGPU upload. Now opening the panel (Ctrl/Cmd+Shift+K) kicks off the load in the background with a live "Loading…" indicator (bouncing dots + an elapsed counter); the input stays editable while the Send button is gated until the model is ready. The preload is best-effort — if it fails it degrades quietly to lazy loading on the first message rather than raising an alarm, and the load is never killed on a timer.
+- **Proactive "Clear conversation" warning.** The panel tracks how large the conversation has grown and warns before the next turn is likely to exhaust VRAM, with a one-click button to reset the session. The warning threshold is derived per-session from the actual WebGPU adapter (or `device` / an optional `historyTokenWarnThreshold` in `.env.json`).
+- **Undo / Accept on rewrites.** A finished rewrite now offers both Undo (restore the original text) and Accept (commit and reset selection state for the next edit), instead of Undo alone.
+- **Brand icon** (`icons/`) and an `npm run package` step that zips a Web-Store-ready upload (manifest + `dist/` + icons).
+
+### Changed
+
+- Reduced requested permissions to `["storage", "offscreen"]`. Removed `activeTab` and `scripting` (the declarative `<all_urls>` content script already grants the page access the extension uses; nothing calls the `chrome.scripting` API) and the `cdn.jsdelivr.net` host permission (ONNX Runtime WASM loads from the bundled `dist/ort/`, never jsdelivr).
+- Default `dtype` changed from `q4` to `q4f16` in `.env.example.json`. See the Notes below — the `q4` ONNX kernel hits an illegal-instruction crash in ONNX Runtime Web's WASM SIMD path on some Chrome/Dawn builds; `q4f16` routes through different kernels and avoids it, with slightly better quality (fp16 activations, same 4-bit weights).
+
+### Removed
+
+- The automatic GPU-OOM guard: zero-chunk streams are no longer treated as failures, the offscreen session is no longer torn down on a stream error, and the chat/rewrite paths no longer rebuild-and-retry on a device-loss-shaped error. A failed turn now shows its error plainly. Manual recovery is still available via the "Clear conversation" button.
+
+### Fixed
+
+- Highlighting text then clicking into the chat input no longer drops the selection — focus-shift `selectionchange` events are ignored so the captured snapshot survives.
+
+### Notes
+
+- All inference still runs on-device; the only network access remains the one-time model-weights download from Hugging Face. No new permissions touch the network beyond what 0.2.2 already declared (and jsdelivr was dropped).
+- See [docs/chrome-web-store.md](docs/chrome-web-store.md) for the submission checklist and permission justifications.
+- **`q4` kernel crash (debugging note).** A model load with `dtype: "q4"` was crashing the offscreen document with a WebAssembly `SIGILL` (illegal instruction) inside ONNX Runtime Web's quantized-matmul SIMD kernel — reproducible in a bare webpage with no extension, so it's upstream of this project (a V8/Dawn codegen issue on the affected device, not our code, the model, or the GPU; raw WebGPU buffer allocation and dependency integrity both checked out). `q4f16` uses different kernels and sidesteps the bad instruction. If `q4f16` ever regresses similarly, `fp16` and `q8` are the next dtypes to try.
+
+## [0.2.3] - 2026-05-19
+
+Restores selection-driven in-place rewrite, designed against the memory budget that killed v0.2.0. Highlight prose, type an instruction into the chat input, and the model rewrites the selection in place while tokens stream. A single-level Undo button on the resulting chat bubble restores the original text. Pressing Esc inside the input toggles to "Ask about selection" mode, which quotes the selection into a normal chat prompt without mutating the DOM.
+
+The feature reuses the v0.2.2 offscreen `LanguageModel` session; no second model is loaded into WebGPU. Selection payload is hard-capped at ~700 chars. The polyfill's 2048-token output ceiling is unchanged; a prompt-side soft cap computed from the input token count keeps real-world rewrite outputs bounded.
+
+### Added
+
+- `src/selection-rewrite.ts` — snapshot capture, prompt builders, in-place streaming into the captured `Range`, single-level undo.
+- New `count` channel in the offscreen protocol (`src/offscreen/protocol.ts`) and `countTokens()` export in `src/offscreen/client.ts`, racing the polyfill round-trip against a 100ms timeout with a `chars/3` heuristic fallback.
+- Esc-toggled "Ask about selection" mode that quotes the selection without mutating the DOM.
+- `docs/transform.md`.
+- New tests: `tests/selection-rewrite.test.ts`; extensions to `tests/offscreen-protocol.test.ts`, `tests/offscreen-client.test.ts`, and `tests/session.test.ts`.
+
+### Changed
+
+- `src/session.ts` — selection-aware placeholder swap, Esc handler, rewrite send path, undo button on the model bubble.
+- `content.ts` — installs the `selectionchange` listener and the selection-preview chip.
+- `package.json` and `manifest.json` version bumped 0.2.2 → 0.2.3.
+
+### Notes
+
+- The chat session and selection-rewrite share one `LanguageModel` instance by design; the v0.2.0 OOM root cause is foreclosed by construction.
+- `<input>`, `<textarea>`, and `contenteditable` regions are still unsupported. Queued for v0.3.0.
+- **Verification status:** the unit + integration suite (200+ tests, all passing under Vitest + jsdom with a mocked offscreen client) covers the selection-rewrite plumbing end-to-end. The in-browser smoke test against a real WebGPU-backed Gemma session was deferred for this release — open the unpacked extension and run the steps in `docs/transform.md#how-to-use` against a public article before treating the happy path as proven.
+
 ## [0.2.2] - 2026-05-19
 
 Moves the on-device `LanguageModel` session out of the content script and into a hidden offscreen document, so the model loads once and is shared across tabs/pages instead of reloading WebGPU on every navigation. Per-URL chat history continues to live in `chrome.storage.local`; the polyfill session is the shared resource.

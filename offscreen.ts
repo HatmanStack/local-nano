@@ -19,7 +19,13 @@
 
 import transformersConfig from './.env.json';
 import {
+  COUNT_TOKENS_RESPONSE,
+  type CountTokensResponse,
+  GPU_INFO_RESPONSE,
+  type GpuInfoResponse,
   type HistoryTurn,
+  isCountTokensRequest,
+  isGpuInfoRequest,
   isRebuildSessionRequest,
   isStreamAbort,
   isStreamRequest,
@@ -34,6 +40,7 @@ import {
 
 interface LanguageModelSession {
   promptStreaming(input: string, options?: { signal?: AbortSignal }): ReadableStream<string>;
+  measureContextUsage(input: string): Promise<number>;
   destroy(): void;
 }
 
@@ -114,9 +121,10 @@ function ensureSession(history?: HistoryTurn[]): Promise<LanguageModelSession> {
 
 /**
  * Tear down the current polyfill session and create a fresh one seeded
- * with the provided history. Invoked when the chat layer detects a
- * device-loss failure (zero-chunk stream) and wants to recover without
- * losing conversational context.
+ * with the provided history. Invoked from the user-initiated "Clear
+ * conversation" path in the chat layer (the automatic device-loss
+ * rebuild/retry guard was removed); lets the user reset the session
+ * while keeping the prior conversation as context.
  */
 async function rebuildSession(history: HistoryTurn[]): Promise<void> {
   try {
@@ -128,6 +136,91 @@ async function rebuildSession(history: HistoryTurn[]): Promise<void> {
   sessionPromise = null;
   await ensureSession(history);
 }
+
+interface MaybeGpuAdapter {
+  isFallbackAdapter?: boolean;
+  limits?: { maxBufferSize?: number };
+}
+
+async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
+  const cfg = transformersConfig as { device?: string; historyTokenWarnThreshold?: number };
+  const device: 'webgpu' | 'wasm' = cfg.device === 'wasm' ? 'wasm' : 'webgpu';
+  const configuredThreshold =
+    typeof cfg.historyTokenWarnThreshold === 'number' &&
+    Number.isFinite(cfg.historyTokenWarnThreshold)
+      ? cfg.historyTokenWarnThreshold
+      : null;
+
+  if (device === 'wasm') {
+    return {
+      type: GPU_INFO_RESPONSE,
+      ok: true,
+      device,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold,
+    };
+  }
+
+  const gpu = (
+    navigator as unknown as { gpu?: { requestAdapter?: () => Promise<MaybeGpuAdapter | null> } }
+  ).gpu;
+  if (!gpu?.requestAdapter) {
+    return {
+      type: GPU_INFO_RESPONSE,
+      ok: true,
+      device,
+      isFallback: true,
+      maxBufferSize: null,
+      configuredThreshold,
+    };
+  }
+  try {
+    const adapter = await gpu.requestAdapter();
+    if (!adapter) {
+      return {
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device,
+        isFallback: true,
+        maxBufferSize: null,
+        configuredThreshold,
+      };
+    }
+    const maxBufferSize =
+      typeof adapter.limits?.maxBufferSize === 'number' ? adapter.limits.maxBufferSize : null;
+    return {
+      type: GPU_INFO_RESPONSE,
+      ok: true,
+      device,
+      isFallback: Boolean(adapter.isFallbackAdapter),
+      maxBufferSize,
+      configuredThreshold,
+    };
+  } catch {
+    return {
+      type: GPU_INFO_RESPONSE,
+      ok: true,
+      device,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold,
+    };
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!isGpuInfoRequest(msg)) return false;
+  collectGpuInfo().then(
+    (reply) => sendResponse(reply),
+    (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      const fail: GpuInfoResponse = { type: GPU_INFO_RESPONSE, ok: false, error: message };
+      sendResponse(fail);
+    },
+  );
+  return true;
+});
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!isRebuildSessionRequest(msg)) return false;
@@ -146,6 +239,30 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse(fail);
     },
   );
+  return true;
+});
+
+// Count-tokens channel. Best-effort: failures here do not destroy or
+// rebuild the session — the client side has a heuristic fallback so a
+// slow or broken count never blocks a transform.
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!isCountTokensRequest(msg)) return false;
+  (async () => {
+    try {
+      const session = await ensureSession();
+      const count = await session.measureContextUsage(msg.text);
+      const ok: CountTokensResponse = { type: COUNT_TOKENS_RESPONSE, ok: true, count };
+      sendResponse(ok);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      const fail: CountTokensResponse = {
+        type: COUNT_TOKENS_RESPONSE,
+        ok: false,
+        error: message,
+      };
+      sendResponse(fail);
+    }
+  })();
   return true;
 });
 
@@ -198,41 +315,6 @@ chrome.runtime.onConnect.addListener((port) => {
         } finally {
           reader.releaseLock();
         }
-        if (chunkCount === 0 && !controller.signal.aborted) {
-          // The polyfill's transformers backend catches generation errors
-          // (WebGPU device loss after a tab switch is the common one) and
-          // sets isDone=true without erroring the stream
-          // (vendor/prompt-api-polyfill/backends/transformers.js:241-248).
-          // The polyfill then pushes user/model("") into its history and
-          // closes the stream cleanly. We get a "successful zero-chunk"
-          // result here — surface it as a failure and rebuild the session:
-          // the polyfill's history is now polluted with an empty turn that
-          // tends to cascade into more empty turns, and the WebGPU device
-          // is likely gone anyway.
-          console.warn(
-            `[local-nano/offscreen] EMPTY response id=${id} prompt.length=${raw.prompt.length} sessionMs=${tSession.toFixed(0)} totalMs=${(performance.now() - t0).toFixed(0)} — treating as failure and rebuilding session on next call.`,
-          );
-          try {
-            const previous = await sessionPromise;
-            previous?.destroy();
-          } catch {
-            // Nothing useful to do — we're tearing it down anyway.
-          }
-          sessionPromise = null;
-          const empty: StreamDone = {
-            type: STREAM_DONE,
-            id,
-            ok: false,
-            error:
-              'Model returned no output (likely WebGPU device loss after tab/window switch). Rebuilding session; try again.',
-          };
-          try {
-            port.postMessage(empty);
-          } catch {
-            // Caller gone.
-          }
-          return;
-        }
         console.log(
           `[local-nano/offscreen] stream/done id=${id} chunks=${chunkCount} chars=${totalChars} sessionMs=${tSession.toFixed(0)} totalMs=${(performance.now() - t0).toFixed(0)}`,
         );
@@ -246,20 +328,12 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        const errName = (err as { name?: unknown })?.name;
-        // Aborts are a normal end-of-stream signal — the user clicked
-        // Stop, or another tab disconnected the port. Resetting the
-        // session here would destroy the polyfill's conversation history
-        // and the next turn would have no memory of the prior one.
-        //
-        // Only reset on real failures (WebGPU device-lost, "OrtRun"
-        // failures, malformed model output). The next request then
-        // rebuilds the session from cached weights — slower for that
-        // call, recoverable across the tab's lifetime.
-        if (errName !== 'AbortError') {
-          sessionPromise = null;
-          console.warn('[local-nano/offscreen] stream error, resetting session:', errMsg);
-        }
+        // Guard removed: the session is NOT torn down or rebuilt on
+        // error. We keep the loaded session alive and just report the
+        // failure — destroying + reloading on a constrained GPU was
+        // suspected of worsening OOM via reload churn. The caller
+        // surfaces the error message.
+        console.warn('[local-nano/offscreen] stream error:', errMsg);
         const fail: StreamDone = { type: STREAM_DONE, id, ok: false, error: errMsg };
         try {
           port.postMessage(fail);

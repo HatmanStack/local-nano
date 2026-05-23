@@ -7,24 +7,75 @@ import {
   saveHistory as saveHistoryToStorage,
   storageKey,
 } from './history.js';
-import { rebuildSession, streamPrompt } from './offscreen/client.js';
+import {
+  countTokens,
+  getGpuInfo,
+  rebuildSession,
+  streamPrompt,
+  warmupSession,
+} from './offscreen/client.js';
+import type { GpuInfoSnapshot } from './offscreen/protocol.js';
 import { pageContext } from './pageContext.js';
+import {
+  buildAskPrompt,
+  buildRewritePrompt,
+  MAX_OUTPUT_MULTIPLIER,
+  MIN_OUTPUT_TOKENS,
+  type SelectionSnapshot,
+  streamRewriteIntoRange,
+  undoRewrite,
+} from './selection-rewrite.js';
 import { makeTypingIndicator, renderMessage } from './ui/messages.js';
-import { setGeneratingState, setIdleState } from './ui/state.js';
+import { setGeneratingState, setIdleState, setLoadingState } from './ui/state.js';
+
+const PLACEHOLDER_CHAT = 'Ask anything about this page (Enter)';
+const PLACEHOLDER_EDIT = 'Edit selection… (Esc to switch to Ask)';
+const PLACEHOLDER_ASK = 'Ask about selection… (Esc to switch back to Edit)';
+const CHIP_MAX_CHARS = 60;
 
 /**
- * Recognize the explicit failure offscreen.ts raises when the polyfill
- * stream closes with zero chunks — typically caused by WebGPU device
- * loss after the user switches tabs/windows. Matched on the message
- * string because the polyfill swallows the underlying ORT error and the
- * offscreen layer surfaces a sentinel string instead.
+ * Default heuristic threshold (in estimated tokens) for warning when
+ * accumulated history risks GPU memory pressure. Used only as a
+ * fallback — the actual threshold is normally derived per-session
+ * from the queried WebGPU adapter limits (see deriveHistoryThreshold).
+ * If `.env.json` defines a `historyTokenWarnThreshold` field, that
+ * overrides everything.
  */
-function isDeviceLossError(err: unknown): boolean {
-  if (err === null || typeof err !== 'object') return false;
-  const name = (err as { name?: unknown }).name;
-  if (name === 'AbortError') return false;
-  const message = err instanceof Error ? err.message : '';
-  return message.includes('WebGPU device loss') || message.includes('Model returned no output');
+const HISTORY_TOKEN_WARN_THRESHOLD_DEFAULT = 1500;
+
+/**
+ * How long the model-load elapsed counter ticks before it appends
+ * "taking longer than usual" remedies. The load is never auto-failed on
+ * a timer (a slow first download must not be killed); this only changes
+ * the wording so a genuinely stuck load gets actionable guidance.
+ */
+const WARMUP_SLOW_NOTICE_MS = 45_000;
+
+/**
+ * Map a GPU-info snapshot to a token-history warning threshold.
+ * Lifted to module scope so it's unit-testable without going through
+ * initSession.
+ *
+ * Reasoning:
+ * - WASM device → CPU does the inference, system RAM is in the gigabytes,
+ *   raise the threshold so we effectively never warn for normal sessions.
+ * - Fallback adapter (Dawn SwANGLE) → very constrained, warn early.
+ * - WebGPU with a known maxBufferSize → step down with the adapter:
+ *   integrated GPUs cap around 256-512 MiB single buffers, mid-range
+ *   discrete sits at 1-2 GiB, high-end and Apple Silicon at 4+ GiB.
+ *   These don't map directly to VRAM total but correlate strongly with
+ *   hardware class.
+ */
+export function deriveHistoryThreshold(info: GpuInfoSnapshot): number {
+  if (info.configuredThreshold !== null) return info.configuredThreshold;
+  if (info.device === 'wasm') return 8000;
+  if (info.isFallback) return 800;
+  if (info.maxBufferSize === null) return HISTORY_TOKEN_WARN_THRESHOLD_DEFAULT;
+  const mb = info.maxBufferSize / (1024 * 1024);
+  if (mb < 512) return 1000;
+  if (mb < 1024) return 1500;
+  if (mb < 2048) return 2500;
+  return 4000;
 }
 
 /**
@@ -36,12 +87,34 @@ export interface SessionDeps {
   messages: HTMLElement;
   input: HTMLInputElement;
   actionBtn: HTMLButtonElement;
+  /**
+   * Compact chip element above the input showing a preview of the
+   * current selection. Owned by content.ts; the session manages content
+   * and visibility.
+   */
+  selectionChip: HTMLElement;
+  /**
+   * Register a callback for selection-change events. content.ts wires
+   * `document.addEventListener('selectionchange', …)` and forwards
+   * `decideSnapshot(...)` results here. Snapshot may be null when no
+   * supported selection exists.
+   */
+  onSelectionChange: (cb: (snap: SelectionSnapshot | null) => void) => void;
   location: Pick<Location, 'origin' | 'pathname' | 'href'>;
   document: Pick<Document, 'title'> & { body: { innerText: string } };
 }
 
 export function initSession(deps: SessionDeps): void {
-  const { root, messages, input: i, actionBtn, location, document } = deps;
+  const {
+    root,
+    messages,
+    input: i,
+    actionBtn,
+    selectionChip,
+    onSelectionChange,
+    location,
+    document,
+  } = deps;
   const STORAGE_KEY = storageKey(location);
 
   // ---- History ----
@@ -78,6 +151,50 @@ export function initSession(deps: SessionDeps): void {
     return el;
   }
 
+  // ---- Selection state ----
+  let currentSelection: SelectionSnapshot | null = null;
+  let askMode = false;
+
+  function updatePlaceholder(): void {
+    if (!currentSelection) {
+      i.placeholder = PLACEHOLDER_CHAT;
+      return;
+    }
+    i.placeholder = askMode ? PLACEHOLDER_ASK : PLACEHOLDER_EDIT;
+  }
+
+  function updateChip(): void {
+    if (!currentSelection) {
+      selectionChip.style.display = 'none';
+      selectionChip.textContent = '';
+      return;
+    }
+    const preview =
+      currentSelection.text.length > CHIP_MAX_CHARS
+        ? `${currentSelection.text.slice(0, CHIP_MAX_CHARS)}…`
+        : currentSelection.text;
+    selectionChip.textContent = preview;
+    selectionChip.style.display = 'block';
+  }
+
+  onSelectionChange((snap) => {
+    currentSelection = snap;
+    if (!snap) askMode = false;
+    updatePlaceholder();
+    updateChip();
+    // Diagnostic at debug level: selectionchange fires continuously
+    // while dragging a selection, so this would flood the default
+    // console. Surfaced via console.debug — visible when the user
+    // raises the DevTools log level to debug while reproducing
+    // subsequent-rewrite issues, hidden otherwise.
+    if (snap) {
+      const preview = snap.text.length > 40 ? `${snap.text.slice(0, 40)}…` : snap.text;
+      console.debug(`[local-nano] selection captured: "${preview}"`);
+    } else {
+      console.debug('[local-nano] selection cleared');
+    }
+  });
+
   // ---- Send / Stop ----
   // NOTE(isFirstTurn): This flag isn't reset after restore() re-renders
   // prior history. The restored messages are displayed in the UI but the
@@ -88,20 +205,79 @@ export function initSession(deps: SessionDeps): void {
   let isFirstTurn = true;
   let activeAbort: AbortController | null = null;
 
-  async function send() {
-    if (!i.value.trim() || activeAbort) return;
-    const text = i.value.trim();
-    i.value = '';
+  function makeActionButton(label: string): HTMLButtonElement {
+    const btn = window.document.createElement('button');
+    btn.textContent = label;
+    btn.style.cssText =
+      'padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
+    return btn;
+  }
+
+  /**
+   * After a rewrite finishes, attach a small Undo + Accept button bar to
+   * the model bubble.
+   *
+   * Undo restores the original text from the snapshot.
+   *
+   * Accept commits the rewrite. It removes both buttons, clears any
+   * stale browser selection that may still be pointing at the
+   * now-replaced nodes, and resets session selection state so the next
+   * highlight on the page starts from a clean slate — the user
+   * reported that subsequent rewrites felt stuck without an explicit
+   * "I'm done with this one" signal.
+   */
+  function attachRewriteActions(modelBubble: HTMLElement, snap: SelectionSnapshot): void {
+    const bar = window.document.createElement('div');
+    bar.style.cssText = 'margin-top: 6px; display: flex; gap: 6px;';
+
+    const undoBtn = makeActionButton('Undo');
+    undoBtn.addEventListener('click', () => {
+      const result = undoRewrite(snap);
+      undoBtn.disabled = true;
+      if (result.ok) {
+        undoBtn.textContent = 'Undone';
+        console.log('[local-nano] undo: restored original selection');
+      } else {
+        undoBtn.textContent = 'Undo failed';
+        console.warn(`[local-nano] undo failed: ${result.reason ?? 'unknown'}`);
+      }
+    });
+
+    const acceptBtn = makeActionButton('Accept');
+    acceptBtn.addEventListener('click', () => {
+      bar.remove();
+      // Clear the page's stale Selection (its Range may reference nodes
+      // that were just replaced by the rewrite). Without this, the
+      // browser keeps the dangling Selection around and subsequent
+      // `selectionchange` events can misfire.
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch {
+        // jsdom or restricted contexts may throw; the visible state
+        // resets below either way.
+      }
+      currentSelection = null;
+      askMode = false;
+      updatePlaceholder();
+      updateChip();
+      console.log('[local-nano] rewrite accepted; selection state reset');
+    });
+
+    bar.append(undoBtn, acceptBtn);
+    modelBubble.appendChild(bar);
+  }
+
+  async function sendChat(text: string): Promise<void> {
     addMessage('user', text);
-    // First-turn UX hint. The model upload to WebGPU runs in the offscreen
-    // doc and the user has no other signal that something is happening for
-    // the 30-90s that takes. Hint is a transient system message — not
-    // persisted — that's removed when the first chunk arrives, or replaced
-    // if generation fails.
     const wasFirstTurn = isFirstTurn;
-    const firstTurnHint = wasFirstTurn
-      ? addMessage('system', 'Loading model… first response can take up to a minute.')
-      : null;
+    // The panel-open warmup normally covers the model-load wait. The
+    // first-turn hint stays only as a fallback for the case where
+    // warmup failed silently and the model is loading for the first
+    // time on the send path instead.
+    const firstTurnHint =
+      wasFirstTurn && !modelReady
+        ? addMessage('system', 'Loading model… first response can take up to a minute.')
+        : null;
     const responseEl = renderMessage(messages, 'model', '');
     const indicator = makeTypingIndicator();
     responseEl.appendChild(indicator);
@@ -111,21 +287,13 @@ export function initSession(deps: SessionDeps): void {
     activeAbort = new AbortController();
     setGeneratingState(actionBtn, i);
 
-    // Accumulate inside onChunk so abort/error paths still see the partial
-    // text the user just watched stream in. The resolved value from
-    // streamPrompt would be identical on the happy path, but we don't
-    // rely on it.
     let modelText = '';
     let firstChunk = true;
-    let rebuildHint: HTMLElement | null = null;
     const t0 = performance.now();
     const onChunk = (chunk: string) => {
       if (firstChunk) {
         console.log(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
-        // Drop the "Loading model…" / "GPU recovering…" hints now that
-        // tokens are flowing.
         if (firstTurnHint?.parentNode) firstTurnHint.remove();
-        if (rebuildHint?.parentNode) rebuildHint.remove();
         responseEl.textContent = '';
         firstChunk = false;
       }
@@ -134,38 +302,12 @@ export function initSession(deps: SessionDeps): void {
       messages.scrollTop = messages.scrollHeight;
     };
     try {
-      try {
-        await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
-      } catch (err) {
-        if (!isDeviceLossError(err) || activeAbort.signal.aborted) throw err;
-        // The offscreen polyfill lost its WebGPU device (typically after a
-        // tab/window switch) and surfaced our explicit "no output" error.
-        // Re-seed a fresh session with the persisted conversation so the
-        // model wakes up knowing what was said, then retry the user's
-        // current prompt once. The just-added user turn is sliced off the
-        // reseed history — the polyfill will record it itself when we
-        // re-send below. Page-context prefix is dropped on retry: it was
-        // a first-turn UX nicety and never made it into our stored
-        // history, so re-sending it would be incoherent with the reseeded
-        // polyfill view.
-        rebuildHint = addMessage(
-          'system',
-          'GPU device lost — restoring session and retrying…',
-        );
-        modelText = '';
-        firstChunk = true;
-        const historyForReseed = history
-          .slice(0, -1)
-          .filter((entry): entry is { role: 'user' | 'model'; text: string } => entry.role !== 'system');
-        await rebuildSession(historyForReseed);
-        await streamPrompt(text, { signal: activeAbort.signal, onChunk });
-      }
+      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
       console.log(
         `[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms, chars=${modelText.length}, prompt.length=${prompt.length}`,
       );
+      recordSentTurn(prompt.length, modelText.length);
     } catch (err: unknown) {
-      // DOMException isn't always `instanceof Error` in non-browser
-      // environments (e.g. jsdom), so check the name field directly.
       const name = (err as { name?: unknown })?.name;
       if (name === 'AbortError') {
         modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
@@ -175,19 +317,8 @@ export function initSession(deps: SessionDeps): void {
         responseEl.textContent = modelText;
       }
     } finally {
-      // Drop the typing indicator unconditionally. The in-loop reset only
-      // runs when at least one chunk arrives; a stream that closes with
-      // zero chunks would otherwise leave the bouncing dots in place.
       if (indicator.parentNode) indicator.remove();
-      // Drop the first-turn / rebuild hints if either is still attached
-      // (they survive if no chunk ever arrived — abort or error before
-      // generation started).
       if (firstTurnHint?.parentNode) firstTurnHint.remove();
-      if (rebuildHint?.parentNode) rebuildHint.remove();
-      // A stream that completed successfully with zero chunks means the
-      // model emitted EOS immediately. Surface it as an explicit message
-      // rather than leaving an empty bubble that looks like the panel is
-      // broken.
       if (!modelText) {
         responseEl.textContent = '(no response — the model returned an empty answer)';
       }
@@ -197,6 +328,238 @@ export function initSession(deps: SessionDeps): void {
       }
       setIdleState(actionBtn, i);
       activeAbort = null;
+      i.focus();
+    }
+  }
+
+  async function sendAsk(instruction: string, snap: SelectionSnapshot): Promise<void> {
+    addMessage('user', instruction);
+    const responseEl = renderMessage(messages, 'model', '');
+    const indicator = makeTypingIndicator();
+    responseEl.appendChild(indicator);
+    const prompt = buildAskPrompt(snap, instruction);
+
+    activeAbort = new AbortController();
+    setGeneratingState(actionBtn, i);
+
+    let modelText = '';
+    let firstChunk = true;
+    const onChunk = (chunk: string) => {
+      if (firstChunk) {
+        responseEl.textContent = '';
+        firstChunk = false;
+      }
+      modelText += chunk;
+      responseEl.textContent = modelText;
+      messages.scrollTop = messages.scrollHeight;
+    };
+    let askSucceeded = false;
+    try {
+      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+      askSucceeded = true;
+    } catch (err: unknown) {
+      const name = (err as { name?: unknown })?.name;
+      if (name === 'AbortError') {
+        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
+        responseEl.textContent = modelText;
+      } else {
+        modelText = err instanceof Error ? err.message : String(err);
+        responseEl.textContent = modelText;
+      }
+    } finally {
+      if (indicator.parentNode) indicator.remove();
+      if (!modelText) {
+        responseEl.textContent = '(no response — the model returned an empty answer)';
+      }
+      if (modelText) {
+        pushEntry({ role: 'model', text: modelText });
+        persist();
+      }
+      if (askSucceeded) recordSentTurn(prompt.length, modelText.length);
+      setIdleState(actionBtn, i);
+      activeAbort = null;
+      // Ask mode is one-shot; reset to Edit for the next turn if the
+      // selection is still active.
+      askMode = false;
+      updatePlaceholder();
+      i.focus();
+    }
+  }
+
+  async function sendRewrite(instruction: string, snap: SelectionSnapshot): Promise<void> {
+    // Compute the soft cap from the *content* payload, not the framed
+    // prompt — the framed prompt embeds the cap number, so counting that
+    // would be chicken-and-egg. The framing is short and constant; the
+    // delta is well inside the soft cap's margin.
+    const payload = `${snap.before}\n${snap.text}\n${snap.after}\n${instruction}`;
+    const inputTokens = await countTokens(payload);
+    const softCap = Math.max(MIN_OUTPUT_TOKENS, inputTokens * MAX_OUTPUT_MULTIPLIER);
+    const prompt = buildRewritePrompt(snap, instruction, softCap);
+
+    addMessage('user', instruction);
+    const responseEl = renderMessage(messages, 'model', '');
+    const indicator = makeTypingIndicator();
+    responseEl.appendChild(indicator);
+
+    activeAbort = new AbortController();
+    setGeneratingState(actionBtn, i);
+
+    const rewrite = streamRewriteIntoRange(snap);
+    let modelText = '';
+    let firstChunk = true;
+    let succeeded = false;
+    const onChunk = (chunk: string) => {
+      if (firstChunk) {
+        responseEl.textContent = '';
+        firstChunk = false;
+      }
+      rewrite.applyChunk(chunk);
+      modelText += chunk;
+      responseEl.textContent = modelText;
+      messages.scrollTop = messages.scrollHeight;
+    };
+    try {
+      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+      succeeded = modelText.length > 0;
+    } catch (err: unknown) {
+      const name = (err as { name?: unknown })?.name;
+      if (name === 'AbortError') {
+        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
+        responseEl.textContent = modelText;
+      } else {
+        modelText = err instanceof Error ? err.message : String(err);
+        responseEl.textContent = modelText;
+      }
+    } finally {
+      if (indicator.parentNode) indicator.remove();
+      if (!modelText) {
+        responseEl.textContent = '(no response — the model returned an empty answer)';
+      }
+      if (modelText) {
+        pushEntry({ role: 'model', text: modelText });
+        persist();
+      }
+      if (succeeded) {
+        rewrite.finalize();
+        attachRewriteActions(responseEl, snap);
+        recordSentTurn(prompt.length, modelText.length);
+      }
+      setIdleState(actionBtn, i);
+      activeAbort = null;
+      i.focus();
+    }
+  }
+
+  async function send() {
+    if (!i.value.trim() || activeAbort || actionBtn.disabled) return;
+    const text = i.value.trim();
+    i.value = '';
+    const snap = currentSelection;
+    if (snap && askMode) {
+      // Snapshot reference is fine — ask mode does not mutate the DOM.
+      await sendAsk(text, snap);
+    } else if (snap) {
+      // Detach the snapshot from session state so a later selectionchange
+      // does not clobber the in-flight rewrite's anchor.
+      currentSelection = null;
+      updatePlaceholder();
+      updateChip();
+      await sendRewrite(text, snap);
+    } else {
+      await sendChat(text);
+    }
+    checkHistoryPressure();
+  }
+
+  // ---- History pressure tracking ----
+  // Once warned, suppress until the user actually clears (or rebuilds);
+  // we don't want a warning bubble on every turn after the threshold is
+  // crossed. The threshold itself is set per-session from the queried
+  // GPU info; until that resolves (or if it fails) we use the default.
+  //
+  // `cumulativeSentChars` counts characters we actually shipped to the
+  // polyfill (full framed prompts + model responses), not just the
+  // user-text + model-rewrite that lands in our per-URL chat log. A
+  // rewrite turn sends ~700 chars of selection-context framing on top
+  // of the user's short instruction, so the polyfill's #history grows
+  // much faster than the local `history` array; estimating from
+  // `history` alone was undercounting and missing the warning window.
+  let warnedAboutHistory = false;
+  let historyThreshold = HISTORY_TOKEN_WARN_THRESHOLD_DEFAULT;
+  let cumulativeSentChars = 0;
+
+  function recordSentTurn(promptChars: number, responseChars: number): void {
+    cumulativeSentChars += promptChars + responseChars;
+  }
+
+  function resetSentTotals(): void {
+    cumulativeSentChars = 0;
+  }
+
+  function estimateHistoryTokens(): number {
+    return Math.ceil(cumulativeSentChars / 3);
+  }
+
+  function checkHistoryPressure(): void {
+    if (warnedAboutHistory) return;
+    const tokens = estimateHistoryTokens();
+    if (tokens < historyThreshold) return;
+    warnedAboutHistory = true;
+    attachHistoryPressureBubble(tokens);
+  }
+
+  function attachHistoryPressureBubble(tokens: number): void {
+    const bubble = addMessage(
+      'system',
+      `Conversation history is around ${tokens} tokens. WebGPU memory pressure may cause the next turn to fail with an out-of-memory error. Click "Clear conversation" to start fresh — the model will reload (~15–40s).`,
+    );
+    const btn = window.document.createElement('button');
+    btn.textContent = 'Clear conversation';
+    btn.style.cssText =
+      'margin-top: 6px; padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
+    btn.addEventListener('click', () => {
+      bubble.remove();
+      void clearConversation();
+    });
+    bubble.appendChild(window.document.createElement('br'));
+    bubble.appendChild(btn);
+  }
+
+  /**
+   * Rebuild the polyfill session with no prior history and reset all
+   * local state that referenced the prior conversation. Slow (~15–40s
+   * for the model reload) but reclaims all VRAM and gives the next
+   * turn a fresh KV cache.
+   */
+  async function clearConversation(): Promise<void> {
+    setLoadingState(actionBtn, i);
+    const hint = addMessage('system', 'Clearing conversation — model is reloading (~15–40s)…');
+    try {
+      await rebuildSession([]);
+      // Reset local state. The persisted chrome.storage entry under the
+      // per-URL key is replaced with an empty array so the next panel
+      // open doesn't restore the cleared turns.
+      history = [];
+      isFirstTurn = true;
+      warnedAboutHistory = false;
+      resetSentTotals();
+      // Wipe rendered bubbles. Leaves the panel empty so the next turn
+      // shows up at the top — matches the user's expectation of "fresh
+      // conversation".
+      while (messages.firstChild) messages.removeChild(messages.firstChild);
+      persist();
+      if (hint.parentNode) hint.remove();
+      addMessage('system', 'Conversation cleared. The model has a fresh slate.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[local-nano] clearConversation failed:', message);
+      if (hint.parentNode) hint.remove();
+      addMessage(
+        'system',
+        `Failed to clear conversation: ${message}. Reloading the extension from chrome://extensions has the same effect.`,
+      );
+    } finally {
+      setIdleState(actionBtn, i);
       i.focus();
     }
   }
@@ -211,11 +574,90 @@ export function initSession(deps: SessionDeps): void {
   });
 
   i.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && currentSelection) {
+      e.preventDefault();
+      askMode = !askMode;
+      updatePlaceholder();
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       void send();
     }
   });
+
+  // ---- Model warmup ----
+  // The offscreen polyfill session is lazily created on first use, which
+  // would otherwise stall the user's first send for 30–90s while WebGPU
+  // uploads the model. Kicking warmup off when the panel first opens
+  // lets the load run in the background while the user reads the page
+  // or composes their prompt. Idempotent across panel toggles; the
+  // offscreen `ensureSession` singleton handles cross-tab dedupe.
+  let warmStarted = false;
+  let modelReady = false;
+  async function ensureWarm(): Promise<void> {
+    if (warmStarted) return;
+    warmStarted = true;
+    setLoadingState(actionBtn, i);
+    // A live elapsed counter while the model loads. We deliberately do
+    // NOT auto-fail on a timer: the first run downloads multi-GB weights
+    // and a hard timeout false-fails a slow-but-healthy load (which is
+    // exactly what a fixed 30s cap did). The ticking counter is the
+    // proof-of-life that a static "Loading" lacked, and after
+    // WARMUP_SLOW_NOTICE_MS we append remedies in case it really is
+    // stuck — without giving up. A genuine load failure still rejects
+    // warmupSession (offscreen returns ok:false) and surfaces the error
+    // bubble below.
+    const warmHint = addMessage('system', 'Loading model… 0s');
+    const startedAt = Date.now();
+    const renderHint = () => {
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      warmHint.textContent =
+        Date.now() - startedAt >= WARMUP_SLOW_NOTICE_MS
+          ? `Loading model… ${secs}s. Taking longer than usual. A first run downloads a few GB, so this can be slow — it's still working. If it seems truly stuck, reload the extension from chrome://extensions, or set "device": "wasm" in .env.json for a CPU fallback.`
+          : `Loading model… ${secs}s (first run downloads the model; later loads start from cache).`;
+    };
+    renderHint();
+    const ticker = setInterval(renderHint, 1000);
+    try {
+      await warmupSession();
+      modelReady = true;
+      if (warmHint.parentNode) warmHint.remove();
+      // Once the model is up, size the history-warning threshold to
+      // the actual adapter. Failures here are non-fatal — the default
+      // already covers the typical integrated-GPU case.
+      try {
+        const info = await getGpuInfo();
+        historyThreshold = deriveHistoryThreshold(info);
+        console.log(
+          `[local-nano] history threshold: ${historyThreshold} (device=${info.device}, isFallback=${info.isFallback}, maxBufferSize=${info.maxBufferSize ?? 'n/a'}, configured=${info.configuredThreshold ?? 'n/a'})`,
+        );
+      } catch (gpuErr) {
+        console.warn(
+          '[local-nano] gpu-info query failed; using default history threshold:',
+          gpuErr,
+        );
+      }
+    } catch (err) {
+      // Preload is best-effort: a failed warmup must NOT alarm the user.
+      // The load is resource-heavy, and a failure here (e.g. transient
+      // VRAM pressure on panel open) degrades quietly to lazy loading.
+      // warmStarted is reset so the next panel toggle retries the
+      // preload; otherwise the model loads on the first send, where any
+      // error surfaces plainly in the response bubble.
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[local-nano] warmup failed (will load lazily on first send):', message);
+      if (warmHint.parentNode) warmHint.remove();
+      warmStarted = false;
+    } finally {
+      // Single cleanup point — the interval is cleared exactly once here
+      // regardless of success or failure above.
+      clearInterval(ticker);
+      // Only return to idle if a real send didn't sneak in ahead of us.
+      // activeAbort is set inside the send paths, so respect it here.
+      if (!activeAbort) setIdleState(actionBtn, i);
+    }
+  }
 
   // ---- Toggle listener ----
   let convertedAnchor = false;
@@ -230,6 +672,7 @@ export function initSession(deps: SessionDeps): void {
         convertedAnchor = true;
       }
       i.focus();
+      void ensureWarm();
     } else {
       root.style.display = 'none';
     }
