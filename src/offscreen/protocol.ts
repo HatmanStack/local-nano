@@ -132,8 +132,8 @@ export function isGpuInfoResponse(value: unknown): value is GpuInfoResponse {
   if (v.ok === true) {
     if (v.device !== 'webgpu' && v.device !== 'wasm') return false;
     if (typeof v.isFallback !== 'boolean') return false;
-    if (v.maxBufferSize !== null && typeof v.maxBufferSize !== 'number') return false;
-    if (v.configuredThreshold !== null && typeof v.configuredThreshold !== 'number') return false;
+    if (v.maxBufferSize !== null && !Number.isFinite(v.maxBufferSize)) return false;
+    if (v.configuredThreshold !== null && !Number.isFinite(v.configuredThreshold)) return false;
     return true;
   }
   if (v.ok === false) return typeof v.error === 'string';

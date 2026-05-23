@@ -30,11 +30,11 @@ Transforms are treated as normal turns in the same conversation thread used for 
 
 - Capture the user's selection at the right moment (on input focus) and hold a stable reference to its `Range` across the panel-interaction lifecycle.
 - Visual mode flip on the chat input: placeholder swap, compact selection preview chip, mode-aware Send behavior.
-- A new transform module (`src/transform.ts` or similar) that:
+- A new module named `src/selection-rewrite.ts` (deliberately **not** `src/transform.ts` — that name is on the forbidden v0.2.0 list below) that:
   - Owns `MIN_OUTPUT_TOKENS` / `MAX_OUTPUT_MULTIPLIER` constants.
   - Builds the rewrite prompt (selection + context window + user instruction).
   - Routes through `streamPrompt` with the per-call token cap.
-  - Streams chunks into the live `Range` (deleting on first chunk, appending text-node content as chunks arrive).
+  - Streams chunks into the live `Range` (deleting on first chunk, appending text-node content as chunks arrive). It mutates the DOM directly and does not return the rewritten text to the caller.
 - A small `count` channel in `src/offscreen/protocol.ts` so the content script can ask the polyfill for token counts before sending (used to compute the cap).
 - Undo bookkeeping: snapshot before mutation, button on the model bubble, restore on click.
 - Esc-toggled Ask mode that quotes the selection into a normal chat prompt.

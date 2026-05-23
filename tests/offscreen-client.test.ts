@@ -222,20 +222,23 @@ describe('countTokens (content-script client)', () => {
 
   it('falls back to the heuristic when chrome.runtime.lastError is set', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
-      const type = (msg as { type?: string })?.type;
-      if (type === ENSURE_OFFSCREEN_REQUEST) {
-        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
-      }
-      chromeMock.runtime.lastError = { message: 'sw asleep' };
-      return undefined;
-    });
+    try {
+      chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+        const type = (msg as { type?: string })?.type;
+        if (type === ENSURE_OFFSCREEN_REQUEST) {
+          return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+        }
+        chromeMock.runtime.lastError = { message: 'sw asleep' };
+        return undefined;
+      });
 
-    // 'hello world' is 11 chars → ceil(11 / 3) = 4.
-    await expect(countTokens('hello world')).resolves.toBe(4);
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
-    chromeMock.runtime.lastError = undefined;
+      // 'hello world' is 11 chars → ceil(11 / 3) = 4.
+      await expect(countTokens('hello world')).resolves.toBe(4);
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+      chromeMock.runtime.lastError = undefined;
+    }
   });
 
   it('falls back to the heuristic when the reply is malformed', async () => {
@@ -416,38 +419,64 @@ describe('getGpuInfo (content-script client)', () => {
     expect(seen[1]).toEqual({ type: GPU_INFO_REQUEST });
   });
 
-  it('rejects when the offscreen reply is ok:false', async () => {
-    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
-      const type = (msg as { type?: string })?.type;
-      if (type === ENSURE_OFFSCREEN_REQUEST) {
-        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
-      }
-      return { type: GPU_INFO_RESPONSE, ok: false, error: 'gpu unavailable' };
-    });
-    await expect(getGpuInfo()).rejects.toThrow('gpu unavailable');
+  // The contract is "never reject — resolve a conservative shape on any
+  // failure". The conservative shape maps to the default history
+  // threshold downstream, the same outcome a try/catch around a
+  // rejecting version would have produced.
+  const CONSERVATIVE = {
+    device: 'webgpu',
+    isFallback: false,
+    maxBufferSize: null,
+    configuredThreshold: null,
+  };
+
+  it('resolves the conservative shape when the offscreen reply is ok:false', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+        const type = (msg as { type?: string })?.type;
+        if (type === ENSURE_OFFSCREEN_REQUEST) {
+          return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+        }
+        return { type: GPU_INFO_RESPONSE, ok: false, error: 'gpu unavailable' };
+      });
+      await expect(getGpuInfo()).resolves.toEqual(CONSERVATIVE);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
-  it('rejects when the reply is malformed', async () => {
-    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
-      const type = (msg as { type?: string })?.type;
-      if (type === ENSURE_OFFSCREEN_REQUEST) {
-        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
-      }
-      return { type: 'something-else' };
-    });
-    await expect(getGpuInfo()).rejects.toThrow(/malformed/);
+  it('resolves the conservative shape when the reply is malformed', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+        const type = (msg as { type?: string })?.type;
+        if (type === ENSURE_OFFSCREEN_REQUEST) {
+          return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+        }
+        return { type: 'something-else' };
+      });
+      await expect(getGpuInfo()).resolves.toEqual(CONSERVATIVE);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
-  it('rejects when chrome.runtime.lastError is set', async () => {
-    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
-      const type = (msg as { type?: string })?.type;
-      if (type === ENSURE_OFFSCREEN_REQUEST) {
-        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
-      }
-      chromeMock.runtime.lastError = { message: 'port closed' };
-      return undefined;
-    });
-    await expect(getGpuInfo()).rejects.toThrow(/port closed/);
-    chromeMock.runtime.lastError = undefined;
+  it('resolves the conservative shape when chrome.runtime.lastError is set', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+        const type = (msg as { type?: string })?.type;
+        if (type === ENSURE_OFFSCREEN_REQUEST) {
+          return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+        }
+        chromeMock.runtime.lastError = { message: 'port closed' };
+        return undefined;
+      });
+      await expect(getGpuInfo()).resolves.toEqual(CONSERVATIVE);
+    } finally {
+      warnSpy.mockRestore();
+      chromeMock.runtime.lastError = undefined;
+    }
   });
 });

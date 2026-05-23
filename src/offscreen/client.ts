@@ -170,28 +170,46 @@ export async function warmupSession(): Promise<void> {
  * uses this to size its memory-pressure warning threshold to the
  * actual hardware.
  *
- * Queried once per session after warmup. Failures resolve with a
- * conservative shape (webgpu / fallback / no buffer info) rather than
- * rejecting, so a transient transport hiccup doesn't break warmup.
+ * Queried once per session after warmup. Failures (transport error,
+ * `chrome.runtime.lastError`, malformed reply, or `ok: false`) resolve
+ * with a conservative shape rather than rejecting, so a transient
+ * hiccup doesn't break warmup. The conservative shape
+ * (`webgpu` / not-fallback / no buffer info / no override) maps to the
+ * default history threshold via `deriveHistoryThreshold`, which is the
+ * same outcome callers would get if they had to catch a rejection.
  */
 export async function getGpuInfo(): Promise<GpuInfoSnapshot> {
-  await ensureViaServiceWorker();
-  const request: GpuInfoRequest = { type: GPU_INFO_REQUEST };
-  const reply = (await chrome.runtime.sendMessage(request)) as unknown;
-  const lastError = chrome.runtime.lastError;
-  if (lastError) {
-    throw new Error(`gpu-info failed: ${lastError.message ?? 'unknown'}`);
-  }
-  if (!isGpuInfoResponse(reply)) {
-    throw new Error('gpu-info: malformed reply from offscreen');
-  }
-  if (!reply.ok) throw new Error(reply.error);
-  return {
-    device: reply.device,
-    isFallback: reply.isFallback,
-    maxBufferSize: reply.maxBufferSize,
-    configuredThreshold: reply.configuredThreshold,
+  const conservative: GpuInfoSnapshot = {
+    device: 'webgpu',
+    isFallback: false,
+    maxBufferSize: null,
+    configuredThreshold: null,
   };
+  try {
+    await ensureViaServiceWorker();
+    const request: GpuInfoRequest = { type: GPU_INFO_REQUEST };
+    const reply = (await chrome.runtime.sendMessage(request)) as unknown;
+    const lastError = chrome.runtime.lastError;
+    if (lastError) {
+      console.warn(`[local-nano] getGpuInfo: ${lastError.message ?? 'lastError set'}`);
+      return conservative;
+    }
+    if (!isGpuInfoResponse(reply) || !reply.ok) {
+      console.warn(
+        '[local-nano] getGpuInfo: malformed or failed reply; using conservative defaults',
+      );
+      return conservative;
+    }
+    return {
+      device: reply.device,
+      isFallback: reply.isFallback,
+      maxBufferSize: reply.maxBufferSize,
+      configuredThreshold: reply.configuredThreshold,
+    };
+  } catch (err) {
+    console.warn('[local-nano] getGpuInfo failed; using conservative defaults:', err);
+    return conservative;
+  }
 }
 
 /**

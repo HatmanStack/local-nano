@@ -133,8 +133,44 @@ describe('isGpuInfoResponse', () => {
     ).toBe(false);
   });
 
+  it('rejects non-finite maxBufferSize (NaN / Infinity)', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(
+        isGpuInfoResponse({
+          type: GPU_INFO_RESPONSE,
+          ok: true,
+          device: 'webgpu',
+          isFallback: false,
+          maxBufferSize: bad,
+          configuredThreshold: null,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it('rejects non-finite configuredThreshold (NaN / Infinity)', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(
+        isGpuInfoResponse({
+          type: GPU_INFO_RESPONSE,
+          ok: true,
+          device: 'wasm',
+          isFallback: false,
+          maxBufferSize: null,
+          configuredThreshold: bad,
+        }),
+      ).toBe(false);
+    }
+  });
+
   it('accepts ok:false with error string', () => {
     expect(isGpuInfoResponse({ type: GPU_INFO_RESPONSE, ok: false, error: 'boom' })).toBe(true);
+  });
+
+  it('rejects ok:false with a non-string error', () => {
+    expect(isGpuInfoResponse({ type: GPU_INFO_RESPONSE, ok: false, error: 123 })).toBe(false);
+    expect(isGpuInfoResponse({ type: GPU_INFO_RESPONSE, ok: false, error: null })).toBe(false);
+    expect(isGpuInfoResponse({ type: GPU_INFO_RESPONSE, ok: false })).toBe(false);
   });
 
   it('rejects wrong discriminator', () => {

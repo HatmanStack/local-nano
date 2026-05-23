@@ -81,7 +81,7 @@ non-negotiable constraints carry over:
 
 ## Verification status
 
-The unit + integration suite (160 tests under Vitest + jsdom, all
+The unit + integration suite (200+ tests under Vitest + jsdom, all
 passing) covers the selection-rewrite path end-to-end with a mocked
 offscreen client. The in-browser smoke test against a real
 WebGPU-backed Gemma session was **not** run before v0.2.3 shipped —
