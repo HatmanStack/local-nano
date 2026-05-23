@@ -348,6 +348,13 @@ export function initSession(deps: SessionDeps): void {
       console.log(
         `[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms, chars=${modelText.length}, prompt.length=${prompt.length}`,
       );
+      // Account for what the polyfill ingested. On rebuild-retry, the
+      // polyfill was reseeded with a trimmed history and the retry sent
+      // just `text` (not the page-context-prefixed `prompt`); resetting
+      // first is conservative (undercounts the seeded history slightly
+      // but errs toward warning later, not earlier).
+      if (didRebuildRetry) resetSentTotals();
+      recordSentTurn(didRebuildRetry ? text.length : prompt.length, modelText.length);
     } catch (err: unknown) {
       const name = (err as { name?: unknown })?.name;
       if (name === 'AbortError') {
@@ -402,8 +409,10 @@ export function initSession(deps: SessionDeps): void {
       responseEl.textContent = modelText;
       messages.scrollTop = messages.scrollHeight;
     };
+    let askSucceeded = false;
     try {
       await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+      askSucceeded = true;
     } catch (err: unknown) {
       const name = (err as { name?: unknown })?.name;
       if (name === 'AbortError') {
@@ -422,6 +431,7 @@ export function initSession(deps: SessionDeps): void {
         pushEntry({ role: 'model', text: modelText });
         persist();
       }
+      if (askSucceeded) recordSentTurn(prompt.length, modelText.length);
       setIdleState(actionBtn, i);
       activeAbort = null;
       // Ask mode is one-shot; reset to Edit for the next turn if the
@@ -464,11 +474,13 @@ export function initSession(deps: SessionDeps): void {
       responseEl.textContent = modelText;
       messages.scrollTop = messages.scrollHeight;
     };
+    let didRebuildRetry = false;
     try {
       try {
         await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
       } catch (err) {
         if (!isDeviceLossError(err) || activeAbort.signal.aborted) throw err;
+        didRebuildRetry = true;
         modelText = '';
         firstChunk = true;
         const historyForReseed = history
@@ -501,6 +513,8 @@ export function initSession(deps: SessionDeps): void {
       if (succeeded) {
         rewrite.finalize();
         attachRewriteActions(responseEl, snap);
+        if (didRebuildRetry) resetSentTotals();
+        recordSentTurn(prompt.length, modelText.length);
       }
       setIdleState(actionBtn, i);
       activeAbort = null;
@@ -534,12 +548,28 @@ export function initSession(deps: SessionDeps): void {
   // we don't want a warning bubble on every turn after the threshold is
   // crossed. The threshold itself is set per-session from the queried
   // GPU info; until that resolves (or if it fails) we use the default.
+  //
+  // `cumulativeSentChars` counts characters we actually shipped to the
+  // polyfill (full framed prompts + model responses), not just the
+  // user-text + model-rewrite that lands in our per-URL chat log. A
+  // rewrite turn sends ~700 chars of selection-context framing on top
+  // of the user's short instruction, so the polyfill's #history grows
+  // much faster than the local `history` array; estimating from
+  // `history` alone was undercounting and missing the warning window.
   let warnedAboutHistory = false;
   let historyThreshold = HISTORY_TOKEN_WARN_THRESHOLD_DEFAULT;
+  let cumulativeSentChars = 0;
+
+  function recordSentTurn(promptChars: number, responseChars: number): void {
+    cumulativeSentChars += promptChars + responseChars;
+  }
+
+  function resetSentTotals(): void {
+    cumulativeSentChars = 0;
+  }
+
   function estimateHistoryTokens(): number {
-    let totalChars = 0;
-    for (const entry of history) totalChars += entry.text.length;
-    return Math.ceil(totalChars / 3);
+    return Math.ceil(cumulativeSentChars / 3);
   }
 
   function checkHistoryPressure(): void {
@@ -584,6 +614,7 @@ export function initSession(deps: SessionDeps): void {
       history = [];
       isFirstTurn = true;
       warnedAboutHistory = false;
+      resetSentTotals();
       // Wipe rendered bubbles. Leaves the panel empty so the next turn
       // shows up at the top — matches the user's expectation of "fresh
       // conversation".

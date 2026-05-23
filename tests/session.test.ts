@@ -1017,22 +1017,17 @@ describe('initSession — history pressure tracking', () => {
     pending.length = 0;
   });
 
-  it('warns with a Clear-conversation bubble after a turn pushes estimated history above the threshold', async () => {
-    // Pre-seed history with about 4500 chars (~1500 estimated tokens
-    // at chars/3) so a single turn crosses the threshold immediately.
-    const key = `local-nano:history:https://example.com/page`;
-    chromeMock.storage.local.store[key] = Array.from({ length: 6 }, (_, idx) => ({
-      role: idx % 2 === 0 ? ('user' as const) : ('model' as const),
-      text: 'x'.repeat(750),
-    }));
+  it('warns with a Clear-conversation bubble after a turn pushes sent-chars above the threshold', async () => {
+    // One send of ~5000 chars prompt + 100 chars response = ~5100 chars
+    // = ~1700 estimated tokens, crossing the default 1500 threshold.
     const deps = makeDeps();
     initSession(deps);
     await flushMicrotasks();
-    deps._input.value = 'next';
+    deps._input.value = 'x'.repeat(5000);
     deps._actionBtn.click();
     const call = await awaitPending();
-    call.opts.onChunk?.('ok');
-    call.resolve('ok');
+    call.opts.onChunk?.('A'.repeat(100));
+    call.resolve('A'.repeat(100));
     await flushMicrotasks();
 
     const bubble = Array.from(deps._messages.children).find((c) =>
@@ -1059,17 +1054,12 @@ describe('initSession — history pressure tracking', () => {
   });
 
   it('only warns once per session even if subsequent turns also cross the threshold', async () => {
-    const key = `local-nano:history:https://example.com/page`;
-    chromeMock.storage.local.store[key] = Array.from({ length: 6 }, (_, idx) => ({
-      role: idx % 2 === 0 ? ('user' as const) : ('model' as const),
-      text: 'x'.repeat(750),
-    }));
     const deps = makeDeps();
     initSession(deps);
     await flushMicrotasks();
 
-    // First turn → warning fires.
-    deps._input.value = 'a';
+    // First turn — long enough to cross the threshold in one shot.
+    deps._input.value = 'x'.repeat(5000);
     deps._actionBtn.click();
     let call = await awaitPending();
     call.opts.onChunk?.('A');
@@ -1081,7 +1071,7 @@ describe('initSession — history pressure tracking', () => {
     expect(firstCount).toBe(1);
 
     // Second turn → no additional warning despite still being above threshold.
-    deps._input.value = 'b';
+    deps._input.value = 'x'.repeat(5000);
     deps._actionBtn.click();
     call = await awaitPending();
     call.opts.onChunk?.('B');
@@ -1094,28 +1084,22 @@ describe('initSession — history pressure tracking', () => {
   });
 
   it('uses the GPU-info derived threshold (low for fallback adapter) instead of the default', async () => {
-    // Fallback adapter → threshold drops to 800. Pre-seed enough
-    // history to land between 800 and 1500 (default) so the warning
-    // only fires under the lower threshold.
+    // Fallback adapter → threshold drops to 800. A 2500-char send
+    // lands above 800 but below 1500, so the warning only fires under
+    // the lower threshold.
     getGpuInfoMock.mockResolvedValueOnce({
       device: 'webgpu',
       isFallback: true,
       maxBufferSize: null,
       configuredThreshold: null,
     });
-    const key = `local-nano:history:https://example.com/page`;
-    chromeMock.storage.local.store[key] = [
-      { role: 'user', text: 'x'.repeat(1500) },
-      { role: 'model', text: 'x'.repeat(1500) },
-    ]; // ~1000 tokens via chars/3 — above 800, below 1500.
-
     const deps = makeDeps();
     initSession(deps);
     // Trigger warmup so getGpuInfo + threshold derivation runs.
     getToggleListener()(TOGGLE_MESSAGE);
     await flushMicrotasks();
 
-    deps._input.value = 'next';
+    deps._input.value = 'x'.repeat(2500);
     deps._actionBtn.click();
     const call = await awaitPending();
     call.opts.onChunk?.('ok');
@@ -1156,14 +1140,12 @@ describe('initSession — history pressure tracking', () => {
 
   it('clicking Clear conversation calls rebuildSession with empty history, wipes UI and storage', async () => {
     const key = `local-nano:history:https://example.com/page`;
-    chromeMock.storage.local.store[key] = Array.from({ length: 6 }, (_, idx) => ({
-      role: idx % 2 === 0 ? ('user' as const) : ('model' as const),
-      text: 'x'.repeat(750),
-    }));
     const deps = makeDeps();
     initSession(deps);
     await flushMicrotasks();
-    deps._input.value = 'one more';
+    // Long send to push past the default threshold so the warning bubble
+    // and its Clear button materialize.
+    deps._input.value = 'x'.repeat(5000);
     deps._actionBtn.click();
     const call = await awaitPending();
     call.opts.onChunk?.('ok');
