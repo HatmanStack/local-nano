@@ -252,7 +252,7 @@ chrome.runtime.onConnect.addListener((port) => {
             id,
             ok: false,
             error:
-              'Model returned no output (likely WebGPU device loss after tab/window switch). Rebuilding session; try again.',
+              'Model returned no output. Likely cause: WebGPU device loss, GPU out-of-memory (Vulkan VK_ERROR_OUT_OF_DEVICE_MEMORY), or a polyfill backend error. Rebuilding session.',
           };
           try {
             port.postMessage(empty);

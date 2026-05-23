@@ -503,6 +503,70 @@ describe('initSession — streaming', () => {
     expect(texts).toContain('blue light scatters');
   });
 
+  it('trims history to the last 4 entries when rebuilding after a device-loss', async () => {
+    const key = `local-nano:history:https://example.com/page`;
+    chromeMock.storage.local.store[key] = [
+      { role: 'user', text: 'u1' },
+      { role: 'model', text: 'm1' },
+      { role: 'user', text: 'u2' },
+      { role: 'model', text: 'm2' },
+      { role: 'user', text: 'u3' },
+      { role: 'model', text: 'm3' },
+      { role: 'user', text: 'u4' },
+      { role: 'model', text: 'm4' },
+    ];
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+
+    deps._input.value = 'new turn';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    first.reject(
+      new Error(
+        'Model returned no output. Likely cause: WebGPU device loss, GPU out-of-memory (Vulkan VK_ERROR_OUT_OF_DEVICE_MEMORY), or a polyfill backend error.',
+      ),
+    );
+    const retry = await awaitPending();
+    expect(rebuildSessionMock).toHaveBeenCalledTimes(1);
+    // History on rebuild: [u1..m4, new_user]. Slice off the just-added
+    // user, filter non-system (no-op), then keep last 4 entries:
+    // [u3, m3, u4, m4].
+    expect(rebuildSessionMock.mock.calls[0][0]).toEqual([
+      { role: 'user', text: 'u3' },
+      { role: 'model', text: 'm3' },
+      { role: 'user', text: 'u4' },
+      { role: 'model', text: 'm4' },
+    ]);
+    retry.resolve('answer');
+    await flushMicrotasks();
+  });
+
+  it('shows the GPU OOM remedy bubble when the rebuild retry also reports a device-loss', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+
+    deps._input.value = 'why is the sky blue';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    first.reject(
+      new Error(
+        'Model returned no output. Likely cause: WebGPU device loss, GPU out-of-memory (Vulkan VK_ERROR_OUT_OF_DEVICE_MEMORY), or a polyfill backend error.',
+      ),
+    );
+    const retry = await awaitPending();
+    retry.reject(new Error('Model returned no output. WebGPU device loss again.'));
+    await flushMicrotasks();
+
+    const remedyBubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('GPU could not run this prompt'),
+    );
+    expect(remedyBubble).toBeTruthy();
+    expect(remedyBubble?.textContent).toContain('device": "wasm"');
+    expect(remedyBubble?.textContent).toContain('Close other GPU-heavy tabs');
+  });
+
   it('does not retry when the error is not a device-loss', async () => {
     const deps = makeDeps();
     initSession(deps);
