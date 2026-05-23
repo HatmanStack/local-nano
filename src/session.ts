@@ -747,45 +747,24 @@ export function initSession(deps: SessionDeps): void {
         );
       }
     } catch (err) {
+      // Preload is best-effort: a failed warmup must NOT raise the
+      // operational GPU guard. The model load is resource-heavy, and a
+      // failure here (e.g. transient VRAM pressure on panel open) should
+      // degrade quietly to lazy loading rather than alarm the user.
+      // warmStarted is reset so the next panel toggle retries the
+      // preload, and the model otherwise loads on the first send — where
+      // the real send-path guard (rebuild/retry/remedy) applies.
       const message = err instanceof Error ? err.message : String(err);
-      console.warn('[local-nano] warmup failed:', message);
+      console.warn('[local-nano] warmup failed (will load lazily on first send):', message);
       clearInterval(ticker);
       if (warmHint.parentNode) warmHint.remove();
-      // Allow a retry on the next panel toggle (the offscreen-side
-      // session promise also resets to null on failure, so the next
-      // attempt rebuilds from cached weights instead of inheriting a
-      // half-initialised session).
       warmStarted = false;
-      attachWarmupErrorBubble(message);
     } finally {
       clearInterval(ticker);
       // Only return to idle if a real send didn't sneak in ahead of us.
       // activeAbort is set inside the send paths, so respect it here.
       if (!activeAbort) setIdleState(actionBtn, i);
     }
-  }
-
-  /**
-   * Render a persistent system bubble describing why the model load
-   * failed, with a Retry button that re-runs `ensureWarm()`. Kept here
-   * instead of inside the catch so the error path stays readable.
-   */
-  function attachWarmupErrorBubble(message: string): void {
-    const trimmed = message.length > 240 ? `${message.slice(0, 240)}…` : message;
-    const bubble = addMessage(
-      'system',
-      `Model load failed.\n\n${trimmed}\n\nThis is usually WebGPU running out of memory while uploading the model (a "memory copy" or VK_ERROR_OUT_OF_DEVICE_MEMORY error), often after earlier failed sessions left the GPU in a bad state. In order of effectiveness:\n\n1. Restart Chrome to reset the GPU process, then reopen the panel.\n2. Close other GPU-heavy tabs (other AI extensions, video, WebGL) and click Retry.\n3. Set "device": "wasm" in .env.json, rebuild, and reload the extension — slower but uses system RAM instead of VRAM.`,
-    );
-    const retryBtn = window.document.createElement('button');
-    retryBtn.textContent = 'Retry model load';
-    retryBtn.style.cssText =
-      'margin-top: 6px; padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
-    retryBtn.addEventListener('click', () => {
-      bubble.remove();
-      void ensureWarm();
-    });
-    bubble.appendChild(window.document.createElement('br'));
-    bubble.appendChild(retryBtn);
   }
 
   // ---- Toggle listener ----

@@ -363,7 +363,7 @@ describe('initSession — toggle behavior', () => {
     expect(warmupSessionMock).toHaveBeenCalledTimes(2);
   });
 
-  it('surfaces a model-load failure with the error text and a Retry button', async () => {
+  it('degrades silently on a warmup failure — no error guard on the load path', async () => {
     warmupSessionMock.mockRejectedValueOnce(
       new Error(
         'Deserialize tensor model_embed_tokens_weight_quant failed. Failed to load external data file "embed_tokens_q4.onnx_data", error: Unknown error occurred in memory copy.',
@@ -371,45 +371,17 @@ describe('initSession — toggle behavior', () => {
     );
     const deps = makeDeps();
     initSession(deps);
-    const listener = getToggleListener();
-    listener(TOGGLE_MESSAGE);
-    await flushMicrotasks();
-    // Persistent error bubble contains the verbatim ORT error and remedies.
-    const errBubble = Array.from(deps._messages.children).find((c) =>
-      (c.textContent ?? '').includes('Model load failed'),
-    );
-    expect(errBubble).toBeTruthy();
-    expect(errBubble?.textContent).toContain('Deserialize tensor');
-    expect(errBubble?.textContent).toContain('Restart Chrome');
-    // Retry button is present and re-runs warmup on click.
-    const retryBtn = errBubble?.querySelector('button') as HTMLButtonElement | undefined;
-    expect(retryBtn?.textContent).toBe('Retry model load');
-    warmupSessionMock.mockResolvedValueOnce(undefined);
-    retryBtn?.click();
-    await flushMicrotasks();
-    expect(warmupSessionMock).toHaveBeenCalledTimes(2);
-    // Error bubble is cleared once the retry fires.
-    expect(
-      Array.from(deps._messages.children).find((c) =>
-        (c.textContent ?? '').includes('Model load failed'),
-      ),
-    ).toBeUndefined();
-  });
-
-  it('truncates very long warmup error messages in the bubble', async () => {
-    const veryLong = `x`.repeat(500);
-    warmupSessionMock.mockRejectedValueOnce(new Error(veryLong));
-    const deps = makeDeps();
-    initSession(deps);
     getToggleListener()(TOGGLE_MESSAGE);
     await flushMicrotasks();
-    const errBubble = Array.from(deps._messages.children).find((c) =>
-      (c.textContent ?? '').includes('Model load failed'),
-    );
-    expect(errBubble?.textContent).toContain('xxxx');
-    expect(errBubble?.textContent).toContain('…');
-    // The 500-char string is not echoed in full.
-    expect(errBubble?.textContent).not.toContain('x'.repeat(300));
+    // The preload guard must NOT fire on the load path: no "Model load
+    // failed" bubble, no remedies, no Retry button, no leftover loading
+    // bubble. The model loads lazily on the first send instead.
+    const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+    expect(texts.some((t) => t.includes('Model load failed'))).toBe(false);
+    expect(texts.some((t) => t.includes('Loading model'))).toBe(false);
+    // Button is back to idle so the user can send (which lazy-loads).
+    expect(deps._actionBtn.disabled).toBe(false);
+    expect(deps._actionBtn.textContent).toBe('Send');
   });
 });
 
