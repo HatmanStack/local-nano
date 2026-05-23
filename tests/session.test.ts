@@ -347,7 +347,7 @@ describe('initSession — toggle behavior', () => {
     );
     expect(errBubble).toBeTruthy();
     expect(errBubble?.textContent).toContain('Deserialize tensor');
-    expect(errBubble?.textContent).toContain('WebGPU memory pressure');
+    expect(errBubble?.textContent).toContain('Restart Chrome');
     // Retry button is present and re-runs warmup on click.
     const retryBtn = errBubble?.querySelector('button') as HTMLButtonElement | undefined;
     expect(retryBtn?.textContent).toBe('Retry model load');

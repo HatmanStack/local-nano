@@ -147,19 +147,51 @@ export async function countTokens(
  * actually ready and the first real prompt will eat the warmup cost.
  * If that happens, switch this to a tiny throwaway `promptStreaming`
  * call instead.
+ *
+ * TIMEOUT: a GPU out-of-memory or device-loss during model load can be
+ * reported by ONNX/Dawn out-of-band (WebGPU device error to the
+ * console) while `LanguageModel.create()` never settles — the offscreen
+ * handler then never calls `sendResponse` and this round-trip hangs
+ * forever, leaving the panel stuck on "Loading…" with no error. The
+ * timeout converts that hang into a rejection so the caller can surface
+ * an error bubble + Retry. Default is generous because a cold first
+ * load also downloads multi-GB weights.
  */
-export async function warmupSession(): Promise<void> {
+const WARMUP_TIMEOUT_MS = 120_000;
+
+export async function warmupSession(opts: { timeoutMs?: number } = {}): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? WARMUP_TIMEOUT_MS;
   await ensureViaServiceWorker();
   const request: CountTokensRequest = { type: COUNT_TOKENS_REQUEST, text: '' };
-  const reply = (await chrome.runtime.sendMessage(request)) as unknown;
-  const lastError = chrome.runtime.lastError;
-  if (lastError) {
-    throw new Error(`warmup-session failed: ${lastError.message ?? 'unknown'}`);
+
+  const roundTrip = (async (): Promise<void> => {
+    const reply = (await chrome.runtime.sendMessage(request)) as unknown;
+    const lastError = chrome.runtime.lastError;
+    if (lastError) {
+      throw new Error(`warmup-session failed: ${lastError.message ?? 'unknown'}`);
+    }
+    if (!isCountTokensResponse(reply)) {
+      throw new Error('warmup-session: malformed reply from offscreen');
+    }
+    if (!reply.ok) throw new Error(reply.error);
+  })();
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new Error(
+          `Model load timed out after ${Math.round(timeoutMs / 1000)}s. The GPU is likely out of memory or the WebGPU device was lost during load — restart Chrome to reset the GPU process, or set "device": "wasm" in .env.json.`,
+        ),
+      );
+    }, timeoutMs);
+  });
+
+  try {
+    await Promise.race([roundTrip, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  if (!isCountTokensResponse(reply)) {
-    throw new Error('warmup-session: malformed reply from offscreen');
-  }
-  if (!reply.ok) throw new Error(reply.error);
 }
 
 /**

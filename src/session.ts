@@ -751,7 +751,7 @@ export function initSession(deps: SessionDeps): void {
     const trimmed = message.length > 240 ? `${message.slice(0, 240)}…` : message;
     const bubble = addMessage(
       'system',
-      `Model load failed.\n\n${trimmed}\n\nCommon causes: WebGPU memory pressure (close other tabs and retry), a partial model cache (reload the extension), or a transient driver hiccup. Switching device to "wasm" in .env.json is a slower fallback that avoids the GPU entirely.`,
+      `Model load failed.\n\n${trimmed}\n\nThis is usually WebGPU running out of memory while uploading the model (a "memory copy" or VK_ERROR_OUT_OF_DEVICE_MEMORY error), often after earlier failed sessions left the GPU in a bad state. In order of effectiveness:\n\n1. Restart Chrome to reset the GPU process, then reopen the panel.\n2. Close other GPU-heavy tabs (other AI extensions, video, WebGL) and click Retry.\n3. Set "device": "wasm" in .env.json, rebuild, and reload the extension — slower but uses system RAM instead of VRAM.`,
     );
     const retryBtn = window.document.createElement('button');
     retryBtn.textContent = 'Retry model load';
