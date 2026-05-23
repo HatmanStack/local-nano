@@ -13,3 +13,4 @@ Thumbs.db
 
 # Local skill-runs manifest (per-developer audit/pipeline history)
 .claude/
+web-store/

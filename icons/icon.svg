@@ -1,0 +1,42 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <title>local-nano</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f6f3ea"/>
+      <stop offset="1" stop-color="#e6e0d0"/>
+    </linearGradient>
+    <filter id="neon" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="3.4" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="b"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- cream tile, echoing the ivory backdrop of the hero -->
+  <rect x="3" y="3" width="122" height="122" rx="27" fill="url(#tile)" stroke="#cdc5b1" stroke-width="2"/>
+
+  <!-- L + N strokes, drawn three times: blurred glow, cyan tube body, white core -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- outer neon glow -->
+    <g stroke="#1f9fd0" stroke-width="15" opacity="0.85" filter="url(#neon)">
+      <path d="M32 38 V90 H56"/>
+      <path d="M66 90 V38 L94 90 V38"/>
+    </g>
+    <!-- tube body -->
+    <g stroke="#27c4e6" stroke-width="11">
+      <path d="M32 38 V90 H56"/>
+      <path d="M66 90 V38 L94 90 V38"/>
+    </g>
+    <!-- bright inner core -->
+    <g stroke="#ecfeff" stroke-width="3.2" opacity="0.92">
+      <path d="M32 38 V90 H56"/>
+      <path d="M66 90 V38 L94 90 V38"/>
+    </g>
+  </g>
+
+  <!-- copper connector tips at the cable ends, like the USB plugs in the hero -->
+  <circle cx="56" cy="90" r="5.5" fill="#e8954a"/>
+  <circle cx="94" cy="38" r="5" fill="#e8954a"/>
+</svg>
