@@ -482,105 +482,26 @@ describe('initSession — streaming', () => {
     expect(modelBubble?.textContent).toContain('[stopped]');
   });
 
-  it('rebuilds the session and retries when the first attempt reports WebGPU device loss', async () => {
+  it('surfaces a stream error plainly and never rebuilds the session (guard removed)', async () => {
     const deps = makeDeps();
     initSession(deps);
     await flushMicrotasks();
-
     deps._input.value = 'why is the sky blue';
     deps._actionBtn.click();
-    const first = await awaitPending();
-
-    first.reject(
-      new Error(
-        'Model returned no output (likely WebGPU device loss after tab/window switch). Rebuilding session; try again.',
-      ),
+    const call = await awaitPending();
+    // Even a device-loss / OOM-shaped error no longer triggers an
+    // automatic rebuild + retry — the guard was removed.
+    call.reject(
+      new Error('Model returned no output. WebGPU device loss / VK_ERROR_OUT_OF_DEVICE_MEMORY.'),
     );
-
-    const retry = await awaitPending();
-    // Retry drops the page-context prefix and resends just the user text.
-    expect(retry.prompt).toBe('why is the sky blue');
-
-    expect(rebuildSessionMock).toHaveBeenCalledTimes(1);
-    // History passed to rebuild excludes the just-added user turn (the
-    // retried prompt re-introduces it via the polyfill).
-    expect(rebuildSessionMock.mock.calls[0][0]).toEqual([]);
-
-    retry.opts.onChunk?.('blue light scatters');
-    retry.resolve('blue light scatters');
     await flushMicrotasks();
-
-    // Rebuild hint was removed on the first retry chunk, so children
-    // are [user, model] with the model bubble holding the retry output.
-    const texts = Array.from(deps._messages.children).map((c) => c.textContent);
-    expect(texts).toContain('blue light scatters');
+    expect(rebuildSessionMock).not.toHaveBeenCalled();
+    expect(pending.length).toBe(0); // no retry queued
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    expect(modelBubble?.textContent).toContain('WebGPU device loss');
   });
 
-  it('trims history to the last 4 entries when rebuilding after a device-loss', async () => {
-    const key = `local-nano:history:https://example.com/page`;
-    chromeMock.storage.local.store[key] = [
-      { role: 'user', text: 'u1' },
-      { role: 'model', text: 'm1' },
-      { role: 'user', text: 'u2' },
-      { role: 'model', text: 'm2' },
-      { role: 'user', text: 'u3' },
-      { role: 'model', text: 'm3' },
-      { role: 'user', text: 'u4' },
-      { role: 'model', text: 'm4' },
-    ];
-    const deps = makeDeps();
-    initSession(deps);
-    await flushMicrotasks();
-
-    deps._input.value = 'new turn';
-    deps._actionBtn.click();
-    const first = await awaitPending();
-    first.reject(
-      new Error(
-        'Model returned no output. Likely cause: WebGPU device loss, GPU out-of-memory (Vulkan VK_ERROR_OUT_OF_DEVICE_MEMORY), or a polyfill backend error.',
-      ),
-    );
-    const retry = await awaitPending();
-    expect(rebuildSessionMock).toHaveBeenCalledTimes(1);
-    // History on rebuild: [u1..m4, new_user]. Slice off the just-added
-    // user, filter non-system (no-op), then keep last 4 entries:
-    // [u3, m3, u4, m4].
-    expect(rebuildSessionMock.mock.calls[0][0]).toEqual([
-      { role: 'user', text: 'u3' },
-      { role: 'model', text: 'm3' },
-      { role: 'user', text: 'u4' },
-      { role: 'model', text: 'm4' },
-    ]);
-    retry.resolve('answer');
-    await flushMicrotasks();
-  });
-
-  it('shows the GPU OOM remedy bubble when the rebuild retry also reports a device-loss', async () => {
-    const deps = makeDeps();
-    initSession(deps);
-    await flushMicrotasks();
-
-    deps._input.value = 'why is the sky blue';
-    deps._actionBtn.click();
-    const first = await awaitPending();
-    first.reject(
-      new Error(
-        'Model returned no output. Likely cause: WebGPU device loss, GPU out-of-memory (Vulkan VK_ERROR_OUT_OF_DEVICE_MEMORY), or a polyfill backend error.',
-      ),
-    );
-    const retry = await awaitPending();
-    retry.reject(new Error('Model returned no output. WebGPU device loss again.'));
-    await flushMicrotasks();
-
-    const remedyBubble = Array.from(deps._messages.children).find((c) =>
-      (c.textContent ?? '').includes('GPU could not run this prompt'),
-    );
-    expect(remedyBubble).toBeTruthy();
-    expect(remedyBubble?.textContent).toContain('device": "wasm"');
-    expect(remedyBubble?.textContent).toContain('Close other GPU-heavy tabs');
-  });
-
-  it('does not retry when the error is not a device-loss', async () => {
+  it('surfaces a non-device-loss error plainly without rebuilding', async () => {
     const deps = makeDeps();
     initSession(deps);
     deps._input.value = 'hi';
@@ -791,69 +712,22 @@ describe('initSession — selection mode', () => {
     expect(undoBtn?.textContent).toContain('Undone');
   });
 
-  it('rewrite rebuild-retry trims reseed history to the last 4 entries and retries the same prompt', async () => {
-    const key = `local-nano:history:https://example.com/page`;
-    chromeMock.storage.local.store[key] = [
-      { role: 'user', text: 'u1' },
-      { role: 'model', text: 'm1' },
-      { role: 'user', text: 'u2' },
-      { role: 'model', text: 'm2' },
-      { role: 'user', text: 'u3' },
-      { role: 'model', text: 'm3' },
-    ];
-    const deps = makeDeps();
-    initSession(deps);
-    await flushMicrotasks();
-
-    deps._fireSelectionChange(makeFakeSnapshot({ text: 'target' }));
-    deps._input.value = 'make it bold';
-    deps._actionBtn.click();
-
-    const first = await awaitPending();
-    const rewritePrompt = first.prompt;
-    first.reject(
-      new Error(
-        'Model returned no output. Likely cause: WebGPU device loss, GPU out-of-memory (Vulkan VK_ERROR_OUT_OF_DEVICE_MEMORY), or a polyfill backend error.',
-      ),
-    );
-
-    const retry = await awaitPending();
-    // Rewrite retry resends the SAME framed prompt (unlike chat, which
-    // resends bare text) because the rewrite prompt is self-contained.
-    expect(retry.prompt).toBe(rewritePrompt);
-    expect(rebuildSessionMock).toHaveBeenCalledTimes(1);
-    // History reseed: [u1..m3, "make it bold"] → drop the just-added
-    // user turn → keep last 4 → [u2, m2, u3, m3].
-    expect(rebuildSessionMock.mock.calls[0][0]).toEqual([
-      { role: 'user', text: 'u2' },
-      { role: 'model', text: 'm2' },
-      { role: 'user', text: 'u3' },
-      { role: 'model', text: 'm3' },
-    ]);
-    retry.opts.onChunk?.('BOLD');
-    retry.resolve('BOLD');
-    await flushMicrotasks();
-  });
-
-  it('rewrite shows the GPU OOM remedy bubble when the rebuild retry also fails', async () => {
+  it('rewrite surfaces a GPU error plainly and never rebuilds the session (guard removed)', async () => {
     const deps = makeDeps();
     initSession(deps);
     await flushMicrotasks();
     deps._fireSelectionChange(makeFakeSnapshot({ text: 'target' }));
     deps._input.value = 'make it bold';
     deps._actionBtn.click();
-    const first = await awaitPending();
-    first.reject(
+    const call = await awaitPending();
+    call.reject(
       new Error('GPU out-of-memory (VK_ERROR_OUT_OF_DEVICE_MEMORY). Model returned no output.'),
     );
-    const retry = await awaitPending();
-    retry.reject(new Error('Model returned no output. WebGPU device loss again.'));
     await flushMicrotasks();
-    const remedy = Array.from(deps._messages.children).find((c) =>
-      (c.textContent ?? '').includes('GPU could not run this prompt'),
-    );
-    expect(remedy).toBeTruthy();
-    expect(remedy?.textContent).toContain('device": "wasm"');
+    expect(rebuildSessionMock).not.toHaveBeenCalled();
+    expect(pending.length).toBe(0); // no retry queued
+    const modelBubble = deps._messages.children[deps._messages.children.length - 1];
+    expect(modelBubble?.textContent).toContain('VK_ERROR_OUT_OF_DEVICE_MEMORY');
   });
 
   it('rewrite send on success persists both turns to chrome.storage.local under the per-URL key', async () => {

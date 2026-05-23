@@ -28,36 +28,10 @@ import {
 import { makeTypingIndicator, renderMessage } from './ui/messages.js';
 import { setGeneratingState, setIdleState, setLoadingState } from './ui/state.js';
 
-/**
- * Recognize the explicit failure offscreen.ts raises when the polyfill
- * stream closes with zero chunks — typically caused by WebGPU device
- * loss after the user switches tabs/windows. Matched on the message
- * string because the polyfill swallows the underlying ORT error and the
- * offscreen layer surfaces a sentinel string instead.
- */
-function isDeviceLossError(err: unknown): boolean {
-  if (err === null || typeof err !== 'object') return false;
-  const name = (err as { name?: unknown }).name;
-  if (name === 'AbortError') return false;
-  const message = err instanceof Error ? err.message : '';
-  return message.includes('WebGPU device loss') || message.includes('Model returned no output');
-}
-
 const PLACEHOLDER_CHAT = 'Ask anything about this page (Enter)';
 const PLACEHOLDER_EDIT = 'Edit selection… (Esc to switch to Ask)';
 const PLACEHOLDER_ASK = 'Ask about selection… (Esc to switch back to Edit)';
 const CHIP_MAX_CHARS = 60;
-
-/**
- * On a device-loss / OOM rebuild-retry, how many prior history entries
- * to reseed the new polyfill session with. The polyfill's KV cache grows
- * with each turn, and a typical OOM cause is a long accumulated history
- * that no longer fits in VRAM. Trimming to the last few entries keeps
- * the model aware of recent context (so the retry isn't a stranger to
- * the conversation) without dragging the same memory pressure into the
- * fresh session. 4 = roughly two prior user/model exchanges.
- */
-const RECENT_HISTORY_FOR_REBUILD = 4;
 
 /**
  * Default heuristic threshold (in estimated tokens) for warning when
@@ -103,9 +77,6 @@ export function deriveHistoryThreshold(info: GpuInfoSnapshot): number {
   if (mb < 2048) return 2500;
   return 4000;
 }
-
-const GPU_OOM_REMEDY_TEXT =
-  'GPU could not run this prompt even after rebuilding the session with a trimmed history. The most common cause is WebGPU memory pressure — Gemma-4 q4 needs about 1.6 GB of weights plus a KV cache that grows with each turn. To recover:\n\n• Close other GPU-heavy tabs (other AI extensions, video, WebGL) and try again.\n• Restart Chrome to fully reset the GPU process.\n• Switch to CPU-only by setting "device": "wasm" in .env.json, then npm run build and reload the extension. Slower per token but uses system RAM instead of VRAM.';
 
 /**
  * DOM elements and values that content.ts provides at injection time.
@@ -318,13 +289,11 @@ export function initSession(deps: SessionDeps): void {
 
     let modelText = '';
     let firstChunk = true;
-    let rebuildHint: HTMLElement | null = null;
     const t0 = performance.now();
     const onChunk = (chunk: string) => {
       if (firstChunk) {
         console.log(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
         if (firstTurnHint?.parentNode) firstTurnHint.remove();
-        if (rebuildHint?.parentNode) rebuildHint.remove();
         responseEl.textContent = '';
         firstChunk = false;
       }
@@ -332,49 +301,16 @@ export function initSession(deps: SessionDeps): void {
       responseEl.textContent = modelText;
       messages.scrollTop = messages.scrollHeight;
     };
-    let didRebuildRetry = false;
     try {
-      try {
-        await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
-      } catch (err) {
-        if (!isDeviceLossError(err) || activeAbort.signal.aborted) throw err;
-        didRebuildRetry = true;
-        rebuildHint = addMessage(
-          'system',
-          'GPU error (device loss or out-of-memory). Trimming history and retrying once…',
-        );
-        modelText = '';
-        firstChunk = true;
-        const historyForReseed = history
-          .slice(0, -1)
-          .filter(
-            (entry): entry is { role: 'user' | 'model'; text: string } => entry.role !== 'system',
-          )
-          .slice(-RECENT_HISTORY_FOR_REBUILD);
-        await rebuildSession(historyForReseed);
-        await streamPrompt(text, { signal: activeAbort.signal, onChunk });
-      }
+      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
       console.log(
         `[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms, chars=${modelText.length}, prompt.length=${prompt.length}`,
       );
-      // Account for what the polyfill ingested. On rebuild-retry, the
-      // polyfill was reseeded with a trimmed history and the retry sent
-      // just `text` (not the page-context-prefixed `prompt`); resetting
-      // first is conservative (undercounts the seeded history slightly
-      // but errs toward warning later, not earlier).
-      if (didRebuildRetry) resetSentTotals();
-      recordSentTurn(didRebuildRetry ? text.length : prompt.length, modelText.length);
+      recordSentTurn(prompt.length, modelText.length);
     } catch (err: unknown) {
       const name = (err as { name?: unknown })?.name;
       if (name === 'AbortError') {
         modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
-        responseEl.textContent = modelText;
-      } else if (didRebuildRetry && isDeviceLossError(err)) {
-        // Rebuild + trimmed history didn't help — the GPU is genuinely
-        // out of resources for this turn. Surface the remedy bubble so
-        // the user has something actionable instead of a raw error.
-        addMessage('system', GPU_OOM_REMEDY_TEXT);
-        modelText = '[GPU error — see system message above]';
         responseEl.textContent = modelText;
       } else {
         modelText = err instanceof Error ? err.message : String(err);
@@ -383,7 +319,6 @@ export function initSession(deps: SessionDeps): void {
     } finally {
       if (indicator.parentNode) indicator.remove();
       if (firstTurnHint?.parentNode) firstTurnHint.remove();
-      if (rebuildHint?.parentNode) rebuildHint.remove();
       if (!modelText) {
         responseEl.textContent = '(no response — the model returned an empty answer)';
       }
@@ -426,14 +361,6 @@ export function initSession(deps: SessionDeps): void {
       const name = (err as { name?: unknown })?.name;
       if (name === 'AbortError') {
         modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
-        responseEl.textContent = modelText;
-      } else if (isDeviceLossError(err)) {
-        // Asks are short prompts and rarely OOM, so we don't bother with
-        // a rebuild-retry (and there's no DOM mutation to recover). But
-        // if the GPU does fail, give the user the same actionable
-        // remedy guidance instead of a bare error string.
-        addMessage('system', GPU_OOM_REMEDY_TEXT);
-        modelText = '[GPU error — see system message above]';
         responseEl.textContent = modelText;
       } else {
         modelText = err instanceof Error ? err.message : String(err);
@@ -481,10 +408,8 @@ export function initSession(deps: SessionDeps): void {
     let modelText = '';
     let firstChunk = true;
     let succeeded = false;
-    let rebuildHint: HTMLElement | null = null;
     const onChunk = (chunk: string) => {
       if (firstChunk) {
-        if (rebuildHint?.parentNode) rebuildHint.remove();
         responseEl.textContent = '';
         firstChunk = false;
       }
@@ -493,43 +418,13 @@ export function initSession(deps: SessionDeps): void {
       responseEl.textContent = modelText;
       messages.scrollTop = messages.scrollHeight;
     };
-    let didRebuildRetry = false;
     try {
-      try {
-        await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
-      } catch (err) {
-        if (!isDeviceLossError(err) || activeAbort.signal.aborted) throw err;
-        didRebuildRetry = true;
-        rebuildHint = addMessage(
-          'system',
-          'GPU error (device loss or out-of-memory). Trimming history and retrying once…',
-        );
-        modelText = '';
-        firstChunk = true;
-        // Same trim as sendChat: a long accumulated polyfill history is
-        // a typical OOM trigger, so reseed with only the recent turns
-        // rather than dragging the full history (and the same memory
-        // pressure) into the fresh session.
-        const historyForReseed = history
-          .slice(0, -1)
-          .filter(
-            (entry): entry is { role: 'user' | 'model'; text: string } => entry.role !== 'system',
-          )
-          .slice(-RECENT_HISTORY_FOR_REBUILD);
-        await rebuildSession(historyForReseed);
-        await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
-      }
+      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
       succeeded = modelText.length > 0;
     } catch (err: unknown) {
       const name = (err as { name?: unknown })?.name;
       if (name === 'AbortError') {
         modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
-        responseEl.textContent = modelText;
-      } else if (didRebuildRetry && isDeviceLossError(err)) {
-        // Rebuild + trimmed history didn't help — the GPU is genuinely
-        // out of resources for this rewrite. Surface the remedy bubble.
-        addMessage('system', GPU_OOM_REMEDY_TEXT);
-        modelText = '[GPU error — see system message above]';
         responseEl.textContent = modelText;
       } else {
         modelText = err instanceof Error ? err.message : String(err);
@@ -537,7 +432,6 @@ export function initSession(deps: SessionDeps): void {
       }
     } finally {
       if (indicator.parentNode) indicator.remove();
-      if (rebuildHint?.parentNode) rebuildHint.remove();
       if (!modelText) {
         responseEl.textContent = '(no response — the model returned an empty answer)';
       }
@@ -548,7 +442,6 @@ export function initSession(deps: SessionDeps): void {
       if (succeeded) {
         rewrite.finalize();
         attachRewriteActions(responseEl, snap);
-        if (didRebuildRetry) resetSentTotals();
         recordSentTurn(prompt.length, modelText.length);
       }
       setIdleState(actionBtn, i);

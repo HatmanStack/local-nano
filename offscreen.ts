@@ -314,41 +314,6 @@ chrome.runtime.onConnect.addListener((port) => {
         } finally {
           reader.releaseLock();
         }
-        if (chunkCount === 0 && !controller.signal.aborted) {
-          // The polyfill's transformers backend catches generation errors
-          // (WebGPU device loss after a tab switch is the common one) and
-          // sets isDone=true without erroring the stream
-          // (vendor/prompt-api-polyfill/backends/transformers.js:241-248).
-          // The polyfill then pushes user/model("") into its history and
-          // closes the stream cleanly. We get a "successful zero-chunk"
-          // result here — surface it as a failure and rebuild the session:
-          // the polyfill's history is now polluted with an empty turn that
-          // tends to cascade into more empty turns, and the WebGPU device
-          // is likely gone anyway.
-          console.warn(
-            `[local-nano/offscreen] EMPTY response id=${id} prompt.length=${raw.prompt.length} sessionMs=${tSession.toFixed(0)} totalMs=${(performance.now() - t0).toFixed(0)} — treating as failure and rebuilding session on next call.`,
-          );
-          try {
-            const previous = await sessionPromise;
-            previous?.destroy();
-          } catch {
-            // Nothing useful to do — we're tearing it down anyway.
-          }
-          sessionPromise = null;
-          const empty: StreamDone = {
-            type: STREAM_DONE,
-            id,
-            ok: false,
-            error:
-              'Model returned no output. Likely cause: WebGPU device loss, GPU out-of-memory (Vulkan VK_ERROR_OUT_OF_DEVICE_MEMORY), or a polyfill backend error. Rebuilding session.',
-          };
-          try {
-            port.postMessage(empty);
-          } catch {
-            // Caller gone.
-          }
-          return;
-        }
         console.log(
           `[local-nano/offscreen] stream/done id=${id} chunks=${chunkCount} chars=${totalChars} sessionMs=${tSession.toFixed(0)} totalMs=${(performance.now() - t0).toFixed(0)}`,
         );
@@ -362,20 +327,12 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        const errName = (err as { name?: unknown })?.name;
-        // Aborts are a normal end-of-stream signal — the user clicked
-        // Stop, or another tab disconnected the port. Resetting the
-        // session here would destroy the polyfill's conversation history
-        // and the next turn would have no memory of the prior one.
-        //
-        // Only reset on real failures (WebGPU device-lost, "OrtRun"
-        // failures, malformed model output). The next request then
-        // rebuilds the session from cached weights — slower for that
-        // call, recoverable across the tab's lifetime.
-        if (errName !== 'AbortError') {
-          sessionPromise = null;
-          console.warn('[local-nano/offscreen] stream error, resetting session:', errMsg);
-        }
+        // Guard removed: the session is NOT torn down or rebuilt on
+        // error. We keep the loaded session alive and just report the
+        // failure — destroying + reloading on a constrained GPU was
+        // suspected of worsening OOM via reload churn. The caller
+        // surfaces the error message.
+        console.warn('[local-nano/offscreen] stream error:', errMsg);
         const fail: StreamDone = { type: STREAM_DONE, id, ok: false, error: errMsg };
         try {
           port.postMessage(fail);

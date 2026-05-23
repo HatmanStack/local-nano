@@ -7,25 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.4] - 2026-05-23
 
-Hardens the selection-rewrite release for real-world GPUs and prepares the first Chrome Web Store submission. The headline is resilience: a memory-constrained adapter that used to fail silently now recovers, warns ahead of trouble, and tells the user what to do.
+Polishes the selection-rewrite UX and prepares the first Chrome Web Store submission. An earlier automatic GPU-OOM "guard" (zero-chunk-as-failure + session teardown + rebuild-and-retry) was removed: on a memory-constrained adapter the session churn tended to make out-of-memory worse, not better. The session now loads once and is never auto-destroyed; GPU errors surface plainly instead.
 
 ### Added
 
-- **Model preloads when the panel opens.** Previously the first message ate the 30–90s WebGPU upload. Now opening the panel (Ctrl/Cmd+Shift+K) kicks off the load in the background with a live "Loading…" indicator (bouncing dots + a system bubble); the input stays editable while the Send button is gated until the model is ready.
-- **GPU out-of-memory resilience.** When a turn fails because the WebGPU device was lost or ran out of memory (the polyfill reports it as a zero-chunk stream), the offscreen layer tears the session down and the chat layer rebuilds it with a trimmed history, then retries once. If the retry also fails, an in-panel system bubble explains the likely cause and lists remedies (close GPU-heavy tabs, restart Chrome, switch to `wasm`).
+- **Model preloads when the panel opens.** Previously the first message ate the 30–90s WebGPU upload. Now opening the panel (Ctrl/Cmd+Shift+K) kicks off the load in the background with a live "Loading…" indicator (bouncing dots + an elapsed counter); the input stays editable while the Send button is gated until the model is ready. The preload is best-effort — if it fails it degrades quietly to lazy loading on the first message rather than raising an alarm, and the load is never killed on a timer.
 - **Proactive "Clear conversation" warning.** The panel tracks how large the conversation has grown and warns before the next turn is likely to exhaust VRAM, with a one-click button to reset the session. The warning threshold is derived per-session from the actual WebGPU adapter (or `device` / an optional `historyTokenWarnThreshold` in `.env.json`).
 - **Undo / Accept on rewrites.** A finished rewrite now offers both Undo (restore the original text) and Accept (commit and reset selection state for the next edit), instead of Undo alone.
-- **Model-load progress, with best-effort preload.** Opening the panel preloads the model; while it loads, a system bubble shows a live elapsed counter (proof of life for the multi-GB first-run download) and, if it drags past ~45s, appends remedies without giving up — the load is never killed on a timer. The preload is best-effort: if it fails (e.g. transient VRAM pressure on open) it degrades quietly to lazy loading on the first message rather than raising the GPU guard. The operational GPU guard (rebuild + retry + remedies) still applies during actual turns.
 - **Brand icon** (`icons/`) and an `npm run package` step that zips a Web-Store-ready upload (manifest + `dist/` + icons).
 
 ### Changed
 
 - Reduced requested permissions to `["storage", "offscreen"]`. Removed `activeTab` and `scripting` (the declarative `<all_urls>` content script already grants the page access the extension uses; nothing calls the `chrome.scripting` API) and the `cdn.jsdelivr.net` host permission (ONNX Runtime WASM loads from the bundled `dist/ort/`, never jsdelivr).
 
+### Removed
+
+- The automatic GPU-OOM guard: zero-chunk streams are no longer treated as failures, the offscreen session is no longer torn down on a stream error, and the chat/rewrite paths no longer rebuild-and-retry on a device-loss-shaped error. A failed turn now shows its error plainly. Manual recovery is still available via the "Clear conversation" button.
+
 ### Fixed
 
 - Highlighting text then clicking into the chat input no longer drops the selection — focus-shift `selectionchange` events are ignored so the captured snapshot survives.
-- The rewrite path now trims reseed history on a GPU-error retry (matching the chat path), so a retry doesn't immediately hit the same out-of-memory wall.
 
 ### Notes
 
