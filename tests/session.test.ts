@@ -1190,7 +1190,12 @@ describe('deriveHistoryThreshold', () => {
 });
 
 describe('preflightWarning', () => {
-  const base = { device: 'webgpu' as const, isFallback: false, maxBufferSize: null, configuredThreshold: null };
+  const base = {
+    device: 'webgpu' as const,
+    isFallback: false,
+    maxBufferSize: null,
+    configuredThreshold: null,
+  };
   it('returns null for wasm device (no GPU needed)', () => {
     expect(preflightWarning({ ...base, device: 'wasm' })).toBeNull();
   });
