@@ -101,6 +101,14 @@ Captured in roughly the order we hit them so the rationale is visible.
 | `onnx-community/gemma-4-E2B-it-ONNX`               | webgpu + q4                 | ✅ Smarter than Qwen3.5-0.8B; ~5–15 tok/s on Iris Xe. ~1.5 GB download. (Historical `q4` observation.) |
 | `onnx-community/gemma-4-E2B-it-ONNX`               | webgpu + q4f16              | ✅ Current default. Moved off `q4` after the `q4` ONNX kernel hit a `SIGILL` on some Chrome/Dawn builds (see [configuration.md](configuration.md) and CHANGELOG 0.2.4). |
 
+## Smaller-model fallback rung (gated)
+
+The fallback ladder can append a smaller model as a last-resort rung after the primary model's dtype/device tiers are exhausted. It exists in code behind a build-time flag, `SMALLER_MODEL_ENABLED` in `src/offscreen/ladder.ts`, which **defaults to false**: the rung is dormant and live behavior is the primary model only.
+
+The candidate is `onnx-community/Qwen2.5-0.5B-Instruct`, the WASM-tier default from the [TL;DR picks](#tldr-picks) and the [Models we tried](#models-we-tried) table above. It is vetted **on WASM only** (`device: "wasm"`, `dtype: "q8"`); its WebGPU tier (`q4f16`) is **unvetted** and is present in the candidate list solely as the manual-vetting target.
+
+Enabling the flag is a manual follow-up, not a CI-checkable change: CI cannot exercise WebGPU. Before flipping `SMALLER_MODEL_ENABLED` to true, run the manual WebGPU smoke matrix against the candidate at each of its tiers and confirm it loads and answers coherently. Until that vetting passes, the rung stays off and the polyfill's own default smaller model (`onnx-community/gemma-3-1b-it-ONNX-GQA`, a documented WASM trap in the table above) is never used.
+
 ## Failure modes worth recognizing
 
 - **Integer "exception" (e.g., `Error: 12077640`).** Emscripten panic in the WASM ONNX runtime. Almost always memory pressure — bigger model than the heap can hold, or KV cache outgrowing it during long generation. Drop to a smaller model or a smaller `max_new_tokens`.
