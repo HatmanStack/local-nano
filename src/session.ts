@@ -111,14 +111,14 @@ export function preflightWarning(info: GpuInfoSnapshot): string | null {
 
 /**
  * True when a storage write rejection looks like a quota exhaustion rather
- * than a transient/unknown failure. Chrome surfaces this either as an Error
- * whose message mentions QUOTA/quota or via `chrome.runtime.lastError`.
- * Matching the wording keeps non-quota failures on the existing
- * console.error path. Exported for unit testing.
+ * than a transient/unknown failure. `saveHistory` uses the promisified
+ * `chrome.storage.local.set`, so a quota failure arrives as a rejected Error
+ * whose message mentions QUOTA/quota (`chrome.runtime.lastError` is the
+ * callback-era mechanism and is not populated in a Promise `.catch()`).
+ * Matching the wording keeps non-quota failures on the console.error path.
+ * Exported for unit testing.
  */
 export function isQuotaError(err: unknown): boolean {
-  const lastErr = chrome.runtime?.lastError?.message;
-  if (typeof lastErr === 'string' && /quota/i.test(lastErr)) return true;
   const message = err instanceof Error ? err.message : String(err);
   return /quota/i.test(message);
 }
@@ -182,6 +182,10 @@ export function initSession(deps: SessionDeps): void {
   // rendered, so we never block on a failed write.
   let warnedAboutStorageQuota = false;
   function persist() {
+    // Once a quota rejection has been surfaced, stop firing further writes —
+    // they would only reject again. clearConversation() resets the flag, so
+    // saving resumes once the user frees space.
+    if (warnedAboutStorageQuota) return;
     saveHistoryToStorage(STORAGE_KEY, history).catch((err: unknown) => {
       if (isQuotaError(err)) {
         if (!warnedAboutStorageQuota) {
@@ -434,10 +438,23 @@ export function initSession(deps: SessionDeps): void {
         pushEntry({ role: 'model', text: modelText });
         persist();
       }
-      if (succeeded) onSuccess?.(modelText, prompt.length, responseEl);
+      if (succeeded) {
+        // A throwing success tail (e.g. rewrite's DOM action-bar attach) must
+        // not skip the cleanup below, or the Send button stays stuck in the
+        // generating state and activeAbort dangles.
+        try {
+          onSuccess?.(modelText, prompt.length, responseEl);
+        } catch (e) {
+          console.error('[local-nano] onSuccess handler threw:', e);
+        }
+      }
       setIdleState(actionBtn, i);
       activeAbort = null;
-      onFinally?.();
+      try {
+        onFinally?.();
+      } catch (e) {
+        console.error('[local-nano] onFinally handler threw:', e);
+      }
       i.focus();
     }
   }
@@ -613,6 +630,9 @@ export function initSession(deps: SessionDeps): void {
       history = [];
       isFirstTurn = true;
       warnedAboutHistory = false;
+      // Re-enable persistence: the emptied history written by persist() below
+      // frees the per-URL storage entry, so the quota advisory no longer applies.
+      warnedAboutStorageQuota = false;
       resetSentTotals();
       // Wipe rendered bubbles. Leaves the panel empty so the next turn
       // shows up at the top — matches the user's expectation of "fresh
