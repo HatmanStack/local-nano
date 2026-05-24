@@ -100,16 +100,18 @@ export class LanguageModel extends EventTarget {
   get contextUsage() {
     return this.#contextUsage;
   }
+  // LOCAL DELTA (local-nano): the upstream literal was 1000000, far above the
+  // model's real window, so the overflow guards (totalTokens > contextWindow /
+  // contextUsage > contextWindow) only fired well past the real boundary.
+  // 131072 (128K) is the gemma-4-E2B-it-ONNX context window per its Hugging
+  // Face model card, making the built-in contextoverflow / QuotaExceededError
+  // meaningful at the real edge. Single-sourced here so the instance getter and
+  // the static create() initial-prompts guard cannot drift. The app's
+  // char-heuristic warning stays the practical early guard. Re-apply on upstream
+  // resync (see docs/prompt-api.md).
+  static #CONTEXT_WINDOW = 131072;
   get contextWindow() {
-    // LOCAL DELTA (local-nano): the upstream literal was 1000000, far above
-    // the model's real window, so the overflow guards below (totalTokens >
-    // contextWindow / contextUsage > contextWindow) only fired well past the
-    // real boundary. 131072 (128K) is the gemma-4-E2B-it-ONNX context window
-    // per its Hugging Face model card, making the built-in contextoverflow /
-    // QuotaExceededError meaningful at the real edge. The app's char-heuristic
-    // warning stays the practical early guard. Re-apply on upstream resync
-    // (see docs/prompt-api.md).
-    return 131072;
+    return LanguageModel.#CONTEXT_WINDOW;
   }
 
   get oncontextoverflow() {
@@ -428,7 +430,7 @@ export class LanguageModel extends EventTarget {
           const requested =
             detection === 'QuotaExceededError' ? 10000000 : 500000;
           error.requested = requested;
-          error.quota = 1000000; // contextWindow
+          error.quota = LanguageModel.#CONTEXT_WINDOW; // contextWindow (LOCAL DELTA: was 1000000)
           throw error;
         }
       }
@@ -511,7 +513,7 @@ export class LanguageModel extends EventTarget {
       }
       contextUsageValue = (await backend.countTokens(fullHistory)) || 0;
 
-      if (contextUsageValue > 1000000) {
+      if (contextUsageValue > LanguageModel.#CONTEXT_WINDOW) {
         const ErrorClass =
           win.QuotaExceededError ||
           win.DOMException ||
@@ -523,7 +525,7 @@ export class LanguageModel extends EventTarget {
         );
         Object.defineProperty(error, 'code', { value: 22, configurable: true });
         error.requested = contextUsageValue;
-        error.quota = 1000000; // contextWindow
+        error.quota = LanguageModel.#CONTEXT_WINDOW; // contextWindow (LOCAL DELTA: was 1000000)
         throw error;
       }
     }
