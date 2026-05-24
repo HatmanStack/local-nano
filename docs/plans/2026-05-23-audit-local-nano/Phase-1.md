@@ -108,12 +108,12 @@ later docs phase.
 
 **Verification Checklist:**
 
-- No occurrence of `finalize` remains in `src/selection-rewrite.ts` or
+- [x] No occurrence of `finalize` remains in `src/selection-rewrite.ts` or
   `src/session.ts`.
-- The `streamRewriteIntoRange` return type no longer advertises `finalize`.
-- `npm run typecheck` exits 0 (the removed-from-return-type change must not
+- [x] The `streamRewriteIntoRange` return type no longer advertises `finalize`.
+- [x] `npm run typecheck` exits 0 (the removed-from-return-type change must not
   break callers — `sendRewrite` is the only caller).
-- `npm run coverage` passes.
+- [x] `npm run coverage` passes.
 
 **Testing Instructions:** Run `npm run coverage`. Existing rewrite-application
 tests (chunk streaming into the range, undo) must still pass unchanged.

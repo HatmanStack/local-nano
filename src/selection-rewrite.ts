@@ -333,7 +333,6 @@ Answer concisely. Do not change the text; just answer.`;
  */
 export function streamRewriteIntoRange(snap: SelectionSnapshot): {
   applyChunk: (chunk: string) => void;
-  finalize: () => void;
 } {
   function applyChunk(chunk: string): void {
     if (!chunk) return;
@@ -349,11 +348,7 @@ export function streamRewriteIntoRange(snap: SelectionSnapshot): {
     target.data += chunk;
   }
 
-  function finalize(): void {
-    // Reserved for future commit-or-rollback behaviour; today a no-op.
-  }
-
-  return { applyChunk, finalize };
+  return { applyChunk };
 }
 
 /**

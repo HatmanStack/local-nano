@@ -373,7 +373,6 @@ describe('undoRewrite', () => {
     const snap = expectSnap(snapshotSelection(makeSelection(range)));
     const rewrite = streamRewriteIntoRange(snap);
     rewrite.applyChunk('REWRITTEN');
-    rewrite.finalize();
     expect(p.textContent).toBe('REWRITTEN text here');
     const result = undoRewrite(snap);
     expect(result.ok).toBe(true);
@@ -389,7 +388,6 @@ describe('undoRewrite', () => {
     const snap = expectSnap(snapshotSelection(makeSelection(range)));
     const rewrite = streamRewriteIntoRange(snap);
     rewrite.applyChunk('NEW');
-    rewrite.finalize();
     // Detach the whole paragraph from the document.
     p.remove();
     const result = undoRewrite(snap);
@@ -406,7 +404,6 @@ describe('undoRewrite', () => {
     const snap = expectSnap(snapshotSelection(makeSelection(range)));
     const rewrite = streamRewriteIntoRange(snap);
     rewrite.applyChunk('FOO');
-    rewrite.finalize();
     const first = undoRewrite(snap);
     expect(first.ok).toBe(true);
     const second = undoRewrite(snap);

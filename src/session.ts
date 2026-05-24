@@ -461,7 +461,6 @@ export function initSession(deps: SessionDeps): void {
         persist();
       }
       if (succeeded) {
-        rewrite.finalize();
         attachRewriteActions(responseEl, snap);
         recordSentTurn(prompt.length, modelText.length);
       }
