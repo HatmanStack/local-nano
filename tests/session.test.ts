@@ -174,6 +174,54 @@ describe('initSession — history restore', () => {
     expect(deps._messages.children.length).toBe(MAX_HISTORY);
     expect(deps._messages.children[0].textContent).toBe(`msg 50`);
   });
+
+  it('re-seeds the offscreen session with restored user/model turns (system dropped)', async () => {
+    const key = `local-nano:history:https://example.com/page`;
+    chromeMock.storage.local.store[key] = [
+      { role: 'user', text: 'hello' },
+      { role: 'system', text: 'a transient notice' },
+      { role: 'model', text: 'world' },
+    ];
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    // The single shared offscreen session is re-seeded with this URL's
+    // conversation so a follow-up has context. System entries are dropped
+    // (HistoryTurn only accepts user/model).
+    expect(rebuildSessionMock).toHaveBeenCalledTimes(1);
+    expect(rebuildSessionMock).toHaveBeenCalledWith([
+      { role: 'user', text: 'hello' },
+      { role: 'model', text: 'world' },
+    ]);
+  });
+
+  it('does not re-seed when there is no stored history', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    expect(rebuildSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('still renders and does not throw when the re-seed rejects', async () => {
+    rebuildSessionMock.mockRejectedValueOnce(new Error('offscreen not ready'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const key = `local-nano:history:https://example.com/page`;
+      chromeMock.storage.local.store[key] = [
+        { role: 'user', text: 'hi' },
+        { role: 'model', text: 'there' },
+      ];
+      const deps = makeDeps();
+      initSession(deps);
+      await flushMicrotasks();
+      // History is still rendered (degrade to render-only).
+      expect(deps._messages.children.length).toBe(2);
+      expect(deps._messages.children[0].textContent).toBe('hi');
+      expect(rebuildSessionMock).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
 
 describe('initSession — toggle behavior', () => {

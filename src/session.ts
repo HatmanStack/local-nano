@@ -15,7 +15,7 @@ import {
   streamPrompt,
   warmupSession,
 } from './offscreen/client.js';
-import type { GpuInfoSnapshot } from './offscreen/protocol.js';
+import type { GpuInfoSnapshot, HistoryTurn } from './offscreen/protocol.js';
 import { pageContext } from './pageContext.js';
 import {
   buildAskPrompt,
@@ -201,6 +201,28 @@ export function initSession(deps: SessionDeps): void {
     const loaded = await loadHistoryFromStorage(STORAGE_KEY);
     history = loaded.length > MAX_HISTORY ? loaded.slice(-MAX_HISTORY) : loaded;
     for (const entry of history) renderMessage(messages, entry.role, entry.text);
+
+    // Re-seed the single shared offscreen session with THIS URL's restored
+    // conversation. The session is shared across tabs/URLs, so without this
+    // a follow-up on a restored page would have no conversational context.
+    // Map to HistoryTurn[] (user/model only — system entries are transient
+    // UI notices and are dropped; the offscreen side maps model→assistant).
+    // Awaited so a later send doesn't race a half-built session; guarded so
+    // a failure (offscreen not ready, load failure) degrades to render-only.
+    // The seed is bounded by MAX_HISTORY already (no second session, ADR-R2).
+    const seed: HistoryTurn[] = history
+      .filter((e): e is Entry & { role: 'user' | 'model' } => e.role !== 'system')
+      .map((e) => ({ role: e.role, text: e.text }));
+    if (seed.length > 0) {
+      try {
+        await rebuildSession(seed);
+      } catch (err) {
+        // Degrade to render-only: the rendered history still shows, the
+        // session just isn't seeded. Do not throw out of restore().
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn('[local-nano] restore re-seed failed; rendering only:', message);
+      }
+    }
   }
 
   function addMessage(role: Role, text: string): HTMLElement {
@@ -257,12 +279,14 @@ export function initSession(deps: SessionDeps): void {
   });
 
   // ---- Send / Stop ----
-  // NOTE(isFirstTurn): This flag isn't reset after restore() re-renders
-  // prior history. The restored messages are displayed in the UI but the
-  // offscreen session has no knowledge of them (it holds a single
-  // long-lived context across tabs/URLs). The page-context prefix is only
-  // applied on the very first user turn of the lifetime of this content
-  // script. Cross-URL chat continuity needs a follow-up.
+  // NOTE(isFirstTurn): restore() now re-seeds the single shared offscreen
+  // session with this URL's restored history (see restore()), so the
+  // session DOES have conversational context for a restored page. We
+  // deliberately leave isFirstTurn = true after a re-seed: the restored
+  // turns give continuity, and the first new turn still prefixes the
+  // page-context block so the model is grounded in the CURRENT page. The
+  // prefix is therefore sent once per content-script lifetime per URL,
+  // which is the intended grounding behavior.
   let isFirstTurn = true;
   let activeAbort: AbortController | null = null;
 
