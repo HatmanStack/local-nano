@@ -101,7 +101,15 @@ export class LanguageModel extends EventTarget {
     return this.#contextUsage;
   }
   get contextWindow() {
-    return 1000000;
+    // LOCAL DELTA (local-nano): the upstream literal was 1000000, far above
+    // the model's real window, so the overflow guards below (totalTokens >
+    // contextWindow / contextUsage > contextWindow) only fired well past the
+    // real boundary. 131072 (128K) is the gemma-4-E2B-it-ONNX context window
+    // per its Hugging Face model card, making the built-in contextoverflow /
+    // QuotaExceededError meaningful at the real edge. The app's char-heuristic
+    // warning stays the practical early guard. Re-apply on upstream resync
+    // (see docs/prompt-api.md).
+    return 131072;
   }
 
   get oncontextoverflow() {
