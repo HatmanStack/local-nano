@@ -42,7 +42,7 @@ DOM untouched. Press `Esc` again to switch back to Edit mode.
   headings, blockquotes, and similar).
 - Public web pages with standard DOM selections.
 
-Out of scope for v0.2.3 (queued for v0.3.0):
+Out of scope (queued for v0.3.0):
 
 - `<input>` and `<textarea>` selections. These use a different
   selection API and need synthetic `input` events to notify frameworks.
@@ -54,8 +54,8 @@ Out of scope for v0.2.3 (queued for v0.3.0):
 ## Architecture constraints inherited from v0.2.0
 
 The v0.2.0 release shipped the same conceptual feature and was reverted
-after a WebGPU OOM regression. v0.2.3 is the rewrite. Three
-non-negotiable constraints carry over:
+after a WebGPU OOM regression. The rewrite shipped in v0.2.3 (the project
+is now on 0.2.4). Three non-negotiable constraints carry over:
 
 1. **Single offscreen `LanguageModel` session.** Transforms reuse the
    long-lived session created by `offscreen.ts:ensureSession`. No new
@@ -84,11 +84,13 @@ non-negotiable constraints carry over:
 The unit + integration suite (200+ tests under Vitest + jsdom, all
 passing) covers the selection-rewrite path end-to-end with a mocked
 offscreen client. The in-browser smoke test against a real
-WebGPU-backed Gemma session was **not** run before v0.2.3 shipped —
-the test environment cannot host WebGPU. To prove the happy path on
-your machine before relying on the release:
+WebGPU-backed Gemma session is **not** part of CI — the test
+environment cannot host WebGPU. To prove the happy path on your
+machine:
 
-1. Load the unpacked extension from `dist/`.
+1. Load the unpacked extension by picking the repository root at
+   `chrome://extensions` (Developer mode → Load unpacked). `manifest.json`
+   lives at the repo root, not in `dist/`; loading `dist/` fails.
 1. Open a public article (any blog post or Wikipedia page).
 1. Highlight a paragraph.
 1. Toggle the panel with `Ctrl+Shift+K`.
