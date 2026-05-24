@@ -98,6 +98,25 @@ describe('streamPrompt (content-script client)', () => {
     }));
     await expect(streamPrompt('hi')).rejects.toThrow(/malformed/);
   });
+
+  it('rejects with the busy error when the offscreen gate rejects a concurrent stream', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: ENSURE_OFFSCREEN_RESPONSE,
+      ok: true,
+    }));
+    const p = streamPrompt('hello');
+    const port = await awaitPort();
+    const req = await waitForPostedRequest(port);
+    // The offscreen busy gate replies ok:false with the busy error and
+    // never starts a second generation.
+    port._emit({
+      type: STREAM_DONE,
+      id: req.id,
+      ok: false,
+      error: 'busy: another generation is in progress',
+    } as StreamDone);
+    await expect(p).rejects.toThrow('busy: another generation is in progress');
+  });
 });
 
 describe('sendPrompt (non-streaming wrapper)', () => {

@@ -174,6 +174,54 @@ describe('initSession — history restore', () => {
     expect(deps._messages.children.length).toBe(MAX_HISTORY);
     expect(deps._messages.children[0].textContent).toBe(`msg 50`);
   });
+
+  it('re-seeds the offscreen session with restored user/model turns (system dropped)', async () => {
+    const key = `local-nano:history:https://example.com/page`;
+    chromeMock.storage.local.store[key] = [
+      { role: 'user', text: 'hello' },
+      { role: 'system', text: 'a transient notice' },
+      { role: 'model', text: 'world' },
+    ];
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    // The single shared offscreen session is re-seeded with this URL's
+    // conversation so a follow-up has context. System entries are dropped
+    // (HistoryTurn only accepts user/model).
+    expect(rebuildSessionMock).toHaveBeenCalledTimes(1);
+    expect(rebuildSessionMock).toHaveBeenCalledWith([
+      { role: 'user', text: 'hello' },
+      { role: 'model', text: 'world' },
+    ]);
+  });
+
+  it('does not re-seed when there is no stored history', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    expect(rebuildSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('still renders and does not throw when the re-seed rejects', async () => {
+    rebuildSessionMock.mockRejectedValueOnce(new Error('offscreen not ready'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const key = `local-nano:history:https://example.com/page`;
+      chromeMock.storage.local.store[key] = [
+        { role: 'user', text: 'hi' },
+        { role: 'model', text: 'there' },
+      ];
+      const deps = makeDeps();
+      initSession(deps);
+      await flushMicrotasks();
+      // History is still rendered (degrade to render-only).
+      expect(deps._messages.children.length).toBe(2);
+      expect(deps._messages.children[0].textContent).toBe('hi');
+      expect(rebuildSessionMock).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
 });
 
 describe('initSession — toggle behavior', () => {
@@ -1122,6 +1170,81 @@ describe('initSession — history pressure tracking', () => {
   });
 });
 
+describe('initSession — storage quota surfacing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    // vi.clearAllMocks() does not reset a persistent mockRejectedValue, so
+    // restore the FakeStorageArea write behavior for tests that rely on a
+    // resolving baseline before overriding a single call.
+    chromeMock.storage.local.set.mockImplementation(async (items: Record<string, unknown>) => {
+      Object.assign(chromeMock.storage.local.store, items);
+    });
+  });
+
+  function quotaBubbles(deps: ReturnType<typeof makeDeps>): Element[] {
+    return Array.from(deps._messages.children).filter((c) =>
+      (c.textContent ?? '').includes('History is full for this page'),
+    );
+  }
+
+  it('shows a single advisory bubble when a save hits a quota error', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    // The model-entry persist for this turn rejects with a quota-shaped error.
+    chromeMock.storage.local.set.mockRejectedValueOnce(new Error('QUOTA_BYTES quota exceeded'));
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('a response');
+    call.resolve('a response');
+    await flushMicrotasks();
+    expect(quotaBubbles(deps)).toHaveLength(1);
+  });
+
+  it('does not re-bubble on a second quota failure in the same session', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    // Every set rejects with a quota error for the rest of the session.
+    chromeMock.storage.local.set.mockRejectedValue(new Error('QUOTA_BYTES quota exceeded'));
+    deps._input.value = 'first';
+    deps._actionBtn.click();
+    let call = await awaitPending();
+    call.opts.onChunk?.('one');
+    call.resolve('one');
+    await flushMicrotasks();
+    deps._input.value = 'second';
+    deps._actionBtn.click();
+    call = await awaitPending();
+    call.opts.onChunk?.('two');
+    call.resolve('two');
+    await flushMicrotasks();
+    expect(quotaBubbles(deps)).toHaveLength(1);
+  });
+
+  it('does not bubble for a non-quota save failure (still logs)', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const deps = makeDeps();
+      initSession(deps);
+      await flushMicrotasks();
+      chromeMock.storage.local.set.mockRejectedValueOnce(new Error('some other write failure'));
+      deps._input.value = 'hi';
+      deps._actionBtn.click();
+      const call = await awaitPending();
+      call.opts.onChunk?.('resp');
+      call.resolve('resp');
+      await flushMicrotasks();
+      expect(quotaBubbles(deps)).toHaveLength(0);
+      expect(errorSpy).toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
 describe('deriveHistoryThreshold', () => {
   it('honors an explicit configuredThreshold above everything else', () => {
     expect(
@@ -1190,7 +1313,12 @@ describe('deriveHistoryThreshold', () => {
 });
 
 describe('preflightWarning', () => {
-  const base = { device: 'webgpu' as const, isFallback: false, maxBufferSize: null, configuredThreshold: null };
+  const base = {
+    device: 'webgpu' as const,
+    isFallback: false,
+    maxBufferSize: null,
+    configuredThreshold: null,
+  };
   it('returns null for wasm device (no GPU needed)', () => {
     expect(preflightWarning({ ...base, device: 'wasm' })).toBeNull();
   });

@@ -1,4 +1,5 @@
 import { TOGGLE_MESSAGE } from './background/handler.js';
+import { debugLog } from './debug.js';
 import {
   type Entry,
   loadHistory as loadHistoryFromStorage,
@@ -14,7 +15,7 @@ import {
   streamPrompt,
   warmupSession,
 } from './offscreen/client.js';
-import type { GpuInfoSnapshot } from './offscreen/protocol.js';
+import type { GpuInfoSnapshot, HistoryTurn } from './offscreen/protocol.js';
 import { pageContext } from './pageContext.js';
 import {
   buildAskPrompt,
@@ -32,6 +33,15 @@ const PLACEHOLDER_CHAT = 'Ask anything about this page (Enter)';
 const PLACEHOLDER_EDIT = 'Edit selection… (Esc to switch to Ask)';
 const PLACEHOLDER_ASK = 'Ask about selection… (Esc to switch back to Edit)';
 const CHIP_MAX_CHARS = 60;
+
+/**
+ * Shared style for the small dark action buttons (Undo/Accept on a
+ * rewrite, Clear on the history-pressure bubble). Single-sourced so the
+ * palette stays consistent; buttons needing extra layout (e.g. the
+ * history-pressure Clear's `margin-top`) prepend their own declarations.
+ */
+const BUTTON_CSS =
+  'padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
 
 /**
  * Default heuristic threshold (in estimated tokens) for warning when
@@ -100,6 +110,20 @@ export function preflightWarning(info: GpuInfoSnapshot): string | null {
 }
 
 /**
+ * True when a storage write rejection looks like a quota exhaustion rather
+ * than a transient/unknown failure. `saveHistory` uses the promisified
+ * `chrome.storage.local.set`, so a quota failure arrives as a rejected Error
+ * whose message mentions QUOTA/quota (`chrome.runtime.lastError` is the
+ * callback-era mechanism and is not populated in a Promise `.catch()`).
+ * Matching the wording keeps non-quota failures on the console.error path.
+ * Exported for unit testing.
+ */
+export function isQuotaError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /quota/i.test(message);
+}
+
+/**
  * DOM elements and values that content.ts provides at injection time.
  * session.ts does not touch document directly.
  */
@@ -151,8 +175,28 @@ export function initSession(deps: SessionDeps): void {
     }
   }
 
+  // Fire-and-forget persistence. A quota rejection (chrome.storage.local has
+  // a fixed byte budget) previously only reached console.error, so history
+  // could silently stop saving on large-turn pages. Surface it once per
+  // session as a non-blocking advisory bubble; the turn's output is already
+  // rendered, so we never block on a failed write.
+  let warnedAboutStorageQuota = false;
   function persist() {
+    // Once a quota rejection has been surfaced, stop firing further writes —
+    // they would only reject again. clearConversation() resets the flag, so
+    // saving resumes once the user frees space.
+    if (warnedAboutStorageQuota) return;
     saveHistoryToStorage(STORAGE_KEY, history).catch((err: unknown) => {
+      if (isQuotaError(err)) {
+        if (!warnedAboutStorageQuota) {
+          warnedAboutStorageQuota = true;
+          addMessage(
+            'system',
+            'History is full for this page and stopped saving. Clear the conversation to resume saving.',
+          );
+        }
+        return;
+      }
       console.error('[local-nano] history write failed:', err);
     });
   }
@@ -161,6 +205,28 @@ export function initSession(deps: SessionDeps): void {
     const loaded = await loadHistoryFromStorage(STORAGE_KEY);
     history = loaded.length > MAX_HISTORY ? loaded.slice(-MAX_HISTORY) : loaded;
     for (const entry of history) renderMessage(messages, entry.role, entry.text);
+
+    // Re-seed the single shared offscreen session with THIS URL's restored
+    // conversation. The session is shared across tabs/URLs, so without this
+    // a follow-up on a restored page would have no conversational context.
+    // Map to HistoryTurn[] (user/model only — system entries are transient
+    // UI notices and are dropped; the offscreen side maps model→assistant).
+    // Awaited so a later send doesn't race a half-built session; guarded so
+    // a failure (offscreen not ready, load failure) degrades to render-only.
+    // The seed is bounded by MAX_HISTORY already (no second session, ADR-R2).
+    const seed: HistoryTurn[] = history
+      .filter((e): e is Entry & { role: 'user' | 'model' } => e.role !== 'system')
+      .map((e) => ({ role: e.role, text: e.text }));
+    if (seed.length > 0) {
+      try {
+        await rebuildSession(seed);
+      } catch (err) {
+        // Degrade to render-only: the rendered history still shows, the
+        // session just isn't seeded. Do not throw out of restore().
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn('[local-nano] restore re-seed failed; rendering only:', message);
+      }
+    }
   }
 
   function addMessage(role: Role, text: string): HTMLElement {
@@ -217,20 +283,21 @@ export function initSession(deps: SessionDeps): void {
   });
 
   // ---- Send / Stop ----
-  // NOTE(isFirstTurn): This flag isn't reset after restore() re-renders
-  // prior history. The restored messages are displayed in the UI but the
-  // offscreen session has no knowledge of them (it holds a single
-  // long-lived context across tabs/URLs). The page-context prefix is only
-  // applied on the very first user turn of the lifetime of this content
-  // script. Cross-URL chat continuity needs a follow-up.
+  // NOTE(isFirstTurn): restore() now re-seeds the single shared offscreen
+  // session with this URL's restored history (see restore()), so the
+  // session DOES have conversational context for a restored page. We
+  // deliberately leave isFirstTurn = true after a re-seed: the restored
+  // turns give continuity, and the first new turn still prefixes the
+  // page-context block so the model is grounded in the CURRENT page. The
+  // prefix is therefore sent once per content-script lifetime per URL,
+  // which is the intended grounding behavior.
   let isFirstTurn = true;
   let activeAbort: AbortController | null = null;
 
   function makeActionButton(label: string): HTMLButtonElement {
     const btn = window.document.createElement('button');
     btn.textContent = label;
-    btn.style.cssText =
-      'padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
+    btn.style.cssText = BUTTON_CSS;
     return btn;
   }
 
@@ -257,7 +324,7 @@ export function initSession(deps: SessionDeps): void {
       undoBtn.disabled = true;
       if (result.ok) {
         undoBtn.textContent = 'Undone';
-        console.log('[local-nano] undo: restored original selection');
+        debugLog('[local-nano] undo: restored original selection');
       } else {
         undoBtn.textContent = 'Undo failed';
         console.warn(`[local-nano] undo failed: ${result.reason ?? 'unknown'}`);
@@ -281,11 +348,115 @@ export function initSession(deps: SessionDeps): void {
       askMode = false;
       updatePlaceholder();
       updateChip();
-      console.log('[local-nano] rewrite accepted; selection state reset');
+      debugLog('[local-nano] rewrite accepted; selection state reset');
     });
 
     bar.append(undoBtn, acceptBtn);
     modelBubble.appendChild(bar);
+  }
+
+  /**
+   * Shared stream-render-finalize lifecycle for the three send paths
+   * (chat/ask/rewrite). Owns the bubble + typing indicator, the
+   * `activeAbort`/`setGeneratingState` setup, the first-chunk reset, the
+   * `AbortError`/error `catch`, and the `finally` tail (indicator removal,
+   * empty-response fallback, push+persist model entry, `setIdleState`,
+   * `activeAbort` reset, `i.focus()`). The per-path differences — chat's
+   * first-turn warmup hint, the extra per-chunk hook, the success tail and
+   * its differing `recordSentTurn` gating, and ask's mode reset — are passed
+   * as explicit options so they read as deliberate, not accidental.
+   */
+  async function runStreamTurn(opts: {
+    /** The fully built prompt to stream (caller frames it). */
+    prompt: string;
+    /**
+     * A system bubble shown for the duration of the turn (chat's first-turn
+     * warmup hint). Removed on the first chunk and again in the finally.
+     */
+    preHint?: HTMLElement | null;
+    /**
+     * Extra per-chunk hook, run after the shared reset and before the
+     * cumulative text is appended. Chat logs first-token timing + removes
+     * the warmup hint; rewrite applies the chunk to the page Range.
+     */
+    onChunk?: (chunk: string) => void;
+    /**
+     * Per-path success tail, run once on a non-aborted stream. Receives the
+     * final model text, the prompt length, and the model bubble so each path
+     * models its own `recordSentTurn` gating (chat: always; ask: on success;
+     * rewrite: on non-empty) and any extra success-only work (rewrite's
+     * action bar, which attaches to the bubble).
+     */
+    onSuccess?: (modelText: string, promptLen: number, responseEl: HTMLElement) => void;
+    /**
+     * Always-run tail after the success/error handling, regardless of
+     * outcome (ask's one-shot mode reset). Runs inside the finally.
+     */
+    onFinally?: () => void;
+  }): Promise<void> {
+    const { prompt, preHint, onChunk: extraOnChunk, onSuccess, onFinally } = opts;
+    const responseEl = renderMessage(messages, 'model', '');
+    const indicator = makeTypingIndicator();
+    responseEl.appendChild(indicator);
+
+    activeAbort = new AbortController();
+    setGeneratingState(actionBtn, i);
+
+    let modelText = '';
+    let firstChunk = true;
+    const onChunk = (chunk: string) => {
+      if (firstChunk) {
+        if (preHint?.parentNode) preHint.remove();
+        responseEl.textContent = '';
+        firstChunk = false;
+      }
+      extraOnChunk?.(chunk);
+      modelText += chunk;
+      responseEl.textContent = modelText;
+      messages.scrollTop = messages.scrollHeight;
+    };
+    let succeeded = false;
+    try {
+      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+      succeeded = true;
+    } catch (err: unknown) {
+      const name = (err as { name?: unknown })?.name;
+      if (name === 'AbortError') {
+        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
+        responseEl.textContent = modelText;
+      } else {
+        modelText = err instanceof Error ? err.message : String(err);
+        responseEl.textContent = modelText;
+      }
+    } finally {
+      if (indicator.parentNode) indicator.remove();
+      if (preHint?.parentNode) preHint.remove();
+      if (!modelText) {
+        responseEl.textContent = '(no response — the model returned an empty answer)';
+      }
+      if (modelText) {
+        pushEntry({ role: 'model', text: modelText });
+        persist();
+      }
+      if (succeeded) {
+        // A throwing success tail (e.g. rewrite's DOM action-bar attach) must
+        // not skip the cleanup below, or the Send button stays stuck in the
+        // generating state and activeAbort dangles.
+        try {
+          onSuccess?.(modelText, prompt.length, responseEl);
+        } catch (e) {
+          console.error('[local-nano] onSuccess handler threw:', e);
+        }
+      }
+      setIdleState(actionBtn, i);
+      activeAbort = null;
+      try {
+        onFinally?.();
+      } catch (e) {
+        console.error('[local-nano] onFinally handler threw:', e);
+      }
+      i.focus();
+    }
   }
 
   async function sendChat(text: string): Promise<void> {
@@ -299,112 +470,46 @@ export function initSession(deps: SessionDeps): void {
       wasFirstTurn && !modelReady
         ? addMessage('system', 'Loading model… first response can take up to a minute.')
         : null;
-    const responseEl = renderMessage(messages, 'model', '');
-    const indicator = makeTypingIndicator();
-    responseEl.appendChild(indicator);
     const prompt = isFirstTurn ? `${pageContext(document, location)}\n\n---\n\n${text}` : text;
     isFirstTurn = false;
 
-    activeAbort = new AbortController();
-    setGeneratingState(actionBtn, i);
-
-    let modelText = '';
-    let firstChunk = true;
     const t0 = performance.now();
-    const onChunk = (chunk: string) => {
-      if (firstChunk) {
-        console.log(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
-        if (firstTurnHint?.parentNode) firstTurnHint.remove();
-        responseEl.textContent = '';
-        firstChunk = false;
-      }
-      modelText += chunk;
-      responseEl.textContent = modelText;
-      messages.scrollTop = messages.scrollHeight;
-    };
-    try {
-      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
-      console.log(
-        `[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms, chars=${modelText.length}, prompt.length=${prompt.length}`,
-      );
-      recordSentTurn(prompt.length, modelText.length);
-    } catch (err: unknown) {
-      const name = (err as { name?: unknown })?.name;
-      if (name === 'AbortError') {
-        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
-        responseEl.textContent = modelText;
-      } else {
-        modelText = err instanceof Error ? err.message : String(err);
-        responseEl.textContent = modelText;
-      }
-    } finally {
-      if (indicator.parentNode) indicator.remove();
-      if (firstTurnHint?.parentNode) firstTurnHint.remove();
-      if (!modelText) {
-        responseEl.textContent = '(no response — the model returned an empty answer)';
-      }
-      if (modelText) {
-        pushEntry({ role: 'model', text: modelText });
-        persist();
-      }
-      setIdleState(actionBtn, i);
-      activeAbort = null;
-      i.focus();
-    }
+    let loggedFirstToken = false;
+    await runStreamTurn({
+      prompt,
+      preHint: firstTurnHint,
+      onChunk: () => {
+        if (!loggedFirstToken) {
+          debugLog(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
+          loggedFirstToken = true;
+        }
+      },
+      // Chat records the turn unconditionally (the page-context prefix is
+      // already in the polyfill's history even on an error/abort).
+      onSuccess: (modelText, promptLen) => {
+        debugLog(
+          `[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms, chars=${modelText.length}, prompt.length=${promptLen}`,
+        );
+        recordSentTurn(promptLen, modelText.length);
+      },
+    });
   }
 
   async function sendAsk(instruction: string, snap: SelectionSnapshot): Promise<void> {
     addMessage('user', instruction);
-    const responseEl = renderMessage(messages, 'model', '');
-    const indicator = makeTypingIndicator();
-    responseEl.appendChild(indicator);
     const prompt = buildAskPrompt(snap, instruction);
 
-    activeAbort = new AbortController();
-    setGeneratingState(actionBtn, i);
-
-    let modelText = '';
-    let firstChunk = true;
-    const onChunk = (chunk: string) => {
-      if (firstChunk) {
-        responseEl.textContent = '';
-        firstChunk = false;
-      }
-      modelText += chunk;
-      responseEl.textContent = modelText;
-      messages.scrollTop = messages.scrollHeight;
-    };
-    let askSucceeded = false;
-    try {
-      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
-      askSucceeded = true;
-    } catch (err: unknown) {
-      const name = (err as { name?: unknown })?.name;
-      if (name === 'AbortError') {
-        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
-        responseEl.textContent = modelText;
-      } else {
-        modelText = err instanceof Error ? err.message : String(err);
-        responseEl.textContent = modelText;
-      }
-    } finally {
-      if (indicator.parentNode) indicator.remove();
-      if (!modelText) {
-        responseEl.textContent = '(no response — the model returned an empty answer)';
-      }
-      if (modelText) {
-        pushEntry({ role: 'model', text: modelText });
-        persist();
-      }
-      if (askSucceeded) recordSentTurn(prompt.length, modelText.length);
-      setIdleState(actionBtn, i);
-      activeAbort = null;
+    await runStreamTurn({
+      prompt,
+      // Ask only counts the turn when the stream actually completed.
+      onSuccess: (modelText, promptLen) => recordSentTurn(promptLen, modelText.length),
       // Ask mode is one-shot; reset to Edit for the next turn if the
-      // selection is still active.
-      askMode = false;
-      updatePlaceholder();
-      i.focus();
-    }
+      // selection is still active. Runs regardless of success.
+      onFinally: () => {
+        askMode = false;
+        updatePlaceholder();
+      },
+    });
   }
 
   async function sendRewrite(instruction: string, snap: SelectionSnapshot): Promise<void> {
@@ -418,57 +523,20 @@ export function initSession(deps: SessionDeps): void {
     const prompt = buildRewritePrompt(snap, instruction, softCap);
 
     addMessage('user', instruction);
-    const responseEl = renderMessage(messages, 'model', '');
-    const indicator = makeTypingIndicator();
-    responseEl.appendChild(indicator);
-
-    activeAbort = new AbortController();
-    setGeneratingState(actionBtn, i);
 
     const rewrite = streamRewriteIntoRange(snap);
-    let modelText = '';
-    let firstChunk = true;
-    let succeeded = false;
-    const onChunk = (chunk: string) => {
-      if (firstChunk) {
-        responseEl.textContent = '';
-        firstChunk = false;
-      }
-      rewrite.applyChunk(chunk);
-      modelText += chunk;
-      responseEl.textContent = modelText;
-      messages.scrollTop = messages.scrollHeight;
-    };
-    try {
-      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
-      succeeded = modelText.length > 0;
-    } catch (err: unknown) {
-      const name = (err as { name?: unknown })?.name;
-      if (name === 'AbortError') {
-        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
-        responseEl.textContent = modelText;
-      } else {
-        modelText = err instanceof Error ? err.message : String(err);
-        responseEl.textContent = modelText;
-      }
-    } finally {
-      if (indicator.parentNode) indicator.remove();
-      if (!modelText) {
-        responseEl.textContent = '(no response — the model returned an empty answer)';
-      }
-      if (modelText) {
-        pushEntry({ role: 'model', text: modelText });
-        persist();
-      }
-      if (succeeded) {
-        rewrite.finalize();
-        attachRewriteActions(responseEl, snap);
-        recordSentTurn(prompt.length, modelText.length);
-      }
-      setIdleState(actionBtn, i);
-      activeAbort = null;
-      i.focus();
-    }
+    await runStreamTurn({
+      prompt,
+      onChunk: (chunk) => rewrite.applyChunk(chunk),
+      // Rewrite attaches the Undo/Accept bar and records the turn only when
+      // a non-empty rewrite landed.
+      onSuccess: (modelText, promptLen, responseEl) => {
+        if (modelText.length > 0) {
+          attachRewriteActions(responseEl, snap);
+          recordSentTurn(promptLen, modelText.length);
+        }
+      },
+    });
   }
 
   async function send() {
@@ -536,8 +604,7 @@ export function initSession(deps: SessionDeps): void {
     );
     const btn = window.document.createElement('button');
     btn.textContent = 'Clear conversation';
-    btn.style.cssText =
-      'margin-top: 6px; padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
+    btn.style.cssText = `margin-top: 6px; ${BUTTON_CSS}`;
     btn.addEventListener('click', () => {
       bubble.remove();
       void clearConversation();
@@ -563,6 +630,9 @@ export function initSession(deps: SessionDeps): void {
       history = [];
       isFirstTurn = true;
       warnedAboutHistory = false;
+      // Re-enable persistence: the emptied history written by persist() below
+      // frees the per-URL storage entry, so the quota advisory no longer applies.
+      warnedAboutStorageQuota = false;
       resetSentTotals();
       // Wipe rendered bubbles. Leaves the panel empty so the next turn
       // shows up at the top — matches the user's expectation of "fresh
@@ -648,7 +718,7 @@ export function initSession(deps: SessionDeps): void {
       try {
         const info = await getGpuInfo();
         historyThreshold = deriveHistoryThreshold(info);
-        console.log(
+        debugLog(
           `[local-nano] history threshold: ${historyThreshold} (device=${info.device}, isFallback=${info.isFallback}, maxBufferSize=${info.maxBufferSize ?? 'n/a'}, configured=${info.configuredThreshold ?? 'n/a'})`,
         );
         const advisory = preflightWarning(info);

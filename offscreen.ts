@@ -18,18 +18,22 @@
  */
 
 import transformersConfig from './.env.json';
+import { debugLog } from './src/debug.js';
+import { BusyGate } from './src/offscreen/busy-gate.js';
+import { classifyOffscreenMessage } from './src/offscreen/dispatch.js';
 import {
   COUNT_TOKENS_RESPONSE,
+  type CountTokensRequest,
   type CountTokensResponse,
   GPU_INFO_RESPONSE,
   type GpuInfoResponse,
   type HistoryTurn,
   isCountTokensRequest,
-  isGpuInfoRequest,
   isRebuildSessionRequest,
   isStreamAbort,
   isStreamRequest,
   REBUILD_SESSION_RESPONSE,
+  type RebuildSessionRequest,
   type RebuildSessionResponse,
   STREAM_CHUNK,
   STREAM_DONE,
@@ -57,6 +61,14 @@ const SYSTEM_INSTRUCTION = 'You are a helpful assistant. Answer concisely and di
 let heavyPromise: Promise<LoadedHeavy> | null = null;
 let sessionPromise: Promise<LanguageModelSession> | null = null;
 
+// One generation at a time against the single shared session. The
+// polyfill mutates one `#history`; two ports streaming concurrently would
+// interleave on one ONNX generator and corrupt that history, so a second
+// `stream/request` is rejected with a busy error rather than queued
+// (reject-when-busy is YAGNI-sufficient for a single-user extension). The
+// gate is module-scoped because the session it guards is module-scoped.
+const generationGate = new BusyGate();
+
 function loadHeavy(): Promise<LoadedHeavy> {
   if (heavyPromise) return heavyPromise;
   heavyPromise = (async () => {
@@ -69,7 +81,7 @@ function loadHeavy(): Promise<LoadedHeavy> {
       (tfMod.env as unknown as OnnxWasmEnv).backends.onnx.wasm.wasmPaths = ortPath;
       (tfMod.env as unknown as OnnxWasmEnv).backends.onnx.wasm.numThreads = 1;
       (window as unknown as Record<string, unknown>).TRANSFORMERS_CONFIG = transformersConfig;
-      console.log('[local-nano/offscreen] heavy modules loaded; ORT wasmPaths =', ortPath);
+      debugLog('[local-nano/offscreen] heavy modules loaded; ORT wasmPaths =', ortPath);
       return {
         LanguageModel: (
           polyfillMod as unknown as {
@@ -209,8 +221,9 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (!isGpuInfoRequest(msg)) return false;
+type SendResponse = (response: unknown) => void;
+
+function handleGpuInfo(sendResponse: SendResponse): void {
   collectGpuInfo().then(
     (reply) => sendResponse(reply),
     (err: unknown) => {
@@ -219,11 +232,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse(fail);
     },
   );
-  return true;
-});
+}
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (!isRebuildSessionRequest(msg)) return false;
+function handleRebuildSession(msg: RebuildSessionRequest, sendResponse: SendResponse): void {
   rebuildSession(msg.history).then(
     () => {
       const ok: RebuildSessionResponse = { type: REBUILD_SESSION_RESPONSE, ok: true };
@@ -239,14 +250,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse(fail);
     },
   );
-  return true;
-});
+}
 
 // Count-tokens channel. Best-effort: failures here do not destroy or
 // rebuild the session — the client side has a heuristic fallback so a
 // slow or broken count never blocks a transform.
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (!isCountTokensRequest(msg)) return false;
+function handleCountTokens(msg: CountTokensRequest, sendResponse: SendResponse): void {
   (async () => {
     try {
       const session = await ensureSession();
@@ -263,7 +272,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse(fail);
     }
   })();
-  return true;
+}
+
+// Single dispatcher for the three request channels. Three sibling
+// listeners each returning false for non-owned messages risk the MV3
+// sendResponse race: a false-returning listener can close the channel
+// before the async owner replies. This listener returns true only when
+// it owns the message (keeping the async channel open) and false for
+// everything else, letting other contexts' listeners field their own
+// messages.
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  const kind = classifyOffscreenMessage(msg);
+  if (!kind) return false;
+  switch (kind) {
+    case 'gpu-info':
+      handleGpuInfo(sendResponse);
+      return true;
+    case 'rebuild-session':
+      if (isRebuildSessionRequest(msg)) handleRebuildSession(msg, sendResponse);
+      return true;
+    case 'count-tokens':
+      if (isCountTokensRequest(msg)) handleCountTokens(msg, sendResponse);
+      return true;
+  }
 });
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -282,6 +313,25 @@ chrome.runtime.onConnect.addListener((port) => {
     if (!isStreamRequest(raw)) return;
 
     const id = raw.id;
+
+    // Reject a second concurrent generation on the shared session. Done
+    // before allocating the controller / read loop so a busy request is a
+    // clean no-op aside from the StreamDone reply.
+    if (!generationGate.tryAcquire()) {
+      const busy: StreamDone = {
+        type: STREAM_DONE,
+        id,
+        ok: false,
+        error: 'busy: another generation is in progress',
+      };
+      try {
+        port.postMessage(busy);
+      } catch {
+        // Caller gone — nothing to deliver.
+      }
+      return;
+    }
+
     const controller = new AbortController();
     activeAborts.set(id, controller);
 
@@ -290,7 +340,7 @@ chrome.runtime.onConnect.addListener((port) => {
       let chunkCount = 0;
       let totalChars = 0;
       try {
-        console.log(
+        debugLog(
           `[local-nano/offscreen] stream/request id=${id} prompt.length=${raw.prompt.length}`,
         );
         const session = await ensureSession();
@@ -315,7 +365,7 @@ chrome.runtime.onConnect.addListener((port) => {
         } finally {
           reader.releaseLock();
         }
-        console.log(
+        debugLog(
           `[local-nano/offscreen] stream/done id=${id} chunks=${chunkCount} chars=${totalChars} sessionMs=${tSession.toFixed(0)} totalMs=${(performance.now() - t0).toFixed(0)}`,
         );
         const done: StreamDone = controller.signal.aborted
@@ -342,6 +392,10 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       } finally {
         activeAborts.delete(id);
+        // Free the single generation slot on every outcome — success,
+        // error, and abort/disconnect (disconnect aborts the controller,
+        // which ends the read loop and runs this finally).
+        generationGate.release();
       }
     })();
   });
@@ -352,4 +406,4 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-console.log('[local-nano/offscreen] listener ready');
+debugLog('[local-nano/offscreen] listener ready');

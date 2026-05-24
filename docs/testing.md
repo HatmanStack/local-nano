@@ -11,17 +11,25 @@ npm run coverage  # with v8 coverage report and threshold enforcement
 
 We deliberately stick to **unit tests**. There is no end-to-end harness — wiring up a Chrome extension under Playwright or similar would add a lot of moving parts to validate behavior that's already exercised by manual smoke tests during development.
 
-Tests target the modules under `src/`, which hold the testable logic extracted from `content.ts` and `background.ts`:
+Tests target the modules under `src/`, which hold the testable logic extracted from the `content.ts`, `background.ts`, and `offscreen.ts` entry points:
 
-| Test file                          | Covers                                       |
-| ---------------------------------- | -------------------------------------------- |
-| `tests/history.test.ts`            | `storageKey`, `loadHistory`, `saveHistory`   |
-| `tests/pageContext.test.ts`        | `pageContext` (truncation, whitespace, format) |
-| `tests/system.test.ts`             | `SYSTEM_INSTRUCTION` shape                   |
-| `tests/ui-messages.test.ts`        | `renderMessage`, `makeTypingIndicator` (XSS-safety, alignment, scroll) |
-| `tests/ui-state.test.ts`           | Send/Stop button state transitions           |
-| `tests/background-handler.test.ts` | Command handler (toggle, ignore unknown, no-id) |
-| `tests/session.test.ts`            | `initSession` — session lifecycle, streaming, abort, toggle, concurrency |
+| Test file                            | Covers                                       |
+| ------------------------------------ | -------------------------------------------- |
+| `tests/history.test.ts`              | `storageKey`, `loadHistory`, `saveHistory`, per-element validation |
+| `tests/pageContext.test.ts`          | `pageContext` (slice-before-collapse window, truncation, whitespace, format) |
+| `tests/selection-rewrite.test.ts`    | Selection constants and `isSupportedSelection` |
+| `tests/ui-messages.test.ts`          | `renderMessage`, `makeTypingIndicator` (XSS-safety, alignment, scroll) |
+| `tests/ui-state.test.ts`             | Send/Stop button state transitions           |
+| `tests/debug.test.ts`                | `debugLog` gating behind the DEBUG flag      |
+| `tests/background-handler.test.ts`   | Command handler (toggle, ignore unknown, no-id) |
+| `tests/background-offscreen.test.ts` | `ensureOffscreen` document lifecycle         |
+| `tests/session.test.ts`              | `initSession` — lifecycle, streaming, abort, toggle, restore re-seed, quota advisory |
+| `tests/stream-client.test.ts`        | `streamOverPort` port wiring and chunk accumulation |
+| `tests/offscreen-client.test.ts`     | `streamPrompt` content-script client over the SW |
+| `tests/offscreen-protocol.test.ts`   | Wire-message discriminators and finiteness guards |
+| `tests/offscreen-dispatch.test.ts`   | `classifyOffscreenMessage` listener routing  |
+| `tests/offscreen-busy-gate.test.ts`  | `BusyGate` concurrent-stream rejection       |
+| `tests/docs-config.test.ts`          | Doc cross-references and test-file table drift |
 
 ## Coverage
 

@@ -3,9 +3,41 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { pipeline, TextStreamer, env } from '@huggingface/transformers';
+import {
+  pipeline,
+  StoppingCriteria,
+  TextStreamer,
+  env,
+} from '@huggingface/transformers';
 import PolyfillBackend from './base.js';
 import { DEFAULT_MODELS } from './defaults.js';
+
+// LOCAL DELTA (local-nano): translate an AbortSignal into a transformers.js
+// stopping criterion so "Stop" halts ONNX decoding at the next step rather
+// than letting generation run to max_new_tokens in the background. Built
+// behind a guard (buildSignalStopCriteria) so an unsupported/absent
+// StoppingCriteria API degrades to current behavior and never throws.
+// Re-apply on upstream resync (see docs/prompt-api.md).
+function buildSignalStopCriteria(signal) {
+  if (!signal) return null;
+  try {
+    if (typeof StoppingCriteria !== 'function') return null;
+    class SignalStoppingCriteria extends StoppingCriteria {
+      // Returns one boolean per batch sequence; once the signal aborts,
+      // every sequence stops at the next decode step.
+      _call(input_ids) {
+        const stop = !!signal.aborted;
+        return input_ids.map(() => stop);
+      }
+    }
+    return new SignalStoppingCriteria();
+  } catch {
+    // Any incompatibility (no Callable base, changed shape) → no criterion,
+    // generation runs as it does today and the consumer loop's stream.return()
+    // remains the only stop. Never throw a new error here.
+    return null;
+  }
+}
 
 /**
  * Transformers.js (ONNX Runtime) Backend
@@ -192,9 +224,12 @@ export default class TransformersBackend extends PolyfillBackend {
   /**
    * Generates content stream.
    * @param {Array} contents - The history + new content.
+   * @param {AbortSignal} [signal] - LOCAL DELTA (local-nano): when given,
+   *   threaded into the generator as a stopping criterion so Stop halts
+   *   decoding. Optional; omitting it is byte-identical to upstream.
    * @returns {Promise<AsyncIterable>} Stream of chunks.
    */
-  async generateContentStream(contents) {
+  async generateContentStream(contents, signal) {
     const generator = await this.#ensureGenerator();
     const messages = this.#contentsToMessages(contents);
 
@@ -224,10 +259,18 @@ export default class TransformersBackend extends PolyfillBackend {
       callback_function: on_token_callback,
     });
 
+    // LOCAL DELTA (local-nano): only attach stopping_criteria when an abort
+    // signal is present and the API supports it. When absent the options
+    // object is byte-identical to upstream, so the no-signal path is
+    // unchanged.
+    const signalStopCriteria = buildSignalStopCriteria(signal);
     const generationPromise = generator(prompt, {
       ...this.generationConfig,
       add_special_tokens: false,
       streamer,
+      ...(signalStopCriteria
+        ? { stopping_criteria: signalStopCriteria }
+        : {}),
     });
 
     generationPromise

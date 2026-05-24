@@ -15,7 +15,7 @@ cp .env.example.json .env.json
 }
 ```
 
-The file is imported directly by `content.ts` at build time and passed to the polyfill as `window.TRANSFORMERS_CONFIG`.
+The file is imported by the offscreen document (`offscreen.ts`, where the model runs) and assigned to `window.TRANSFORMERS_CONFIG` for the polyfill. The content script never reads it.
 
 ## Fields
 
@@ -40,6 +40,10 @@ Where inference runs.
 
 If WebGPU isn't available the polyfill will surface an error in the chat panel; switch to `"wasm"` in that case.
 
+#### Preflight device-capability advisory
+
+When the panel opens, the extension queries the WebGPU adapter before the heavy model load. If it finds no hardware WebGPU adapter (a software fallback) or an adapter whose max buffer size looks too small to hold the model, it shows a one-time "Heads up…" system message in the chat advising you to set `"device": "wasm"` in `.env.json` (CPU — slower but reliable). The advisory is informational only: the load is still attempted, since the capability snapshot can false-negative. If the load then fails, the advisory tells you what to try.
+
 ### `dtype` (string)
 
 Quantization level for model weights. Smaller dtypes mean smaller download, lower memory, and slightly worse quality. Common values:
@@ -52,7 +56,7 @@ Not every model publishes every variant — check the model's `onnx/` folder on 
 
 ### `apiKey` (string)
 
-Unused by the Transformers.js backend. Kept in the shape because the upstream polyfill supports cloud backends (firebase / gemini / openai) that need real keys; the slimmed `backends-registry.js` in this repo only ships the Transformers.js backend.
+A placeholder. The vendored polyfill **does** read this field (`prompt-api-polyfill.js:189`, `if (config && config.apiKey)`), but the Transformers.js backend ignores it — there is no cloud call to authenticate. The `"dummy"` value is a deliberate placeholder that the polyfill reads and the backend never uses. It exists because the upstream polyfill supports cloud backends (firebase / gemini / openai) that need real keys; the slimmed `backends-registry.js` in this repo only ships the Transformers.js backend, so keep it as `"dummy"`.
 
 ### `historyTokenWarnThreshold` (number, optional)
 
@@ -73,7 +77,7 @@ The shortcut isn't in `.env.json` — it's in `manifest.json` under `commands.to
 
 ## Other knobs
 
-The polyfill itself accepts an `env` block that maps onto Transformers.js's `env` object (e.g., `allowRemoteModels`, custom wasm paths). For the full list of Transformers.js-level settings the polyfill accepts, see `vendor/prompt-api-polyfill/dot_env.json` — it is a **reference template only** and is not read at runtime. All live configuration comes from your `.env.json`.
+The polyfill itself accepts an `env` block that maps onto Transformers.js's `env` object (e.g., `allowRemoteModels`, custom wasm paths). That `env` block is not read at runtime — all live configuration comes from your `.env.json`. For the backend-level defaults the polyfill applies when a field is absent, see `vendor/prompt-api-polyfill/backends/defaults.js` (covered under "Default fallback layer" below).
 
 ## Default fallback layer
 

@@ -2,7 +2,7 @@
 
 `local-nano` is built around the **Prompt API** — an early-stage W3C explainer for a browser-native `LanguageModel` interface that lets pages run on-device LLMs without writing a model runtime themselves. Chrome ships an experimental implementation on Chromebook Plus hardware (gated behind a feature flag); other browsers don't have it yet. Until that situation changes, we provide the same `LanguageModel` global via a polyfill backed by Transformers.js + ONNX Runtime Web.
 
-The upshot is that the application code in `content.ts` looks like it's calling a browser API, and the day a browser actually ships one this extension can switch to it with minimal changes.
+The upshot is that the application code in the offscreen document (`offscreen.ts`) looks like it's calling a browser API, and the day a browser actually ships one this extension can switch to it with minimal changes.
 
 ## Upstream project
 
@@ -23,7 +23,10 @@ When pulling from upstream, these edits need to carry forward:
 
 - **`backends-registry.js`** — slimmed to the Transformers.js backend only. Firebase / Gemini / OpenAI / WebLLM backends are removed so esbuild doesn't chase their transitive deps and so there's no code path that could reach a cloud LLM provider (a privacy-story claim — see [`docs/privacy.md`](privacy.md)).
 - **`backends/` directory** — only `base.js`, `defaults.js`, and `transformers.js` are kept on disk; the others are deleted, not just unregistered.
-- **`prompt-api-polyfill.js`** — the iframe-injection block was removed. Upstream patches `HTMLIFrameElement.prototype.contentWindow` and installs a `MutationObserver` on `documentElement` to inject itself into iframes. In a content-script context that's unnecessary (the extension can be configured to inject directly into iframes via the manifest) and very expensive on SPAs with frequent DOM mutations — every page mutation woke the observer.
+- **`prompt-api-polyfill.js`** — the iframe-injection block was removed. Upstream patches `HTMLIFrameElement.prototype.contentWindow` and installs a `MutationObserver` on `documentElement` to inject itself into iframes. In the offscreen-document context that's unnecessary and was very expensive on SPAs with frequent DOM mutations — every page mutation woke the observer.
+- **`prompt-api-polyfill.js`** — `get contextWindow()` returns `131072` (the gemma-4-E2B-it-ONNX ~128K window), not the upstream `1000000`. The upstream literal was so far above the real model limit that the built-in overflow guard never fired near the true boundary. See `prompt-api-polyfill.js:103-112`.
+- **`prompt-api-polyfill.js`** — `promptStreaming` threads the caller's `options.signal` into `generateContentStream(requestContents, signal)` (`prompt-api-polyfill.js:949-955`) so Stop halts ONNX decoding, not just the consumer loop. Additive and degrade-safe.
+- **`backends/transformers.js`** — `generateContentStream(contents, signal)` accepts the abort signal and attaches it as a `stopping_criteria` to the `generator(...)` call (`transformers.js:21-33,227-272`). Guarded: if `StoppingCriteria` is unavailable it returns null and behavior degrades to upstream; the no-signal options object is byte-identical to upstream.
 - **`backends/transformers.js`** — `max_new_tokens` raised from 1024 to 2048. See [`docs/models.md`](models.md#on-max_new_tokens) for the tradeoff.
 
 ## Resync procedure
@@ -41,6 +44,10 @@ When pulling a new upstream commit of the polyfill:
 
 1. Search for `HTMLIFrameElement.prototype` or `MutationObserver` near the top; delete the iframe-injection block if present (removed to prevent SPA performance regressions — see ADR in `docs/architecture.md`).
 
+1. Re-apply the `get contextWindow()` delta: set the return to `131072` (was `1000000` upstream) so the built-in `contextoverflow` guard fires near the real model boundary.
+
+1. Re-apply the abort-signal delta in `promptStreaming`: pass the caller's `options.signal` into the backend call (`generateContentStream(requestContents, signal)`).
+
 1. Download `backends/transformers.js` from upstream:
 
    ```bash
@@ -50,13 +57,15 @@ When pulling a new upstream commit of the polyfill:
 
 1. In `backends/transformers.js`, verify `max_new_tokens` is 2048; raise it if the upstream reset it to 1024.
 
+1. Re-apply the abort-signal delta in `backends/transformers.js`: make `generateContentStream` accept a second `signal` argument and attach it as a `stopping_criteria` (guarded so a transformers.js version without `StoppingCriteria` degrades to current behavior, never throws).
+
 1. Verify `backends-registry.js` still only registers the `'transformers'` backend.
 
-1. Run `npm run build` and smoke-test the extension in Chrome. Confirm `[local-nano] heavy modules loaded` appears in the console.
+1. Run `npm run build` and smoke-test the extension in Chrome. Confirm `[local-nano/offscreen] heavy modules loaded` appears in the offscreen document's console.
 
 ## How it's wired in
 
-[`content.ts`](../content.ts) lazy-imports the polyfill alongside `@huggingface/transformers` on first hotkey toggle:
+[`offscreen.ts`](../offscreen.ts) lazy-imports the polyfill alongside `@huggingface/transformers` on the first stream request (`offscreen.ts:76-79`):
 
 ```ts
 const [tfMod, polyfillMod] = await Promise.all([
@@ -65,21 +74,23 @@ const [tfMod, polyfillMod] = await Promise.all([
 ]);
 ```
 
+The content script never loads these modules; it streams to the offscreen session over a `chrome.runtime.Port`.
+
 The polyfill installs itself onto `globalThis.LanguageModel` at module load. We use the `LanguageModel` class exported directly from the module — not the global — so we never accidentally pick up a gated native implementation on hardware where it exists but doesn't actually run.
 
-Configuration flows through the polyfill via `window.TRANSFORMERS_CONFIG`, which `content.ts` populates from [`.env.json`](../.env.example.json). The polyfill's Transformers backend reads `device`, `dtype`, and `modelName` from there.
+Configuration flows through the polyfill via `window.TRANSFORMERS_CONFIG`, which the offscreen document populates: `offscreen.ts:20` does `import transformersConfig from './.env.json'` and `offscreen.ts:83` assigns it to `window.TRANSFORMERS_CONFIG`. The polyfill's Transformers backend reads `device`, `dtype`, and `modelName` from there. The content script does not touch the config.
 
-The session itself is created once on first toggle and reused across every conversation turn:
+The session itself is created once (`ensureSession`) and reused across every conversation turn and every tab:
 
 - `expectedInputs` / `expectedOutputs` advertise text-only English to the polyfill.
-- `initialPrompts: [{ role: 'system', content: SYSTEM_INSTRUCTION }]` seeds the system instruction from [`src/system.ts`](../src/system.ts). The polyfill normalizes the system role across model families — for Gemma (which has no native system role) it merges the content into the first user turn.
-- `monitor(target)` receives `downloadprogress` events while weights stream in. The polyfill normalizes `e.loaded` to a 0–1 fraction; that's what drives the `Loading model… NN%` status.
+- `initialPrompts` seeds a system turn with the hardcoded literal in `offscreen.ts:59` — `'You are a helpful assistant. Answer concisely and directly.'` — followed by any restored history turns (`buildInitialPrompts`, `offscreen.ts:100`). The polyfill normalizes the system role across model families — for Gemma (which has no native system role) it merges the content into the first user turn.
+- There is no `monitor`/`downloadprogress` wiring and no percentage UI. While the model loads, the content-script chat layer shows a live elapsed-seconds counter — `'Loading model… 0s'` ticking up `Loading model… ${secs}s` (`src/session.ts:682-690`) — and after ~45s it appends "taking longer than usual" remedies. The polyfill backend still emits download progress internally, but the app does not consume it.
 
-Every user turn calls `session.promptStreaming(input, { signal })`, returning a `ReadableStream` of string chunks that we append to the DOM in real time. The `AbortController` wired to the Stop button cancels mid-generation.
+Every turn calls `session.promptStreaming(input, { signal })` in the offscreen document, returning a `ReadableStream` of string chunks that are posted over the port and appended to the DOM in real time. The `AbortController` wired to the Stop button cancels mid-generation; the signal is threaded into the offscreen generator so decoding actually halts.
 
 ## When native lands
 
-The polyfill's install guard skips globalThis assignment when a native `LanguageModel` is already present. This extension bypasses that guard entirely — `content.ts` imports and uses the module-exported `LanguageModel` directly, so behavior is identical on Chromebook Plus and on every other Chrome. That's deliberate — a consistent model across machines is more valuable for now than a marginal performance win on a narrow hardware tier.
+The polyfill's install guard skips globalThis assignment when a native `LanguageModel` is already present. This extension bypasses that guard entirely — the offscreen document imports and uses the module-exported `LanguageModel` directly, so behavior is identical on Chromebook Plus and on every other Chrome. That's deliberate — a consistent model across machines is more valuable for now than a marginal performance win on a narrow hardware tier.
 
 Once native is widely available, the natural change is to gate the polyfill load behind a real availability check:
 

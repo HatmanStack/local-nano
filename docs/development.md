@@ -41,20 +41,27 @@ This runs esbuild in watch mode. After each save, refresh the extension at `chro
 
 - **Content script logs.** Open DevTools on the page itself. The extension prefixes everything with `[local-nano]`.
 - **Service worker logs.** Click the **service worker** link on the extension's card at `chrome://extensions`. That opens a dedicated DevTools for the worker.
+- **Offscreen document logs.** The model runs in a hidden offscreen document. Its logs (prefixed `[local-nano/offscreen]`, including `heavy modules loaded`) appear in the offscreen document's own DevTools, reachable from `chrome://extensions` → the extension's **Inspect views** list (look for `offscreen.html`).
 - **Storage.** Inspect persisted chat history at DevTools → Application → Storage → Extension Storage.
-- **Model download progress.** The panel shows `Loading model… NN%` while weights are coming down. If you see a permission error, the host permissions in `manifest.json` are the place to look — Transformers.js fetches from `huggingface.co` and `cdn-lfs.huggingface.co`.
+- **Model load progress.** While the model loads the panel shows a live elapsed-seconds counter (`Loading model… Ns`), not a percentage; after ~45s it appends "taking longer than usual" remedies. If you see a permission error, the host permissions in `manifest.json` are the place to look — Transformers.js fetches from `huggingface.co` and `cdn-lfs.huggingface.co`.
 
 ## Project layout
 
 ```text
 .
 ├── background.ts          # MV3 service worker entry
-├── content.ts             # Content script entry — DOM + session glue
+├── content.ts             # Content script entry — chat UI / DOM glue
+├── offscreen.ts           # Offscreen document entry — hosts the model session
+├── offscreen.html         # Offscreen document shell
 ├── src/
-│   ├── background/handler.ts
+│   ├── background/
+│   │   ├── handler.ts
+│   │   └── offscreen.ts   # Service-worker side of the offscreen lifecycle
+│   ├── offscreen/         # client, protocol, stream-client, dispatch, busy-gate
+│   ├── selection-rewrite.ts
+│   ├── session.ts         # Content-script chat session lifecycle
 │   ├── history.ts
 │   ├── pageContext.ts
-│   ├── system.ts
 │   └── ui/
 │       ├── messages.ts
 │       └── state.ts
@@ -65,6 +72,8 @@ This runs esbuild in watch mode. After each save, refresh the extension at `chro
 └── .env.example.json      # Template for .env.json
 ```
 
+(Representative, not exhaustive.)
+
 ## A word on the bundle size
 
-`dist/content.js` is ~1.5 MB because it inlines the Transformers.js runtime. That's expected. The model weights themselves are much larger and are fetched at runtime from Hugging Face, not bundled.
+`dist/offscreen.js` is ~1.5 MB because it inlines the Transformers.js runtime — the model now runs in the offscreen document, so that is where the heavy code lands. `dist/content.js` is thin (~41 KB), the per-page chat-UI script. That split is expected. The model weights themselves are much larger and are fetched at runtime from Hugging Face, not bundled.

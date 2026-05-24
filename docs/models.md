@@ -8,8 +8,8 @@ This page captures what we've actually tried — model by model, dtype by dtype,
 
 | Hardware                                  | Recommended config                                                                                            |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Modern WebGPU (Iris Xe, M-series, RTX)    | `device: "webgpu"`, `dtype: "q4"`, `modelName: "onnx-community/gemma-4-E2B-it-ONNX"`                          |
-| WebGPU but quirky (older Intel, drivers)  | `device: "webgpu"`, `dtype: "q4"`, `modelName: "onnx-community/Qwen3.5-0.8B-ONNX"`                            |
+| Modern WebGPU (Iris Xe, M-series, RTX)    | `device: "webgpu"`, `dtype: "q4f16"`, `modelName: "onnx-community/gemma-4-E2B-it-ONNX"`                       |
+| WebGPU but quirky (older Intel, drivers)  | `device: "webgpu"`, `dtype: "q4f16"`, `modelName: "onnx-community/Qwen3.5-0.8B-ONNX"`                         |
 | No WebGPU (WASM CPU only)                 | `device: "wasm"`, `dtype: "q8"`, `modelName: "onnx-community/Qwen2.5-0.5B-Instruct"`                          |
 
 The rest of this doc explains *why* those particular cells.
@@ -26,7 +26,7 @@ What's still viable:
 
 - **Stick to ≤1B-parameter models.** Qwen2.5-0.5B-Instruct is the sweet spot in our testing — it runs without tripping the heap, gives coherent answers, and finishes prompts in tens of seconds rather than minutes.
 - **Prefer `q8` or `fp16` dtypes.** Both avoid `GatherBlockQuantized`. q8 is smaller (~500 MB for a 0.5B model); fp16 is bigger (~1 GB) but slightly more numerically stable.
-- **Expect 1–3 tokens/second.** Real-world. The first token of a response also has a long prefill cost — for ~1500 chars of page context that's roughly 30–60 seconds of work before output starts. The panel shows a three-dot animation while generating and `Loading model… NN%` during weight download.
+- **Expect 1–3 tokens/second.** Real-world. The first token of a response also has a long prefill cost — for ~1500 chars of page context that's roughly 30–60 seconds of work before output starts. The panel shows a three-dot animation while generating; while the model loads it shows a live elapsed-seconds counter (`Loading model… Ns`) rather than a percentage, since the app does not consume download-progress events.
 
 Configure it as:
 
@@ -97,15 +97,16 @@ Captured in roughly the order we hit them so the rationale is visible.
 | `onnx-community/Qwen3.5-0.8B-ONNX`                 | wasm + q4 / q4f16 / q8      | `GatherBlockQuantized` missing in WASM kernel; all three variants fail |
 | `onnx-community/Qwen3.5-0.8B-ONNX`                 | wasm + per-component dtype  | Works with `{embed_tokens: "fp16", decoder_model_merged: "q8"}`, but slow (~50s TTFT for 1500-char context) |
 | `onnx-community/Qwen3.5-0.8B-ONNX`                 | webgpu + q4f16, Intel Iris Xe | Numerical breakdown — model emits a few real tokens then loops one repeated token (`!!!!!`). Driver/precision issue with f16 on this GPU. |
-| `onnx-community/Qwen3.5-0.8B-ONNX`                 | webgpu + q4                 | ✅ Works on Iris Xe; ~15–40 tok/s.                                      |
-| `onnx-community/gemma-4-E2B-it-ONNX`               | webgpu + q4                 | ✅ Smarter than Qwen3.5-0.8B; ~5–15 tok/s on Iris Xe. ~1.5 GB download. Current default. |
+| `onnx-community/Qwen3.5-0.8B-ONNX`                 | webgpu + q4                 | ✅ Worked on Iris Xe historically; ~15–40 tok/s. See the `q4` SIGILL caveat below — `q4f16` is now preferred. |
+| `onnx-community/gemma-4-E2B-it-ONNX`               | webgpu + q4                 | ✅ Smarter than Qwen3.5-0.8B; ~5–15 tok/s on Iris Xe. ~1.5 GB download. (Historical `q4` observation.) |
+| `onnx-community/gemma-4-E2B-it-ONNX`               | webgpu + q4f16              | ✅ Current default. Moved off `q4` after the `q4` ONNX kernel hit a `SIGILL` on some Chrome/Dawn builds (see [configuration.md](configuration.md) and CHANGELOG 0.2.4). |
 
 ## Failure modes worth recognizing
 
 - **Integer "exception" (e.g., `Error: 12077640`).** Emscripten panic in the WASM ONNX runtime. Almost always memory pressure — bigger model than the heap can hold, or KV cache outgrowing it during long generation. Drop to a smaller model or a smaller `max_new_tokens`.
 - **`Could not find an implementation for X` errors.** ONNX op missing in the active execution provider. See [ONNX op compatibility](#onnx-op-compatibility). If `X` isn't `GatherBlockQuantized`, the same workaround pattern applies: change dtype to dodge the op.
 - **Streaming arrives as one giant chunk instead of token-by-token.** Usually means the model is degenerate (looping on one token), and `TextStreamer`'s UTF-8 boundary heuristic collapses the run into one flush. The streaming code is fine; the model is broken. Try a different dtype or a different model.
-- **`The feature flag gating model execution was disabled` (NotAllowedError).** This is Chrome's *native* `LanguageModel` API rejecting because you're not on Chromebook Plus / equivalent. The polyfill's install guard would skip installation if native `LanguageModel` were present. This extension bypasses the guard by importing `LanguageModel` from the polyfill module directly — see [`src/session.ts`](../src/session.ts) for the import. The extension always uses the polyfill.
+- **`The feature flag gating model execution was disabled` (NotAllowedError).** This is Chrome's *native* `LanguageModel` API rejecting because you're not on Chromebook Plus / equivalent. The polyfill's install guard would skip installation if native `LanguageModel` were present. This extension bypasses the guard by importing `LanguageModel` from the polyfill module directly in the offscreen document — see [`offscreen.ts`](../offscreen.ts) for the import. The extension always uses the polyfill.
 
 ## On `max_new_tokens`
 
