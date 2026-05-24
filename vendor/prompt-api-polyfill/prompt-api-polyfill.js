@@ -938,8 +938,13 @@ export class LanguageModel extends EventTarget {
 
           let stream;
           try {
+            // LOCAL DELTA (local-nano): pass the caller's AbortSignal into
+            // the backend so Stop halts ONNX decoding, not just the consumer
+            // loop below. Additive + degrade-safe: a backend that ignores the
+            // second argument behaves exactly as before. Re-apply on upstream
+            // resync (see docs/prompt-api.md).
             stream =
-              await _this.#backend.generateContentStream(requestContents);
+              await _this.#backend.generateContentStream(requestContents, signal);
           } catch (error) {
             _this.#handleBackendError(error, parts);
             throw error;
