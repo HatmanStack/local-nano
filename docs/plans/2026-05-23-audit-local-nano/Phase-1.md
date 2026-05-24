@@ -152,10 +152,10 @@ nothing in this repo (`health` finding 18).
 
 **Verification Checklist:**
 
-- `vendor/prompt-api-polyfill/dot_env.json` does not exist.
-- `grep -rn "dot_env" .` returns only the `docs/configuration.md` mention
+- [x] `vendor/prompt-api-polyfill/dot_env.json` does not exist.
+- [x] `grep -rn "dot_env" .` returns only the `docs/configuration.md` mention
   (which Phase-7 removes) and possibly this plan.
-- `npm run build` succeeds (nothing imported it).
+- [x] `npm run build` succeeds (nothing imported it).
 
 **Testing Instructions:** No test. `npm run build` and `npm run typecheck` green.
 
@@ -193,8 +193,8 @@ a git-history problem — a plain file delete, no `git` action.
 
 **Verification Checklist:**
 
-- `web-store/local-nano-v0.2.3.zip` is gone.
-- `git status` shows no change related to it (it was never tracked).
+- [x] `web-store/local-nano-v0.2.3.zip` is gone.
+- [x] `git status` shows no change related to it (it was never tracked).
 
 **Testing Instructions:** None.
 
@@ -204,10 +204,10 @@ wanted, or skip — there is nothing to commit.
 
 ## Phase Verification
 
-- `src/system.ts`, `tests/system.test.ts`,
+- [x] `src/system.ts`, `tests/system.test.ts`,
   `vendor/prompt-api-polyfill/dot_env.json`, and the stale zip are all gone.
-- No `finalize` reference remains in source.
-- `npm run typecheck`, `npm run coverage`, `npm run build`, and
+- [x] No `finalize` reference remains in source.
+- [x] `npm run typecheck`, `npm run coverage`, `npm run build`, and
   `npm run lint:ci` all pass.
 
 Integration points: Phase-7 (docs) depends on Tasks 1.1 and 1.3 being done so it
