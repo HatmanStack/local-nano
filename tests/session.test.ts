@@ -575,6 +575,34 @@ describe('initSession — toggle behavior', () => {
     }
   });
 
+  it('embeds the full ladder path with per-tier outcomes, the chosen model, and the UA in the terminal diagnostic', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      // Reject every tier so the whole primary ladder is walked and recorded.
+      warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      const terminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      const txt = terminal?.textContent ?? '';
+      // The chosen model is named.
+      expect(txt).toContain('chosenModel: onnx-community/gemma-4-E2B-it-ONNX');
+      // Every attempted tier is listed with its load-failure outcome.
+      expect(txt).toContain('ladderPath:');
+      expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q4f16 -> load-failure');
+      expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q8 -> load-failure');
+      expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/fp16 -> load-failure');
+      expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/wasm/q8 -> load-failure');
+      // jsdom supplies a userAgent; it is included verbatim.
+      expect(txt).toContain(`userAgent: ${navigator.userAgent}`);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('Retry force-recreates and re-walks, skipping known-bad tiers (re-exhausts after a full failure)', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
@@ -916,9 +944,12 @@ describe('initSession — network/download failure', () => {
       expect(texts.some((t) => t.includes("Couldn't load the model on this device."))).toBe(false);
       // No known-bad write (no capability record was persisted at all).
       expect(chromeMock.storage.local.store[CAPABILITY_KEY]).toBeUndefined();
-      // Diagnostic is embedded.
+      // Diagnostic is embedded, with the network outcome recorded on the
+      // attempted tier and the chosen model named.
       const bubble = texts.find((t) => t.includes(networkText)) ?? '';
       expect(bubble).toContain('device: webgpu');
+      expect(bubble).toContain('chosenModel: onnx-community/gemma-4-E2B-it-ONNX');
+      expect(bubble).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q4f16 -> network');
       // Back to idle.
       expect(deps._actionBtn.disabled).toBe(false);
     } finally {
