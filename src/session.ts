@@ -22,6 +22,7 @@ import {
   rebuildSession,
   recreateOffscreen,
   streamPrompt,
+  subscribeProgress,
   warmupSession,
 } from './offscreen/client.js';
 import { buildDiagnostic, errorInfo } from './offscreen/diagnostic.js';
@@ -34,6 +35,12 @@ import {
   type Tier,
   tierKey,
 } from './offscreen/ladder.js';
+import {
+  formatProgressText,
+  GPU_LOADING_TEXT,
+  nextProgress,
+  type ProgressState,
+} from './offscreen/progress.js';
 import type { GpuInfoSnapshot, HistoryTurn } from './offscreen/protocol.js';
 import { pageContext } from './pageContext.js';
 import {
@@ -852,15 +859,45 @@ export function initSession(deps: SessionDeps): void {
     // internals. A fully exhausted ladder surfaces the terminal bubble below.
     const warmHint = addMessage('system', 'Loading model… 0s');
     const startedAt = Date.now();
-    const renderHint = () => {
+    // Phased first-run progress (ADR-R10). `progressPhase` tracks where we are:
+    // - 'none': no download frame seen yet; the elapsed counter is the hint
+    //   (fallback for a fully cached load or a transport hiccup).
+    // - 'downloading': real percent frames are arriving; the hint shows
+    //   "Downloading model NN%" and the elapsed counter is suppressed so the
+    //   user sees the real percentage, not a competing timer.
+    // - 'gpu-loading': the download hit 100% but the session has not resolved;
+    //   the hint shows the indeterminate "Loading into GPU…" with the elapsed
+    //   counter resumed (the GPU compile/upload phase has no real percentage).
+    let progressPhase: 'none' | 'downloading' | 'gpu-loading' = 'none';
+    let progress: ProgressState = { percent: 0 };
+    const elapsedHint = () => {
       const secs = Math.round((Date.now() - startedAt) / 1000);
-      warmHint.textContent =
-        Date.now() - startedAt >= WARMUP_SLOW_NOTICE_MS
-          ? `Loading model… ${secs}s. Taking longer than usual. A first run downloads a few GB, so this can be slow — it's still working. If it seems truly stuck, reload the extension from chrome://extensions, or set "device": "wasm" in .env.json for a CPU fallback.`
-          : `Loading model… ${secs}s (first run downloads the model; later loads start from cache).`;
+      return Date.now() - startedAt >= WARMUP_SLOW_NOTICE_MS
+        ? `Loading model… ${secs}s. Taking longer than usual. A first run downloads a few GB, so this can be slow — it's still working. If it seems truly stuck, reload the extension from chrome://extensions, or set "device": "wasm" in .env.json for a CPU fallback.`
+        : `Loading model… ${secs}s (first run downloads the model; later loads start from cache).`;
+    };
+    const renderHint = () => {
+      if (progressPhase === 'downloading') {
+        warmHint.textContent = formatProgressText(progress.percent);
+      } else if (progressPhase === 'gpu-loading') {
+        const secs = Math.round((Date.now() - startedAt) / 1000);
+        warmHint.textContent = `${GPU_LOADING_TEXT} ${secs}s`;
+      } else {
+        warmHint.textContent = elapsedHint();
+      }
     };
     renderHint();
     const ticker = setInterval(renderHint, 1000);
+    // Subscribe to download-progress frames for this warmup invocation. Each
+    // frame folds through the pure parser; the phase drives the hint text. The
+    // subscription is fire-and-forget (no frames => the elapsed counter stays).
+    // Cleaned up in the finally so a Retry/Reset re-walk opens a fresh port
+    // against the recreated document.
+    const unsubscribeProgress = subscribeProgress((loaded, total) => {
+      progress = nextProgress(progress, { loaded, total });
+      progressPhase = progress.percent >= 100 ? 'gpu-loading' : 'downloading';
+      renderHint();
+    });
     // Reset the per-walk ladder state so a Retry/Reset re-walk starts clean.
     activeTier = null;
     ladderPath = [];
@@ -962,8 +999,11 @@ export function initSession(deps: SessionDeps): void {
       renderTerminalFailure(err);
     } finally {
       // Single cleanup point — the interval is cleared exactly once here
-      // regardless of success or failure above.
+      // regardless of success or failure above. The progress subscription is
+      // torn down here too, so success, failure, and Retry all release the
+      // port (a Retry re-subscribes against the recreated document).
       clearInterval(ticker);
+      unsubscribeProgress();
       // Only return to idle if a real send didn't sneak in ahead of us.
       // activeAbort is set inside the send paths, so respect it here.
       if (!activeAbort) setIdleState(actionBtn, i);

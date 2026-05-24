@@ -20,6 +20,7 @@ import {
   isCountTokensResponse,
   isEnsureOffscreenResponse,
   isGpuInfoResponse,
+  isProgressFrame,
   isRebuildSessionResponse,
   isRecreateOffscreenResponse,
   isWarmupResponse,
@@ -27,6 +28,7 @@ import {
   RECREATE_OFFSCREEN_REQUEST,
   type RebuildSessionRequest,
   type RecreateOffscreenRequest,
+  STREAM_PROGRESS_PORT,
   WARMUP_REQUEST,
   type WarmupRequest,
 } from './protocol.js';
@@ -227,6 +229,54 @@ export async function getGpuInfo(): Promise<GpuInfoSnapshot> {
     console.warn('[local-nano] getGpuInfo failed; using conservative defaults:', err);
     return conservative;
   }
+}
+
+/**
+ * Subscribe to first-run download progress (ADR-R10). Ensures the offscreen
+ * document exists, opens a long-lived `STREAM_PROGRESS_PORT`, and calls
+ * `onFrame(loaded, total)` for each `downloadprogress` event the offscreen
+ * monitor relays. Returns an unsubscribe function that disconnects the port.
+ *
+ * Fire-and-forget: it never rejects. A failed ensure or a port disconnect just
+ * means no frames arrive, and the panel falls back to the elapsed counter. The
+ * subscription is per warmup invocation; a recreated document opens a fresh
+ * port the next time this is called.
+ */
+export function subscribeProgress(onFrame: (loaded: number, total: number) => void): () => void {
+  let port: chrome.runtime.Port | null = null;
+  let cancelled = false;
+
+  const disconnect = () => {
+    cancelled = true;
+    if (port) {
+      try {
+        port.disconnect();
+      } catch {
+        // Already disconnected — fine.
+      }
+      port = null;
+    }
+  };
+
+  void (async () => {
+    try {
+      await ensureViaServiceWorker();
+    } catch {
+      // No offscreen document; no progress to relay. The panel falls back to
+      // the elapsed counter.
+      return;
+    }
+    if (cancelled) return;
+    port = chrome.runtime.connect({ name: STREAM_PROGRESS_PORT });
+    port.onMessage.addListener((message: unknown) => {
+      if (isProgressFrame(message)) onFrame(message.loaded, message.total);
+    });
+    port.onDisconnect.addListener(() => {
+      port = null;
+    });
+  })();
+
+  return disconnect;
 }
 
 /**

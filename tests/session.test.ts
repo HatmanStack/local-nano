@@ -43,6 +43,7 @@ vi.mock('../src/offscreen/client.js', () => ({
   recreateOffscreen: vi.fn(() => Promise.resolve()),
   countTokens: vi.fn(async (text: string) => Math.ceil(text.length / 3)),
   warmupSession: vi.fn(() => Promise.resolve()),
+  subscribeProgress: vi.fn((_onFrame: (loaded: number, total: number) => void) => () => undefined),
   getGpuInfo: vi.fn(async () => ({
     device: 'webgpu' as const,
     isFallback: false,
@@ -57,6 +58,7 @@ import {
   rebuildSession as mockedRebuildSession,
   recreateOffscreen as mockedRecreateOffscreen,
   streamPrompt as mockedStreamPrompt,
+  subscribeProgress as mockedSubscribeProgress,
   warmupSession as mockedWarmupSession,
 } from '../src/offscreen/client.js';
 
@@ -65,6 +67,7 @@ const rebuildSessionMock = mockedRebuildSession as unknown as ReturnType<typeof 
 const recreateOffscreenMock = mockedRecreateOffscreen as unknown as ReturnType<typeof vi.fn>;
 const countTokensMock = mockedCountTokens as unknown as ReturnType<typeof vi.fn>;
 const warmupSessionMock = mockedWarmupSession as unknown as ReturnType<typeof vi.fn>;
+const subscribeProgressMock = mockedSubscribeProgress as unknown as ReturnType<typeof vi.fn>;
 const getGpuInfoMock = mockedGetGpuInfo as unknown as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
@@ -407,6 +410,94 @@ describe('initSession — toggle behavior', () => {
     await flushMicrotasks();
     expect(deps._actionBtn.disabled).toBe(false);
     expect(deps._actionBtn.textContent).toBe('Send');
+  });
+
+  it('renders Downloading model NN% during the download then Loading into GPU at 100%', async () => {
+    // Capture the progress onFrame so the test can push frames, and keep warmup
+    // pending so the hint stays visible through the phase transition.
+    let onFrame: ((loaded: number, total: number) => void) | undefined;
+    subscribeProgressMock.mockImplementation((cb: (loaded: number, total: number) => void) => {
+      onFrame = cb;
+      return () => undefined;
+    });
+    let resolveWarm: (() => void) | undefined;
+    warmupSessionMock.mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolveWarm = r;
+        }),
+    );
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks(); // preflight resolves, warmup starts, progress subscribed
+    const bubble = () =>
+      Array.from(deps._messages.children)
+        .map((c) => c.textContent ?? '')
+        .find((t) => t.includes('Downloading model') || t.includes('Loading')) ?? '';
+    // A real download frame switches the hint to the percentage.
+    onFrame?.(0.42, 1);
+    expect(bubble()).toContain('Downloading model 42%');
+    // Progress advances.
+    onFrame?.(0.9, 1);
+    expect(bubble()).toContain('Downloading model 90%');
+    // At 100% the hint flips to the indeterminate GPU-loading text.
+    onFrame?.(1, 1);
+    expect(bubble()).toContain('Loading into GPU');
+    expect(bubble()).not.toContain('Downloading model');
+    resolveWarm?.();
+    await flushMicrotasks();
+  });
+
+  it('falls back to the elapsed counter when no progress frames arrive', async () => {
+    // The default subscribeProgress mock never calls onFrame (cached load).
+    let resolveWarm: (() => void) | undefined;
+    warmupSessionMock.mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolveWarm = r;
+        }),
+    );
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    const texts = () => Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+    // No percentage; the elapsed counter wording is shown exactly as before.
+    expect(texts().some((t) => t.includes('Downloading model'))).toBe(false);
+    expect(texts().some((t) => /Loading model… \ds/.test(t))).toBe(true);
+    resolveWarm?.();
+    await flushMicrotasks();
+  });
+
+  it('unsubscribes from progress on warmup success', async () => {
+    const unsubscribe = vi.fn();
+    subscribeProgressMock.mockImplementation(() => unsubscribe);
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    expect(subscribeProgressMock).toHaveBeenCalled();
+    expect(unsubscribe).toHaveBeenCalled();
+  });
+
+  it('unsubscribes from progress on warmup failure', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const unsubscribe = vi.fn();
+      subscribeProgressMock.mockImplementation(() => unsubscribe);
+      warmupSessionMock.mockRejectedValue(new Error('offscreen unavailable'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      // One unsubscribe per ensureWarm invocation (the ladder walk is a single
+      // ensureWarm), regardless of how many tiers were attempted.
+      expect(unsubscribe).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('resets warmStarted after a full ladder failure so a reopen re-runs ensureWarm', async () => {

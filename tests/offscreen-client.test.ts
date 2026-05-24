@@ -6,6 +6,7 @@ import {
   recreateOffscreen,
   sendPrompt,
   streamPrompt,
+  subscribeProgress,
   warmupSession,
 } from '../src/offscreen/client.js';
 import {
@@ -21,6 +22,8 @@ import {
   RECREATE_OFFSCREEN_RESPONSE,
   STREAM_CHUNK,
   STREAM_DONE,
+  STREAM_PROGRESS,
+  STREAM_PROGRESS_PORT,
   type StreamChunk,
   type StreamDone,
   type StreamRequest,
@@ -559,3 +562,59 @@ describe('getGpuInfo (content-script client)', () => {
     }
   });
 });
+
+describe('subscribeProgress (content-script client)', () => {
+  beforeEach(() => {
+    chromeMock.runtime.lastError = undefined;
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: ENSURE_OFFSCREEN_RESPONSE,
+      ok: true,
+    }));
+  });
+
+  it('opens a STREAM_PROGRESS_PORT and forwards well-formed frames to onFrame', async () => {
+    const frames: Array<{ loaded: number; total: number }> = [];
+    subscribeProgress((loaded, total) => frames.push({ loaded, total }));
+    const port = await awaitPort();
+    expect(port.name).toBe(STREAM_PROGRESS_PORT);
+    port._emit({ type: STREAM_PROGRESS, loaded: 0.25, total: 1 });
+    port._emit({ type: STREAM_PROGRESS, loaded: 0.75, total: 1 });
+    expect(frames).toEqual([
+      { loaded: 0.25, total: 1 },
+      { loaded: 0.75, total: 1 },
+    ]);
+  });
+
+  it('ignores malformed messages on the port', async () => {
+    const frames: Array<{ loaded: number; total: number }> = [];
+    subscribeProgress((loaded, total) => frames.push({ loaded, total }));
+    const port = await awaitPort();
+    port._emit({ type: 'something-else', loaded: 0.5, total: 1 });
+    port._emit({ type: STREAM_PROGRESS, loaded: Number.NaN, total: 1 });
+    expect(frames).toEqual([]);
+  });
+
+  it('returns an unsubscribe that disconnects the port', async () => {
+    const unsubscribe = subscribeProgress(() => undefined);
+    const port = await awaitPort();
+    expect(port.isConnected).toBe(true);
+    unsubscribe();
+    expect(port.isConnected).toBe(false);
+  });
+
+  it('does not reject when the ensure step fails (fire-and-forget)', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: ENSURE_OFFSCREEN_RESPONSE,
+      ok: false,
+      error: 'offscreen blocked',
+    }));
+    // No throw; returns an unsubscribe that is safe to call.
+    const unsubscribe = subscribeProgress(() => undefined);
+    await flushTimers();
+    expect(() => unsubscribe()).not.toThrow();
+  });
+});
+
+async function flushTimers(): Promise<void> {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+}
