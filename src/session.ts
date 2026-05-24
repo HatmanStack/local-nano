@@ -297,6 +297,97 @@ export function initSession(deps: SessionDeps): void {
     modelBubble.appendChild(bar);
   }
 
+  /**
+   * Shared stream-render-finalize lifecycle for the three send paths
+   * (chat/ask/rewrite). Owns the bubble + typing indicator, the
+   * `activeAbort`/`setGeneratingState` setup, the first-chunk reset, the
+   * `AbortError`/error `catch`, and the `finally` tail (indicator removal,
+   * empty-response fallback, push+persist model entry, `setIdleState`,
+   * `activeAbort` reset, `i.focus()`). The per-path differences — chat's
+   * first-turn warmup hint, the extra per-chunk hook, the success tail and
+   * its differing `recordSentTurn` gating, and ask's mode reset — are passed
+   * as explicit options so they read as deliberate, not accidental.
+   */
+  async function runStreamTurn(opts: {
+    /** The fully built prompt to stream (caller frames it). */
+    prompt: string;
+    /**
+     * A system bubble shown for the duration of the turn (chat's first-turn
+     * warmup hint). Removed on the first chunk and again in the finally.
+     */
+    preHint?: HTMLElement | null;
+    /**
+     * Extra per-chunk hook, run after the shared reset and before the
+     * cumulative text is appended. Chat logs first-token timing + removes
+     * the warmup hint; rewrite applies the chunk to the page Range.
+     */
+    onChunk?: (chunk: string) => void;
+    /**
+     * Per-path success tail, run once on a non-aborted stream. Receives the
+     * final model text, the prompt length, and the model bubble so each path
+     * models its own `recordSentTurn` gating (chat: always; ask: on success;
+     * rewrite: on non-empty) and any extra success-only work (rewrite's
+     * action bar, which attaches to the bubble).
+     */
+    onSuccess?: (modelText: string, promptLen: number, responseEl: HTMLElement) => void;
+    /**
+     * Always-run tail after the success/error handling, regardless of
+     * outcome (ask's one-shot mode reset). Runs inside the finally.
+     */
+    onFinally?: () => void;
+  }): Promise<void> {
+    const { prompt, preHint, onChunk: extraOnChunk, onSuccess, onFinally } = opts;
+    const responseEl = renderMessage(messages, 'model', '');
+    const indicator = makeTypingIndicator();
+    responseEl.appendChild(indicator);
+
+    activeAbort = new AbortController();
+    setGeneratingState(actionBtn, i);
+
+    let modelText = '';
+    let firstChunk = true;
+    const onChunk = (chunk: string) => {
+      if (firstChunk) {
+        if (preHint?.parentNode) preHint.remove();
+        responseEl.textContent = '';
+        firstChunk = false;
+      }
+      extraOnChunk?.(chunk);
+      modelText += chunk;
+      responseEl.textContent = modelText;
+      messages.scrollTop = messages.scrollHeight;
+    };
+    let succeeded = false;
+    try {
+      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+      succeeded = true;
+    } catch (err: unknown) {
+      const name = (err as { name?: unknown })?.name;
+      if (name === 'AbortError') {
+        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
+        responseEl.textContent = modelText;
+      } else {
+        modelText = err instanceof Error ? err.message : String(err);
+        responseEl.textContent = modelText;
+      }
+    } finally {
+      if (indicator.parentNode) indicator.remove();
+      if (preHint?.parentNode) preHint.remove();
+      if (!modelText) {
+        responseEl.textContent = '(no response — the model returned an empty answer)';
+      }
+      if (modelText) {
+        pushEntry({ role: 'model', text: modelText });
+        persist();
+      }
+      if (succeeded) onSuccess?.(modelText, prompt.length, responseEl);
+      setIdleState(actionBtn, i);
+      activeAbort = null;
+      onFinally?.();
+      i.focus();
+    }
+  }
+
   async function sendChat(text: string): Promise<void> {
     addMessage('user', text);
     const wasFirstTurn = isFirstTurn;
@@ -308,112 +399,46 @@ export function initSession(deps: SessionDeps): void {
       wasFirstTurn && !modelReady
         ? addMessage('system', 'Loading model… first response can take up to a minute.')
         : null;
-    const responseEl = renderMessage(messages, 'model', '');
-    const indicator = makeTypingIndicator();
-    responseEl.appendChild(indicator);
     const prompt = isFirstTurn ? `${pageContext(document, location)}\n\n---\n\n${text}` : text;
     isFirstTurn = false;
 
-    activeAbort = new AbortController();
-    setGeneratingState(actionBtn, i);
-
-    let modelText = '';
-    let firstChunk = true;
     const t0 = performance.now();
-    const onChunk = (chunk: string) => {
-      if (firstChunk) {
-        debugLog(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
-        if (firstTurnHint?.parentNode) firstTurnHint.remove();
-        responseEl.textContent = '';
-        firstChunk = false;
-      }
-      modelText += chunk;
-      responseEl.textContent = modelText;
-      messages.scrollTop = messages.scrollHeight;
-    };
-    try {
-      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
-      debugLog(
-        `[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms, chars=${modelText.length}, prompt.length=${prompt.length}`,
-      );
-      recordSentTurn(prompt.length, modelText.length);
-    } catch (err: unknown) {
-      const name = (err as { name?: unknown })?.name;
-      if (name === 'AbortError') {
-        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
-        responseEl.textContent = modelText;
-      } else {
-        modelText = err instanceof Error ? err.message : String(err);
-        responseEl.textContent = modelText;
-      }
-    } finally {
-      if (indicator.parentNode) indicator.remove();
-      if (firstTurnHint?.parentNode) firstTurnHint.remove();
-      if (!modelText) {
-        responseEl.textContent = '(no response — the model returned an empty answer)';
-      }
-      if (modelText) {
-        pushEntry({ role: 'model', text: modelText });
-        persist();
-      }
-      setIdleState(actionBtn, i);
-      activeAbort = null;
-      i.focus();
-    }
+    let loggedFirstToken = false;
+    await runStreamTurn({
+      prompt,
+      preHint: firstTurnHint,
+      onChunk: () => {
+        if (!loggedFirstToken) {
+          debugLog(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
+          loggedFirstToken = true;
+        }
+      },
+      // Chat records the turn unconditionally (the page-context prefix is
+      // already in the polyfill's history even on an error/abort).
+      onSuccess: (modelText, promptLen) => {
+        debugLog(
+          `[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms, chars=${modelText.length}, prompt.length=${promptLen}`,
+        );
+        recordSentTurn(promptLen, modelText.length);
+      },
+    });
   }
 
   async function sendAsk(instruction: string, snap: SelectionSnapshot): Promise<void> {
     addMessage('user', instruction);
-    const responseEl = renderMessage(messages, 'model', '');
-    const indicator = makeTypingIndicator();
-    responseEl.appendChild(indicator);
     const prompt = buildAskPrompt(snap, instruction);
 
-    activeAbort = new AbortController();
-    setGeneratingState(actionBtn, i);
-
-    let modelText = '';
-    let firstChunk = true;
-    const onChunk = (chunk: string) => {
-      if (firstChunk) {
-        responseEl.textContent = '';
-        firstChunk = false;
-      }
-      modelText += chunk;
-      responseEl.textContent = modelText;
-      messages.scrollTop = messages.scrollHeight;
-    };
-    let askSucceeded = false;
-    try {
-      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
-      askSucceeded = true;
-    } catch (err: unknown) {
-      const name = (err as { name?: unknown })?.name;
-      if (name === 'AbortError') {
-        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
-        responseEl.textContent = modelText;
-      } else {
-        modelText = err instanceof Error ? err.message : String(err);
-        responseEl.textContent = modelText;
-      }
-    } finally {
-      if (indicator.parentNode) indicator.remove();
-      if (!modelText) {
-        responseEl.textContent = '(no response — the model returned an empty answer)';
-      }
-      if (modelText) {
-        pushEntry({ role: 'model', text: modelText });
-        persist();
-      }
-      if (askSucceeded) recordSentTurn(prompt.length, modelText.length);
-      setIdleState(actionBtn, i);
-      activeAbort = null;
+    await runStreamTurn({
+      prompt,
+      // Ask only counts the turn when the stream actually completed.
+      onSuccess: (modelText, promptLen) => recordSentTurn(promptLen, modelText.length),
       // Ask mode is one-shot; reset to Edit for the next turn if the
-      // selection is still active.
-      askMode = false;
-      updatePlaceholder();
-      i.focus();
-    }
+      // selection is still active. Runs regardless of success.
+      onFinally: () => {
+        askMode = false;
+        updatePlaceholder();
+      },
+    });
   }
 
   async function sendRewrite(instruction: string, snap: SelectionSnapshot): Promise<void> {
@@ -427,56 +452,20 @@ export function initSession(deps: SessionDeps): void {
     const prompt = buildRewritePrompt(snap, instruction, softCap);
 
     addMessage('user', instruction);
-    const responseEl = renderMessage(messages, 'model', '');
-    const indicator = makeTypingIndicator();
-    responseEl.appendChild(indicator);
-
-    activeAbort = new AbortController();
-    setGeneratingState(actionBtn, i);
 
     const rewrite = streamRewriteIntoRange(snap);
-    let modelText = '';
-    let firstChunk = true;
-    let succeeded = false;
-    const onChunk = (chunk: string) => {
-      if (firstChunk) {
-        responseEl.textContent = '';
-        firstChunk = false;
-      }
-      rewrite.applyChunk(chunk);
-      modelText += chunk;
-      responseEl.textContent = modelText;
-      messages.scrollTop = messages.scrollHeight;
-    };
-    try {
-      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
-      succeeded = modelText.length > 0;
-    } catch (err: unknown) {
-      const name = (err as { name?: unknown })?.name;
-      if (name === 'AbortError') {
-        modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
-        responseEl.textContent = modelText;
-      } else {
-        modelText = err instanceof Error ? err.message : String(err);
-        responseEl.textContent = modelText;
-      }
-    } finally {
-      if (indicator.parentNode) indicator.remove();
-      if (!modelText) {
-        responseEl.textContent = '(no response — the model returned an empty answer)';
-      }
-      if (modelText) {
-        pushEntry({ role: 'model', text: modelText });
-        persist();
-      }
-      if (succeeded) {
-        attachRewriteActions(responseEl, snap);
-        recordSentTurn(prompt.length, modelText.length);
-      }
-      setIdleState(actionBtn, i);
-      activeAbort = null;
-      i.focus();
-    }
+    await runStreamTurn({
+      prompt,
+      onChunk: (chunk) => rewrite.applyChunk(chunk),
+      // Rewrite attaches the Undo/Accept bar and records the turn only when
+      // a non-empty rewrite landed.
+      onSuccess: (modelText, promptLen, responseEl) => {
+        if (modelText.length > 0) {
+          attachRewriteActions(responseEl, snap);
+          recordSentTurn(promptLen, modelText.length);
+        }
+      },
+    });
   }
 
   async function send() {
