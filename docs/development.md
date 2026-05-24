@@ -50,12 +50,18 @@ This runs esbuild in watch mode. After each save, refresh the extension at `chro
 ```text
 .
 ├── background.ts          # MV3 service worker entry
-├── content.ts             # Content script entry — DOM + session glue
+├── content.ts             # Content script entry — chat UI / DOM glue
+├── offscreen.ts           # Offscreen document entry — hosts the model session
+├── offscreen.html         # Offscreen document shell
 ├── src/
-│   ├── background/handler.ts
+│   ├── background/
+│   │   ├── handler.ts
+│   │   └── offscreen.ts   # Service-worker side of the offscreen lifecycle
+│   ├── offscreen/         # client, protocol, stream-client, dispatch, busy-gate
+│   ├── selection-rewrite.ts
+│   ├── session.ts         # Content-script chat session lifecycle
 │   ├── history.ts
 │   ├── pageContext.ts
-│   ├── system.ts
 │   └── ui/
 │       ├── messages.ts
 │       └── state.ts
@@ -66,6 +72,8 @@ This runs esbuild in watch mode. After each save, refresh the extension at `chro
 └── .env.example.json      # Template for .env.json
 ```
 
+(Representative, not exhaustive.)
+
 ## A word on the bundle size
 
-`dist/content.js` is ~1.5 MB because it inlines the Transformers.js runtime. That's expected. The model weights themselves are much larger and are fetched at runtime from Hugging Face, not bundled.
+`dist/offscreen.js` is ~1.5 MB because it inlines the Transformers.js runtime — the model now runs in the offscreen document, so that is where the heavy code lands. `dist/content.js` is thin (~41 KB), the per-page chat-UI script. That split is expected. The model weights themselves are much larger and are fetched at runtime from Hugging Face, not bundled.
