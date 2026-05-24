@@ -26,7 +26,7 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 | `tests/session.test.ts`              | `initSession` — lifecycle, streaming, abort, toggle, restore re-seed, quota advisory |
 | `tests/stream-client.test.ts`        | `streamOverPort` port wiring and chunk accumulation |
 | `tests/offscreen-client.test.ts`     | `streamPrompt` content-script client over the SW |
-| `tests/offscreen-protocol.test.ts`   | Wire-message discriminators and finiteness guards |
+| `tests/offscreen-protocol.test.ts`   | Wire-message discriminators and finiteness guards (incl. `isProgressFrame`) |
 | `tests/offscreen-dispatch.test.ts`   | `classifyOffscreenMessage` listener routing  |
 | `tests/offscreen-ladder.test.ts`     | `nextAction`/`firstTierIndex`/`tierKey`/`applyTierToConfig` fallback-ladder reducer |
 | `tests/capability.test.ts`           | `classifyCapability`/`CAPABLE_MIN_BUFFER_BYTES` pure device-capability classifier |

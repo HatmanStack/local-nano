@@ -34,12 +34,15 @@ import {
   isStreamAbort,
   isStreamRequest,
   isWarmupRequest,
+  type ProgressFrame,
   REBUILD_SESSION_RESPONSE,
   type RebuildSessionRequest,
   type RebuildSessionResponse,
   STREAM_CHUNK,
   STREAM_DONE,
   STREAM_PORT_NAME,
+  STREAM_PROGRESS,
+  STREAM_PROGRESS_PORT,
   type StreamChunk,
   type StreamDone,
   WARMUP_RESPONSE,
@@ -51,6 +54,20 @@ interface LanguageModelSession {
   promptStreaming(input: string, options?: { signal?: AbortSignal }): ReadableStream<string>;
   measureContextUsage(input: string): Promise<number>;
   destroy(): void;
+}
+
+/**
+ * The polyfill's public `monitor` callback (ADR-R10). The polyfill calls
+ * `monitor(monitorTarget)` with a fresh `EventTarget` per `create()` and
+ * dispatches `downloadprogress` ProgressEvents on it. We attach a listener and
+ * relay `loaded`/`total` to the panel. Read through the public surface only;
+ * no polyfill patching.
+ */
+type ProgressMonitorTarget = EventTarget;
+type ProgressMonitor = (target: ProgressMonitorTarget) => void;
+interface DownloadProgressEvent extends Event {
+  loaded?: number;
+  total?: number;
 }
 
 interface LoadedHeavy {
@@ -80,6 +97,27 @@ let activeTier: Tier | null = null;
 // (reject-when-busy is YAGNI-sufficient for a single-user extension). The
 // gate is module-scoped because the session it guards is module-scoped.
 const generationGate = new BusyGate();
+
+// Connected first-run progress ports (ADR-R10). In practice at most one panel
+// warms at a time, but tolerate zero or many cleanly. Each `downloadprogress`
+// event is forwarded to every connected port; a disconnected port is dropped
+// on its own onDisconnect and a postMessage to a stale port is swallowed.
+const progressPorts = new Set<chrome.runtime.Port>();
+
+/**
+ * Forward one progress event to every connected progress port. A disconnected
+ * panel must not break the load, so each post is individually guarded.
+ */
+function broadcastProgress(loaded: number, total: number): void {
+  const frame: ProgressFrame = { type: STREAM_PROGRESS, loaded, total };
+  for (const port of progressPorts) {
+    try {
+      port.postMessage(frame);
+    } catch {
+      // Port gone; its onDisconnect removes it from the set.
+    }
+  }
+}
 
 function loadHeavy(): Promise<LoadedHeavy> {
   if (heavyPromise) return heavyPromise;
@@ -125,15 +163,39 @@ function buildInitialPrompts(
   return seeded;
 }
 
-function ensureSession(history?: HistoryTurn[]): Promise<LanguageModelSession> {
+/**
+ * Build (or return the in-flight singleton for) the shared session.
+ *
+ * `onProgress` is the ADR-R10 hook: when provided, a `monitor` is passed into
+ * the polyfill `create()` so each `downloadprogress` event's `loaded`/`total`
+ * is relayed to the panel. The monitor is per `create()`; it only fires on the
+ * one load this call kicks off. A concurrent caller that shares the existing
+ * `sessionPromise` does not re-attach a monitor (the download already started),
+ * which is fine: there is one panel warming at a time in practice.
+ */
+function ensureSession(
+  history?: HistoryTurn[],
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<LanguageModelSession> {
   if (sessionPromise) return sessionPromise;
   sessionPromise = (async () => {
     try {
       const { LanguageModel } = await loadHeavy();
+      const monitor: ProgressMonitor | undefined = onProgress
+        ? (target) => {
+            target.addEventListener('downloadprogress', (event: Event) => {
+              const e = event as DownloadProgressEvent;
+              if (typeof e.loaded === 'number' && typeof e.total === 'number') {
+                onProgress(e.loaded, e.total);
+              }
+            });
+          }
+        : undefined;
       return await LanguageModel.create({
         expectedInputs: [{ type: 'text', languages: ['en'] }],
         expectedOutputs: [{ type: 'text', languages: ['en'] }],
         initialPrompts: buildInitialPrompts(history),
+        ...(monitor ? { monitor } : {}),
       });
     } catch (err) {
       sessionPromise = null;
@@ -323,7 +385,10 @@ function handleWarmup(msg: WarmupRequest, sendResponse: SendResponse): void {
         }
         activeTier = tier;
       }
-      await ensureSession();
+      // Relay download progress to any connected progress port (ADR-R10). The
+      // broadcast is per-event and individually guarded, so a disconnected
+      // panel never breaks the load.
+      await ensureSession(undefined, broadcastProgress);
       const ok: WarmupResponse = { type: WARMUP_RESPONSE, ok: true };
       sendResponse(ok);
     } catch (err: unknown) {
@@ -358,6 +423,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (isWarmupRequest(msg)) handleWarmup(msg, sendResponse);
       return true;
   }
+});
+
+// First-run download-progress port (ADR-R10). The panel opens this during
+// warmup; the offscreen monitor broadcasts `downloadprogress` frames to it.
+// Fire-and-forget: it carries no inbound messages, just the relayed frames.
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== STREAM_PROGRESS_PORT) return;
+  progressPorts.add(port);
+  port.onDisconnect.addListener(() => {
+    progressPorts.delete(port);
+  });
 });
 
 chrome.runtime.onConnect.addListener((port) => {

@@ -316,3 +316,39 @@ export function isStreamDone(value: unknown): value is StreamDone {
   if (v.ok === false) return typeof v.error === 'string';
   return false;
 }
+
+/**
+ * Dedicated long-lived port for first-run download progress (ADR-R10).
+ * Separate from the stream port and the one-shot warmup `sendMessage`: the
+ * warmup round-trip has no push channel, so incremental progress needs its
+ * own port. The panel opens this port during warmup and the offscreen
+ * document forwards each polyfill `downloadprogress` event as a
+ * `ProgressFrame`. A recreated document opens a fresh port per warmup.
+ */
+export const STREAM_PROGRESS_PORT = 'offscreen-progress' as const;
+export const STREAM_PROGRESS = 'stream/progress' as const;
+
+/**
+ * One forwarded `downloadprogress` ProgressEvent. The polyfill dispatches
+ * `new ProgressEvent('downloadprogress', { loaded, total, lengthComputable })`
+ * (`prompt-api-polyfill.js` `dispatchProgress`); the offscreen monitor reads
+ * `loaded`/`total` and posts this frame. The pure parser in `progress.ts`
+ * consumes the numeric fields.
+ */
+export interface ProgressFrame {
+  type: typeof STREAM_PROGRESS;
+  loaded: number;
+  total: number;
+}
+
+export function isProgressFrame(value: unknown): value is ProgressFrame {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== STREAM_PROGRESS) return false;
+  return (
+    typeof v.loaded === 'number' &&
+    Number.isFinite(v.loaded) &&
+    typeof v.total === 'number' &&
+    Number.isFinite(v.total)
+  );
+}

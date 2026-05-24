@@ -12,6 +12,7 @@ import {
   isEnsureOffscreenResponse,
   isGpuInfoRequest,
   isGpuInfoResponse,
+  isProgressFrame,
   isRebuildSessionRequest,
   isRebuildSessionResponse,
   isRecreateOffscreenRequest,
@@ -30,6 +31,8 @@ import {
   STREAM_CHUNK,
   STREAM_DONE,
   STREAM_PORT_NAME,
+  STREAM_PROGRESS,
+  STREAM_PROGRESS_PORT,
   STREAM_REQUEST,
   WARMUP_REQUEST,
   WARMUP_RESPONSE,
@@ -47,6 +50,11 @@ describe('protocol discriminators', () => {
     expect(STREAM_CHUNK).toBe('stream/chunk');
     expect(STREAM_DONE).toBe('stream/done');
     expect(STREAM_ABORT).toBe('stream/abort');
+  });
+
+  it('keeps progress-port constants stable', () => {
+    expect(STREAM_PROGRESS_PORT).toBe('offscreen-progress');
+    expect(STREAM_PROGRESS).toBe('stream/progress');
   });
 
   it('keeps rebuild-session constants stable', () => {
@@ -157,6 +165,31 @@ describe('isWarmupResponse', () => {
   it('rejects wrong discriminator and primitives', () => {
     expect(isWarmupResponse(null)).toBe(false);
     expect(isWarmupResponse({ type: 'other', ok: true })).toBe(false);
+  });
+});
+
+describe('isProgressFrame', () => {
+  it('accepts a well-formed frame', () => {
+    expect(isProgressFrame({ type: STREAM_PROGRESS, loaded: 0.5, total: 1 })).toBe(true);
+    expect(isProgressFrame({ type: STREAM_PROGRESS, loaded: 0, total: 0 })).toBe(true);
+  });
+
+  it('rejects non-finite loaded or total', () => {
+    expect(isProgressFrame({ type: STREAM_PROGRESS, loaded: Number.NaN, total: 1 })).toBe(false);
+    expect(
+      isProgressFrame({ type: STREAM_PROGRESS, loaded: 0.5, total: Number.POSITIVE_INFINITY }),
+    ).toBe(false);
+  });
+
+  it('rejects non-numeric loaded or total', () => {
+    expect(isProgressFrame({ type: STREAM_PROGRESS, loaded: '0.5', total: 1 })).toBe(false);
+    expect(isProgressFrame({ type: STREAM_PROGRESS, loaded: 0.5, total: '1' })).toBe(false);
+  });
+
+  it('rejects the wrong discriminator and primitives', () => {
+    expect(isProgressFrame({ type: 'other', loaded: 0.5, total: 1 })).toBe(false);
+    expect(isProgressFrame(null)).toBe(false);
+    expect(isProgressFrame('foo')).toBe(false);
   });
 });
 
