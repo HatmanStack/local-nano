@@ -12,9 +12,12 @@ import {
   countTokens,
   getGpuInfo,
   rebuildSession,
+  recreateOffscreen,
   streamPrompt,
   warmupSession,
 } from './offscreen/client.js';
+import { buildDiagnostic, errorInfo } from './offscreen/diagnostic.js';
+import { classifyFailure } from './offscreen/failure.js';
 import type { GpuInfoSnapshot, HistoryTurn } from './offscreen/protocol.js';
 import { pageContext } from './pageContext.js';
 import {
@@ -686,6 +689,82 @@ export function initSession(deps: SessionDeps): void {
   // offscreen `ensureSession` singleton handles cross-tab dedupe.
   let warmStarted = false;
   let modelReady = false;
+  // Captured during the ensureWarm preflight so the failure path can feed the
+  // diagnostic the same adapter snapshot the load saw. Conservative default
+  // (ADR-R11 / Task 1.4) until the preflight resolves.
+  let lastGpuInfo: GpuInfoSnapshot = {
+    device: 'webgpu',
+    isFallback: false,
+    maxBufferSize: null,
+    configuredThreshold: null,
+  };
+
+  /**
+   * Render the proactive terminal-failure bubble for a warmup load failure
+   * (ADR-R4/R5/R11). The model could not be loaded on this device, so instead
+   * of degrading silently to lazy loading we surface an actionable headline, a
+   * line of guidance, the copy-only diagnostic, and a manual Retry button. The
+   * Retry force-recreates the offscreen document (resetting the sticky
+   * documentReady) and re-runs warmup. Recovery is manual only: no auto-retry,
+   * no timer (constraint 2).
+   */
+  function renderTerminalFailure(err: unknown): void {
+    // classifyFailure annotates the console log; the warmup-failure terminal UI
+    // is shown for any failed proactive load, since the load not completing IS
+    // the release-gate scenario this phase removes the silent death from.
+    const failureClass = classifyFailure(err);
+    const { errorClass, errorMessage } = errorInfo(err);
+    const diagnostic = buildDiagnostic({
+      device: lastGpuInfo.device,
+      isFallback: lastGpuInfo.isFallback,
+      maxBufferSize: lastGpuInfo.maxBufferSize,
+      // No tier concept yet; tiers arrive in Phase 2.
+      activeTier: null,
+      errorClass,
+      errorMessage,
+      extensionVersion: chrome.runtime.getManifest().version,
+    });
+    console.warn(
+      `[local-nano] warmup failed (${failureClass}); showing terminal UI:`,
+      errorMessage,
+    );
+
+    const bubble = addMessage(
+      'system',
+      [
+        "Couldn't load the model on this device.",
+        'Try Retry below; if it keeps failing, set "device": "wasm" in .env.json for a slower CPU fallback.',
+        '',
+        diagnostic,
+      ].join('\n'),
+    );
+
+    const retryBtn = window.document.createElement('button');
+    retryBtn.textContent = 'Retry';
+    retryBtn.style.cssText = `margin-top: 6px; ${BUTTON_CSS}`;
+    retryBtn.addEventListener('click', () => {
+      retryBtn.disabled = true;
+      bubble.remove();
+      // Reset so ensureWarm runs again; both flags must clear so a true retry
+      // (not a no-op) happens and the model is treated as not-yet-ready.
+      warmStarted = false;
+      modelReady = false;
+      void (async () => {
+        try {
+          await recreateOffscreen();
+        } catch (recreateErr) {
+          // A failed recreate leaves the panel without a dead button: re-render
+          // the terminal message so the user can act again.
+          renderTerminalFailure(recreateErr);
+          return;
+        }
+        await ensureWarm();
+      })();
+    });
+    bubble.appendChild(window.document.createElement('br'));
+    bubble.appendChild(retryBtn);
+  }
+
   async function ensureWarm(): Promise<void> {
     if (warmStarted) return;
     warmStarted = true;
@@ -697,8 +776,8 @@ export function initSession(deps: SessionDeps): void {
     // proof-of-life that a static "Loading" lacked, and after
     // WARMUP_SLOW_NOTICE_MS we append remedies in case it really is
     // stuck — without giving up. A genuine load failure still rejects
-    // warmupSession (offscreen returns ok:false) and surfaces the error
-    // bubble below.
+    // warmupSession (offscreen returns ok:false) and surfaces the
+    // terminal bubble below.
     const warmHint = addMessage('system', 'Loading model… 0s');
     const startedAt = Date.now();
     const renderHint = () => {
@@ -717,6 +796,7 @@ export function initSession(deps: SessionDeps): void {
       // Non-fatal — the default threshold covers the typical case.
       try {
         const info = await getGpuInfo();
+        lastGpuInfo = info;
         historyThreshold = deriveHistoryThreshold(info);
         debugLog(
           `[local-nano] history threshold: ${historyThreshold} (device=${info.device}, isFallback=${info.isFallback}, maxBufferSize=${info.maxBufferSize ?? 'n/a'}, configured=${info.configuredThreshold ?? 'n/a'})`,
@@ -724,22 +804,22 @@ export function initSession(deps: SessionDeps): void {
         const advisory = preflightWarning(info);
         if (advisory) addMessage('system', advisory);
       } catch (gpuErr) {
+        // The preflight snapshot failed; keep the conservative lastGpuInfo so
+        // the diagnostic still renders if warmup then fails.
         console.warn('[local-nano] gpu-info preflight failed; proceeding:', gpuErr);
       }
       await warmupSession();
       modelReady = true;
       if (warmHint.parentNode) warmHint.remove();
     } catch (err) {
-      // Preload is best-effort: a failed warmup must NOT alarm the user.
-      // The load is resource-heavy, and a failure here (e.g. transient
-      // VRAM pressure on panel open) degrades quietly to lazy loading.
-      // warmStarted is reset so the next panel toggle retries the
-      // preload; otherwise the model loads on the first send, where any
-      // error surfaces plainly in the response bubble.
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn('[local-nano] warmup failed (will load lazily on first send):', message);
+      // The proactive load failed. Do NOT degrade silently to lazy loading:
+      // surface a terminal bubble with the diagnostic and a manual Retry that
+      // force-recreates the offscreen document (ADR-R4). warmStarted is reset
+      // so a later panel toggle can also retry, matching today's reset
+      // semantics, but the bubble stays until the user acts.
       if (warmHint.parentNode) warmHint.remove();
       warmStarted = false;
+      renderTerminalFailure(err);
     } finally {
       // Single cleanup point — the interval is cleared exactly once here
       // regardless of success or failure above.

@@ -38,6 +38,7 @@ vi.mock('../src/offscreen/client.js', () => ({
   }),
   sendPrompt: vi.fn(),
   rebuildSession: vi.fn(() => Promise.resolve()),
+  recreateOffscreen: vi.fn(() => Promise.resolve()),
   countTokens: vi.fn(async (text: string) => Math.ceil(text.length / 3)),
   warmupSession: vi.fn(() => Promise.resolve()),
   getGpuInfo: vi.fn(async () => ({
@@ -52,12 +53,14 @@ import {
   countTokens as mockedCountTokens,
   getGpuInfo as mockedGetGpuInfo,
   rebuildSession as mockedRebuildSession,
+  recreateOffscreen as mockedRecreateOffscreen,
   streamPrompt as mockedStreamPrompt,
   warmupSession as mockedWarmupSession,
 } from '../src/offscreen/client.js';
 
 const streamPromptMock = mockedStreamPrompt as unknown as ReturnType<typeof vi.fn>;
 const rebuildSessionMock = mockedRebuildSession as unknown as ReturnType<typeof vi.fn>;
+const recreateOffscreenMock = mockedRecreateOffscreen as unknown as ReturnType<typeof vi.fn>;
 const countTokensMock = mockedCountTokens as unknown as ReturnType<typeof vi.fn>;
 const warmupSessionMock = mockedWarmupSession as unknown as ReturnType<typeof vi.fn>;
 const getGpuInfoMock = mockedGetGpuInfo as unknown as ReturnType<typeof vi.fn>;
@@ -421,25 +424,108 @@ describe('initSession — toggle behavior', () => {
     expect(warmupSessionMock).toHaveBeenCalledTimes(2);
   });
 
-  it('degrades silently on a warmup failure — no error guard on the load path', async () => {
-    warmupSessionMock.mockRejectedValueOnce(
-      new Error(
-        'Deserialize tensor model_embed_tokens_weight_quant failed. Failed to load external data file "embed_tokens_q4.onnx_data", error: Unknown error occurred in memory copy.',
-      ),
-    );
-    const deps = makeDeps();
-    initSession(deps);
-    getToggleListener()(TOGGLE_MESSAGE);
-    await flushMicrotasks();
-    // The preload guard must NOT fire on the load path: no "Model load
-    // failed" bubble, no remedies, no Retry button, no leftover loading
-    // bubble. The model loads lazily on the first send instead.
-    const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
-    expect(texts.some((t) => t.includes('Model load failed'))).toBe(false);
-    expect(texts.some((t) => t.includes('Loading model'))).toBe(false);
-    // Button is back to idle so the user can send (which lazy-loads).
-    expect(deps._actionBtn.disabled).toBe(false);
-    expect(deps._actionBtn.textContent).toBe('Send');
+  it('surfaces a terminal bubble with a diagnostic and Retry button on a warmup failure', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      warmupSessionMock.mockRejectedValueOnce(
+        new Error('offscreen port disconnected: unknown reason'),
+      );
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      // The transient loading bubble is gone; the terminal bubble is shown.
+      const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(texts.some((t) => t.includes('Loading model…'))).toBe(false);
+      const terminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      expect(terminal).toBeTruthy();
+      const txt = terminal?.textContent ?? '';
+      // Headline + guidance + diagnostic block embedded.
+      expect(txt).toContain('set "device": "wasm" in .env.json');
+      expect(txt).toContain('device: webgpu');
+      expect(txt).toContain('errorMessage: offscreen port disconnected: unknown reason');
+      expect(txt).toContain('extensionVersion: 0.2.4');
+      // It has a Retry button.
+      const retryBtn = terminal?.querySelector('button');
+      expect(retryBtn?.textContent).toBe('Retry');
+      // Button is back to idle (the finally ran).
+      expect(deps._actionBtn.disabled).toBe(false);
+      expect(deps._actionBtn.textContent).toBe('Send');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('Retry force-recreates the document and re-runs warmup; recovery removes the bubble', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      warmupSessionMock.mockRejectedValueOnce(new Error('the message channel closed'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      const terminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      const retryBtn = terminal?.querySelector('button') as HTMLButtonElement;
+      expect(retryBtn).toBeTruthy();
+      // Next warmup resolves (the recreate fixed it).
+      warmupSessionMock.mockResolvedValueOnce(undefined);
+      retryBtn.click();
+      await flushMicrotasks();
+      expect(recreateOffscreenMock).toHaveBeenCalledTimes(1);
+      expect(warmupSessionMock).toHaveBeenCalledTimes(2);
+      // Terminal bubble is gone and the model is ready: a subsequent send
+      // proceeds (the button returns to idle, no first-turn loading hint).
+      const after = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(after.some((t) => t.includes("Couldn't load the model on this device."))).toBe(false);
+      expect(deps._actionBtn.disabled).toBe(false);
+      // modelReady true: sending no longer shows the "Loading model…" first-turn hint.
+      deps._input.value = 'hi';
+      deps._actionBtn.click();
+      const call = await awaitPending();
+      const hintShown = Array.from(deps._messages.children).some((c) =>
+        (c.textContent ?? '').includes('first response can take up to a minute'),
+      );
+      expect(hintShown).toBe(false);
+      call.resolve('ok');
+      await flushMicrotasks();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('re-renders a terminal bubble when Retry recreateOffscreen rejects', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      warmupSessionMock.mockRejectedValueOnce(
+        new Error('offscreen port disconnected: unknown reason'),
+      );
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      const terminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      const retryBtn = terminal?.querySelector('button') as HTMLButtonElement;
+      recreateOffscreenMock.mockRejectedValueOnce(new Error('recreate blocked'));
+      retryBtn.click();
+      await flushMicrotasks();
+      expect(recreateOffscreenMock).toHaveBeenCalledTimes(1);
+      // warmup not re-run (recreate failed first).
+      expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+      // A terminal bubble is shown again (with the recreate error), not a dead panel.
+      const stillTerminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      expect(stillTerminal).toBeTruthy();
+      expect(stillTerminal?.textContent ?? '').toContain('recreate blocked');
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
