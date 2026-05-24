@@ -43,7 +43,7 @@ Note: `activeTab` and `scripting` were removed — the declarative `<all_urls>` 
 
 ## Asset checklist
 
-- [x] Icon — `icons/icon{16,32,48,128}.png`, generated from `icons/icon.svg` via `npm run icons`. Wired into `manifest.json`.
+- [x] Icon — `icons/icon{16,32,48,128}.png`, generated from `icons/icon-source.png` via ffmpeg in `scripts/make-icons.mjs` (`npm run icons`). There is no `icons/icon.svg`. Wired into `manifest.json`.
 - [ ] **Screenshots** — 1280×800 (or 640×400) PNG/JPG, at least one. Capture the panel open on a real page: (1) asking a question about the page, (2) a highlighted-text rewrite mid-stream with the Undo/Accept bar. Requires running the unpacked extension in Chrome.
 - [ ] **Small promo tile** (optional, 440×280) — only needed for featuring.
 - [ ] Store name decision (keep "Local AI Cmd" vs. rebrand to "Local Nano").
