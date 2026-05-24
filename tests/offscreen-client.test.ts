@@ -3,6 +3,7 @@ import {
   countTokens,
   getGpuInfo,
   rebuildSession,
+  recreateOffscreen,
   sendPrompt,
   streamPrompt,
   warmupSession,
@@ -16,6 +17,8 @@ import {
   GPU_INFO_RESPONSE,
   REBUILD_SESSION_REQUEST,
   REBUILD_SESSION_RESPONSE,
+  RECREATE_OFFSCREEN_REQUEST,
+  RECREATE_OFFSCREEN_RESPONSE,
   STREAM_CHUNK,
   STREAM_DONE,
   type StreamChunk,
@@ -197,6 +200,48 @@ describe('rebuildSession (content-script client)', () => {
       return { type: 'something-else', ok: true };
     });
     await expect(rebuildSession([])).rejects.toThrow(/malformed/);
+  });
+});
+
+describe('recreateOffscreen (content-script client)', () => {
+  beforeEach(() => {
+    chromeMock.runtime.lastError = undefined;
+  });
+
+  it('sends RECREATE_OFFSCREEN_REQUEST and resolves on ok:true', async () => {
+    const calls: unknown[] = [];
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      calls.push(msg);
+      return { type: RECREATE_OFFSCREEN_RESPONSE, ok: true };
+    });
+    await expect(recreateOffscreen()).resolves.toBeUndefined();
+    expect(calls).toEqual([{ type: RECREATE_OFFSCREEN_REQUEST }]);
+  });
+
+  it('throws the SW error message on ok:false', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: RECREATE_OFFSCREEN_RESPONSE,
+      ok: false,
+      error: 'recreate blocked',
+    }));
+    await expect(recreateOffscreen()).rejects.toThrow('recreate blocked');
+  });
+
+  it('throws when chrome.runtime.lastError is set', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => {
+      chromeMock.runtime.lastError = { message: 'no SW' };
+      return undefined;
+    });
+    await expect(recreateOffscreen()).rejects.toThrow(/no SW/);
+    chromeMock.runtime.lastError = undefined;
+  });
+
+  it('throws when the reply is malformed', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: 'something-else',
+      ok: true,
+    }));
+    await expect(recreateOffscreen()).rejects.toThrow(/malformed/);
   });
 });
 

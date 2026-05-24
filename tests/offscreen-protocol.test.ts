@@ -14,12 +14,16 @@ import {
   isGpuInfoResponse,
   isRebuildSessionRequest,
   isRebuildSessionResponse,
+  isRecreateOffscreenRequest,
+  isRecreateOffscreenResponse,
   isStreamAbort,
   isStreamChunk,
   isStreamDone,
   isStreamRequest,
   REBUILD_SESSION_REQUEST,
   REBUILD_SESSION_RESPONSE,
+  RECREATE_OFFSCREEN_REQUEST,
+  RECREATE_OFFSCREEN_RESPONSE,
   STREAM_ABORT,
   STREAM_CHUNK,
   STREAM_DONE,
@@ -54,6 +58,54 @@ describe('protocol discriminators', () => {
   it('keeps gpu-info constants stable', () => {
     expect(GPU_INFO_REQUEST).toBe('offscreen/gpu-info-request');
     expect(GPU_INFO_RESPONSE).toBe('offscreen/gpu-info-response');
+  });
+
+  it('keeps recreate-offscreen constants stable', () => {
+    expect(RECREATE_OFFSCREEN_REQUEST).toBe('offscreen/recreate-request');
+    expect(RECREATE_OFFSCREEN_RESPONSE).toBe('offscreen/recreate-response');
+  });
+});
+
+describe('isRecreateOffscreenRequest', () => {
+  it('accepts a well-formed request', () => {
+    expect(isRecreateOffscreenRequest({ type: RECREATE_OFFSCREEN_REQUEST })).toBe(true);
+  });
+
+  it('rejects null and primitives', () => {
+    expect(isRecreateOffscreenRequest(null)).toBe(false);
+    expect(isRecreateOffscreenRequest(undefined)).toBe(false);
+    expect(isRecreateOffscreenRequest('foo')).toBe(false);
+  });
+
+  it('rejects wrong discriminator', () => {
+    expect(isRecreateOffscreenRequest({ type: 'other' })).toBe(false);
+  });
+});
+
+describe('isRecreateOffscreenResponse', () => {
+  it('accepts ok:true', () => {
+    expect(isRecreateOffscreenResponse({ type: RECREATE_OFFSCREEN_RESPONSE, ok: true })).toBe(true);
+  });
+
+  it('accepts ok:false with error string', () => {
+    expect(
+      isRecreateOffscreenResponse({
+        type: RECREATE_OFFSCREEN_RESPONSE,
+        ok: false,
+        error: 'boom',
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects ok:false without error', () => {
+    expect(isRecreateOffscreenResponse({ type: RECREATE_OFFSCREEN_RESPONSE, ok: false })).toBe(
+      false,
+    );
+  });
+
+  it('rejects wrong discriminator and primitives', () => {
+    expect(isRecreateOffscreenResponse(null)).toBe(false);
+    expect(isRecreateOffscreenResponse({ type: 'other', ok: true })).toBe(false);
   });
 });
 

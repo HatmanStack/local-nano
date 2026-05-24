@@ -45,6 +45,38 @@ export function isEnsureOffscreenResponse(value: unknown): value is EnsureOffscr
   return false;
 }
 
+export const RECREATE_OFFSCREEN_REQUEST = 'offscreen/recreate-request' as const;
+export const RECREATE_OFFSCREEN_RESPONSE = 'offscreen/recreate-response' as const;
+
+/**
+ * Force-recreate the offscreen document (ADR-R4). Asks the service worker to
+ * reset the sticky `documentReady` (via `closeOffscreen`) and create a fresh
+ * document. Distinct from `ENSURE_OFFSCREEN_REQUEST`, which trusts the sticky
+ * flag and can no-op against a crashed document. Carries no tier in Phase 1;
+ * the fresh document loads the base tier on first use.
+ */
+export interface RecreateOffscreenRequest {
+  type: typeof RECREATE_OFFSCREEN_REQUEST;
+}
+
+export type RecreateOffscreenResponse =
+  | { type: typeof RECREATE_OFFSCREEN_RESPONSE; ok: true }
+  | { type: typeof RECREATE_OFFSCREEN_RESPONSE; ok: false; error: string };
+
+export function isRecreateOffscreenRequest(value: unknown): value is RecreateOffscreenRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  return (value as Record<string, unknown>).type === RECREATE_OFFSCREEN_REQUEST;
+}
+
+export function isRecreateOffscreenResponse(value: unknown): value is RecreateOffscreenResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== RECREATE_OFFSCREEN_RESPONSE) return false;
+  if (v.ok === true) return true;
+  if (v.ok === false) return typeof v.error === 'string';
+  return false;
+}
+
 export const REBUILD_SESSION_REQUEST = 'offscreen/rebuild-session-request' as const;
 export const REBUILD_SESSION_RESPONSE = 'offscreen/rebuild-session-response' as const;
 

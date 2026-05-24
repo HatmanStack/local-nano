@@ -16,6 +16,9 @@ import {
   ENSURE_OFFSCREEN_RESPONSE,
   type EnsureOffscreenResponse,
   isEnsureOffscreenRequest,
+  isRecreateOffscreenRequest,
+  RECREATE_OFFSCREEN_RESPONSE,
+  type RecreateOffscreenResponse,
 } from '../offscreen/protocol.js';
 import { type StreamPromptOptions, streamOverPort } from '../offscreen/stream-client.js';
 
@@ -73,30 +76,77 @@ export async function closeOffscreen(): Promise<void> {
 }
 
 /**
+ * Force-recreate the offscreen document (ADR-R4). `ensureOffscreen` trusts the
+ * sticky `documentReady` and so can no-op against a document that crashed; this
+ * path resets that flag unconditionally then builds a fresh document.
+ *
+ * `closeOffscreen()` already resets `documentReady` and `createInFlight` in its
+ * `finally`, so the reset happens even when `closeDocument()` rejects (a
+ * crashed or absent document can make it reject). The rejection is swallowed
+ * here on purpose. We do NOT consult `hasDocument()` to decide whether to
+ * recreate: a crashed document may still report as present, so we always reset
+ * then create.
+ */
+export async function recreateOffscreen(): Promise<void> {
+  try {
+    await closeOffscreen();
+  } catch {
+    // A crashed or absent document can make closeDocument() reject. The
+    // closeOffscreen finally still reset the sticky state, so proceed.
+  }
+  await ensureOffscreen();
+}
+
+/**
  * Register a `chrome.runtime.onMessage` listener that fields
- * `ENSURE_OFFSCREEN_REQUEST` messages from content scripts. Call this once
- * from `background.ts` at top level. Idempotent across SW restarts —
- * Chrome dedupes addListener calls keyed by the function reference.
+ * `ENSURE_OFFSCREEN_REQUEST` and `RECREATE_OFFSCREEN_REQUEST` messages from
+ * content scripts. Call this once from `background.ts` at top level. Idempotent
+ * across SW restarts — Chrome dedupes addListener calls keyed by the function
+ * reference.
+ *
+ * Returns `true` only for owned messages (to keep the reply channel open for
+ * the async response) and `false` otherwise, preserving the MV3
+ * channel-race discipline so a sibling listener can still answer.
  */
 export function installEnsureListener(): void {
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (!isEnsureOffscreenRequest(msg)) return false;
-    ensureOffscreen().then(
-      () => {
-        const ok: EnsureOffscreenResponse = { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
-        sendResponse(ok);
-      },
-      (err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        const fail: EnsureOffscreenResponse = {
-          type: ENSURE_OFFSCREEN_RESPONSE,
-          ok: false,
-          error: message,
-        };
-        sendResponse(fail);
-      },
-    );
-    return true; // keep the channel open for the async reply
+    if (isEnsureOffscreenRequest(msg)) {
+      ensureOffscreen().then(
+        () => {
+          const ok: EnsureOffscreenResponse = { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+          sendResponse(ok);
+        },
+        (err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          const fail: EnsureOffscreenResponse = {
+            type: ENSURE_OFFSCREEN_RESPONSE,
+            ok: false,
+            error: message,
+          };
+          sendResponse(fail);
+        },
+      );
+      return true; // keep the channel open for the async reply
+    }
+    if (isRecreateOffscreenRequest(msg)) {
+      recreateOffscreen().then(
+        () => {
+          const ok: RecreateOffscreenResponse = { type: RECREATE_OFFSCREEN_RESPONSE, ok: true };
+          sendResponse(ok);
+        },
+        (err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          const fail: RecreateOffscreenResponse = {
+            type: RECREATE_OFFSCREEN_RESPONSE,
+            ok: false,
+            error: message,
+          };
+          sendResponse(fail);
+        },
+      );
+      return true; // keep the channel open for the async reply
+    }
+    return false;
   });
 }
 

@@ -20,8 +20,11 @@ import {
   isEnsureOffscreenResponse,
   isGpuInfoResponse,
   isRebuildSessionResponse,
+  isRecreateOffscreenResponse,
   REBUILD_SESSION_REQUEST,
+  RECREATE_OFFSCREEN_REQUEST,
   type RebuildSessionRequest,
+  type RecreateOffscreenRequest,
 } from './protocol.js';
 import { type StreamPromptOptions, streamOverPort } from './stream-client.js';
 
@@ -222,6 +225,26 @@ export async function getGpuInfo(): Promise<GpuInfoSnapshot> {
     console.warn('[local-nano] getGpuInfo failed; using conservative defaults:', err);
     return conservative;
   }
+}
+
+/**
+ * Force-recreate the offscreen document (ADR-R4). Asks the service worker to
+ * reset the sticky `documentReady` and build a fresh document, recovering a
+ * document that itself crashed (which `rebuildSession` cannot, since it only
+ * rebuilds the polyfill session inside a live document). Throws on
+ * `chrome.runtime.lastError`, a malformed reply, or `ok:false`.
+ */
+export async function recreateOffscreen(): Promise<void> {
+  const request: RecreateOffscreenRequest = { type: RECREATE_OFFSCREEN_REQUEST };
+  const reply = (await chrome.runtime.sendMessage(request)) as unknown;
+  const lastError = chrome.runtime.lastError;
+  if (lastError) {
+    throw new Error(`recreate-offscreen failed: ${lastError.message ?? 'unknown'}`);
+  }
+  if (!isRecreateOffscreenResponse(reply)) {
+    throw new Error('recreate-offscreen: malformed reply from service worker');
+  }
+  if (!reply.ok) throw new Error(reply.error);
 }
 
 /**
