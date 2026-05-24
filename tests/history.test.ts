@@ -79,6 +79,15 @@ describe('saveHistory', () => {
     await saveHistory('k', entries);
     expect(await loadHistory('k')).toEqual(entries);
   });
+
+  it('resolves when the underlying set resolves', async () => {
+    await expect(saveHistory('k', [{ role: 'user', text: 'q' }])).resolves.toBeUndefined();
+  });
+
+  it('propagates a rejecting set so the caller can react to quota errors', async () => {
+    chromeMock.storage.local.set.mockRejectedValueOnce(new Error('QUOTA_BYTES quota exceeded'));
+    await expect(saveHistory('k', [{ role: 'user', text: 'q' }])).rejects.toThrow(/QUOTA/);
+  });
 });
 
 describe('saveHistory — MAX_HISTORY eviction', () => {

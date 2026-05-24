@@ -110,6 +110,20 @@ export function preflightWarning(info: GpuInfoSnapshot): string | null {
 }
 
 /**
+ * True when a storage write rejection looks like a quota exhaustion rather
+ * than a transient/unknown failure. Chrome surfaces this either as an Error
+ * whose message mentions QUOTA/quota or via `chrome.runtime.lastError`.
+ * Matching the wording keeps non-quota failures on the existing
+ * console.error path. Exported for unit testing.
+ */
+export function isQuotaError(err: unknown): boolean {
+  const lastErr = chrome.runtime?.lastError?.message;
+  if (typeof lastErr === 'string' && /quota/i.test(lastErr)) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /quota/i.test(message);
+}
+
+/**
  * DOM elements and values that content.ts provides at injection time.
  * session.ts does not touch document directly.
  */
@@ -161,8 +175,24 @@ export function initSession(deps: SessionDeps): void {
     }
   }
 
+  // Fire-and-forget persistence. A quota rejection (chrome.storage.local has
+  // a fixed byte budget) previously only reached console.error, so history
+  // could silently stop saving on large-turn pages. Surface it once per
+  // session as a non-blocking advisory bubble; the turn's output is already
+  // rendered, so we never block on a failed write.
+  let warnedAboutStorageQuota = false;
   function persist() {
     saveHistoryToStorage(STORAGE_KEY, history).catch((err: unknown) => {
+      if (isQuotaError(err)) {
+        if (!warnedAboutStorageQuota) {
+          warnedAboutStorageQuota = true;
+          addMessage(
+            'system',
+            'History is full for this page and stopped saving. Clear the conversation to resume saving.',
+          );
+        }
+        return;
+      }
       console.error('[local-nano] history write failed:', err);
     });
   }
