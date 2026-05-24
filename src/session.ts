@@ -736,6 +736,10 @@ export function initSession(deps: SessionDeps): void {
   let activeTier: Tier | null = null;
   let ladderPath: LadderPathEntry[] = [];
   let chosenModel: string | null = null;
+  // The most recent warmup failure, so the always-available Copy affordance can
+  // include it in the on-demand diagnostic. Null before any failure and after a
+  // successful load; the diagnostic renders its error fields as `none` then.
+  let lastWarmError: unknown = null;
 
   // Map the queried GPU snapshot to the persistence capability shape (ADR-R7).
   // Drops the configuredThreshold, which is a panel-side derivation knob, not a
@@ -804,6 +808,9 @@ export function initSession(deps: SessionDeps): void {
   }
 
   function renderTerminalFailure(err: unknown): void {
+    // Record for the always-available Copy affordance so a later copy carries
+    // this failure even after the bubble is dismissed.
+    lastWarmError = err;
     // classifyFailure annotates the console log; the terminal UI is shown for
     // any exhausted ladder, since the load not completing IS the release-gate
     // scenario this feature removes the silent death from.
@@ -884,6 +891,7 @@ export function initSession(deps: SessionDeps): void {
    * clearly network-flavored.
    */
   function renderNetworkFailure(err: unknown): void {
+    lastWarmError = err;
     const { errorMessage } = errorInfo(err);
     const diagnostic = buildDiagnostic(buildDiagnosticInput(err));
     console.warn('[local-nano] warmup failed (network); showing connection message:', errorMessage);
@@ -913,6 +921,71 @@ export function initSession(deps: SessionDeps): void {
     });
     controls.appendChild(retryBtn);
     bubble.appendChild(controls);
+  }
+
+  /**
+   * Copy text to the clipboard (ADR-R11). Prefers the async
+   * `navigator.clipboard.writeText`; on rejection or when the API is absent
+   * (restricted contexts, older runtimes), falls back to a hidden textarea plus
+   * the synchronous `document.execCommand('copy')`. Both paths are wrapped so a
+   * failure resolves false rather than throwing. This is the ONLY side effect of
+   * the diagnostic: nothing is sent, logged to the network, or persisted.
+   */
+  async function copyToClipboard(text: string): Promise<boolean> {
+    const clip = (navigator as { clipboard?: { writeText?: (t: string) => Promise<void> } })
+      .clipboard;
+    if (clip?.writeText) {
+      try {
+        await clip.writeText(text);
+        return true;
+      } catch {
+        // Fall through to the execCommand path below.
+      }
+    }
+    try {
+      const ta = window.document.createElement('textarea');
+      ta.value = text;
+      // Keep it out of the visible layout and off-screen.
+      ta.style.cssText = 'position: fixed; top: -9999px; left: -9999px; opacity: 0;';
+      window.document.body.appendChild(ta);
+      ta.select();
+      const ok = window.document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Build the always-available "Copy diagnostic" affordance (ADR-R11, Task 5.3).
+   * Present whenever the panel is open, independent of failure state. On click it
+   * builds the diagnostic from the CURRENT live state (the last capability
+   * snapshot, the current ladder path and chosen model, the most recent error if
+   * any) and copies it locally. Copy-only: nothing is sent or persisted.
+   */
+  function makeCopyDiagnosticAffordance(): HTMLButtonElement {
+    const btn = window.document.createElement('button');
+    btn.textContent = 'Copy diagnostic';
+    btn.setAttribute('aria-label', 'Copy diagnostic to clipboard');
+    // Muted, unobtrusive, top-right of the panel root, consistent with BUTTON_CSS
+    // but quieter so it never competes with the chat. Absolute within the
+    // position: fixed panel root so it does not disturb the chat flex layout.
+    btn.style.cssText =
+      'position: absolute; top: 4px; right: 4px; z-index: 1; padding: 1px 6px; font: inherit; font-size: 11px; cursor: pointer; background: transparent; color: #999; border: 1px solid #555; border-radius: 4px;';
+    let restoreTimer: ReturnType<typeof setTimeout> | null = null;
+    btn.addEventListener('click', () => {
+      const text = buildDiagnostic(buildDiagnosticInput(lastWarmError));
+      void (async () => {
+        const ok = await copyToClipboard(text);
+        btn.textContent = ok ? 'Copied' : 'Copy failed';
+        if (restoreTimer) clearTimeout(restoreTimer);
+        restoreTimer = setTimeout(() => {
+          btn.textContent = 'Copy diagnostic';
+        }, 1500);
+      })();
+    });
+    return btn;
   }
 
   /**
@@ -1086,6 +1159,9 @@ export function initSession(deps: SessionDeps): void {
 
       if (loaded) {
         modelReady = true;
+        // A successful load clears any prior failure from the on-demand
+        // diagnostic (the Copy affordance now reports a healthy state).
+        lastWarmError = null;
         if (warmHint.parentNode) warmHint.remove();
       } else if (networkFailed) {
         // A weights-download/network failure: distinct retryable connection
@@ -1119,6 +1195,11 @@ export function initSession(deps: SessionDeps): void {
       if (!activeAbort) setIdleState(actionBtn, i);
     }
   }
+
+  // ---- Always-available copy-diagnostic affordance (ADR-R11, Task 5.3) ----
+  // Mounted on the panel root once, so it is present whenever the panel is open
+  // regardless of load state. Copy-only: nothing leaves the device.
+  root.appendChild(makeCopyDiagnosticAffordance());
 
   // ---- Toggle listener ----
   let convertedAnchor = false;

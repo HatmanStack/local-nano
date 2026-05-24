@@ -1012,6 +1012,165 @@ describe('initSession — network/download failure', () => {
   });
 });
 
+describe('initSession — copy-diagnostic affordance', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  function findCopyButton(root: HTMLElement): HTMLButtonElement {
+    const btn = Array.from(root.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Copy diagnostic',
+    );
+    if (!btn) throw new Error('Copy diagnostic affordance not found');
+    return btn as HTMLButtonElement;
+  }
+
+  it('renders the affordance on the panel root right after init, with no failure', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    // Present immediately, independent of any load/failure state.
+    const btn = findCopyButton(deps._root);
+    expect(btn.textContent).toBe('Copy diagnostic');
+  });
+
+  it('builds a diagnostic and writes it to the clipboard on click', async () => {
+    const writeText = vi.fn((_t: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      const deps = makeDeps();
+      initSession(deps);
+      const btn = findCopyButton(deps._root);
+      btn.click();
+      await flushMicrotasks();
+      expect(writeText).toHaveBeenCalledTimes(1);
+      const copied = writeText.mock.calls[0][0] as string;
+      // The built diagnostic carries the expected fields, with no error yet.
+      expect(copied).toContain('device: webgpu');
+      expect(copied).toContain('errorClass: none');
+      expect(copied).toContain('extensionVersion: 0.2.4');
+      expect(copied).toContain(`userAgent: ${navigator.userAgent}`);
+      // The label flips to a confirmation.
+      expect(btn.textContent).toBe('Copied');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  it('falls back to execCommand when clipboard.writeText rejects', async () => {
+    const writeText = vi.fn(() => Promise.reject(new Error('denied')));
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const execCommand = vi.fn(() => true);
+    (document as unknown as { execCommand: typeof execCommand }).execCommand = execCommand;
+    try {
+      const deps = makeDeps();
+      initSession(deps);
+      const btn = findCopyButton(deps._root);
+      btn.click();
+      await flushMicrotasks();
+      // The async path was attempted first, then the synchronous fallback ran.
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(execCommand).toHaveBeenCalledWith('copy');
+      expect(btn.textContent).toBe('Copied');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      Reflect.deleteProperty(document as unknown as Record<string, unknown>, 'execCommand');
+    }
+  });
+
+  it('shows "Copy failed" when both clipboard paths fail, without throwing', async () => {
+    const writeText = vi.fn(() => Promise.reject(new Error('denied')));
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const execCommand = vi.fn(() => {
+      throw new Error('execCommand unavailable');
+    });
+    (document as unknown as { execCommand: typeof execCommand }).execCommand = execCommand;
+    try {
+      const deps = makeDeps();
+      initSession(deps);
+      const btn = findCopyButton(deps._root);
+      expect(() => btn.click()).not.toThrow();
+      await flushMicrotasks();
+      expect(btn.textContent).toBe('Copy failed');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      Reflect.deleteProperty(document as unknown as Record<string, unknown>, 'execCommand');
+    }
+  });
+
+  it('includes the live failure and ladder path after a terminal failure', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const writeText = vi.fn((_t: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      const btn = findCopyButton(deps._root);
+      btn.click();
+      await flushMicrotasks();
+      const copied = writeText.mock.calls[0][0] as string;
+      // The on-demand diagnostic reflects the last failure and the walked path.
+      expect(copied).toContain('errorMessage: VK_ERROR_OUT_OF_DEVICE_MEMORY');
+      expect(copied).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q4f16 -> load-failure');
+      expect(copied).toContain('chosenModel: onnx-community/gemma-4-E2B-it-ONNX');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('does not send the diagnostic over the network (no fetch, no sendMessage)', async () => {
+    const writeText = vi.fn((_t: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const fetchSpy = vi.fn();
+    (globalThis as unknown as { fetch: typeof fetchSpy }).fetch = fetchSpy;
+    const sendMessageBefore = chromeMock.runtime.sendMessage.mock.calls.length;
+    try {
+      const deps = makeDeps();
+      initSession(deps);
+      const btn = findCopyButton(deps._root);
+      btn.click();
+      await flushMicrotasks();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      // No new runtime.sendMessage was issued for the copy.
+      expect(chromeMock.runtime.sendMessage.mock.calls.length).toBe(sendMessageBefore);
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      Reflect.deleteProperty(globalThis as unknown as Record<string, unknown>, 'fetch');
+    }
+  });
+});
+
 describe('initSession — streaming', () => {
   beforeEach(() => {
     vi.clearAllMocks();
