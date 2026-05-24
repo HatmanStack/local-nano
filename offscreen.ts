@@ -19,6 +19,7 @@
 
 import transformersConfig from './.env.json';
 import { debugLog } from './src/debug.js';
+import { BusyGate } from './src/offscreen/busy-gate.js';
 import { classifyOffscreenMessage } from './src/offscreen/dispatch.js';
 import {
   COUNT_TOKENS_RESPONSE,
@@ -59,6 +60,14 @@ const SYSTEM_INSTRUCTION = 'You are a helpful assistant. Answer concisely and di
 
 let heavyPromise: Promise<LoadedHeavy> | null = null;
 let sessionPromise: Promise<LanguageModelSession> | null = null;
+
+// One generation at a time against the single shared session. The
+// polyfill mutates one `#history`; two ports streaming concurrently would
+// interleave on one ONNX generator and corrupt that history, so a second
+// `stream/request` is rejected with a busy error rather than queued
+// (reject-when-busy is YAGNI-sufficient for a single-user extension). The
+// gate is module-scoped because the session it guards is module-scoped.
+const generationGate = new BusyGate();
 
 function loadHeavy(): Promise<LoadedHeavy> {
   if (heavyPromise) return heavyPromise;
@@ -304,6 +313,25 @@ chrome.runtime.onConnect.addListener((port) => {
     if (!isStreamRequest(raw)) return;
 
     const id = raw.id;
+
+    // Reject a second concurrent generation on the shared session. Done
+    // before allocating the controller / read loop so a busy request is a
+    // clean no-op aside from the StreamDone reply.
+    if (!generationGate.tryAcquire()) {
+      const busy: StreamDone = {
+        type: STREAM_DONE,
+        id,
+        ok: false,
+        error: 'busy: another generation is in progress',
+      };
+      try {
+        port.postMessage(busy);
+      } catch {
+        // Caller gone — nothing to deliver.
+      }
+      return;
+    }
+
     const controller = new AbortController();
     activeAborts.set(id, controller);
 
@@ -364,6 +392,10 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       } finally {
         activeAborts.delete(id);
+        // Free the single generation slot on every outcome — success,
+        // error, and abort/disconnect (disconnect aborts the controller,
+        // which ends the read loop and runs this finally).
+        generationGate.release();
       }
     })();
   });
