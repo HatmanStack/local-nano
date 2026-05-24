@@ -26,7 +26,7 @@ What's still viable:
 
 - **Stick to ≤1B-parameter models.** Qwen2.5-0.5B-Instruct is the sweet spot in our testing — it runs without tripping the heap, gives coherent answers, and finishes prompts in tens of seconds rather than minutes.
 - **Prefer `q8` or `fp16` dtypes.** Both avoid `GatherBlockQuantized`. q8 is smaller (~500 MB for a 0.5B model); fp16 is bigger (~1 GB) but slightly more numerically stable.
-- **Expect 1–3 tokens/second.** Real-world. The first token of a response also has a long prefill cost — for ~1500 chars of page context that's roughly 30–60 seconds of work before output starts. The panel shows a three-dot animation while generating and `Loading model… NN%` during weight download.
+- **Expect 1–3 tokens/second.** Real-world. The first token of a response also has a long prefill cost — for ~1500 chars of page context that's roughly 30–60 seconds of work before output starts. The panel shows a three-dot animation while generating; while the model loads it shows a live elapsed-seconds counter (`Loading model… Ns`) rather than a percentage, since the app does not consume download-progress events.
 
 Configure it as:
 

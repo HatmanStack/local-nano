@@ -41,8 +41,9 @@ This runs esbuild in watch mode. After each save, refresh the extension at `chro
 
 - **Content script logs.** Open DevTools on the page itself. The extension prefixes everything with `[local-nano]`.
 - **Service worker logs.** Click the **service worker** link on the extension's card at `chrome://extensions`. That opens a dedicated DevTools for the worker.
+- **Offscreen document logs.** The model runs in a hidden offscreen document. Its logs (prefixed `[local-nano/offscreen]`, including `heavy modules loaded`) appear in the offscreen document's own DevTools, reachable from `chrome://extensions` → the extension's **Inspect views** list (look for `offscreen.html`).
 - **Storage.** Inspect persisted chat history at DevTools → Application → Storage → Extension Storage.
-- **Model download progress.** The panel shows `Loading model… NN%` while weights are coming down. If you see a permission error, the host permissions in `manifest.json` are the place to look — Transformers.js fetches from `huggingface.co` and `cdn-lfs.huggingface.co`.
+- **Model load progress.** While the model loads the panel shows a live elapsed-seconds counter (`Loading model… Ns`), not a percentage; after ~45s it appends "taking longer than usual" remedies. If you see a permission error, the host permissions in `manifest.json` are the place to look — Transformers.js fetches from `huggingface.co` and `cdn-lfs.huggingface.co`.
 
 ## Project layout
 
