@@ -44,6 +44,12 @@ If WebGPU isn't available the polyfill will surface an error in the chat panel; 
 
 When the panel opens, the extension queries the WebGPU adapter before the heavy model load. If it finds no hardware WebGPU adapter (a software fallback) or an adapter whose max buffer size looks too small to hold the model, it shows a one-time "Heads up…" system message in the chat advising you to set `"device": "wasm"` in `.env.json` (CPU — slower but reliable). The advisory is informational only: the load is still attempted, since the capability snapshot can false-negative. If the load then fails, the advisory tells you what to try.
 
+#### Terminal load failure and manual Retry
+
+If the model fails to load at warmup (for example, the offscreen document crashes mid-load), the panel no longer degrades silently to lazy loading. It shows a terminal system message ("Couldn't load the model on this device.") with a line of guidance and a copyable diagnostic block (device, software-fallback flag, adapter buffer size, the error class and message, and the extension version). The message includes a Retry button that force-recreates the offscreen document and re-runs the load.
+
+Recovery is manual: nothing retries automatically, and there is no timer. Click Retry to attempt the load again, or set `"device": "wasm"` in `.env.json` for a slower CPU fallback. The diagnostic block is copy-only; nothing leaves your device.
+
 ### `dtype` (string)
 
 Quantization level for model weights. Smaller dtypes mean smaller download, lower memory, and slightly worse quality. Common values:
