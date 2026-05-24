@@ -360,12 +360,6 @@ function handleWarmup(msg: WarmupRequest, sendResponse: SendResponse): void {
           device: msg.tier.device,
           dtype: msg.tier.dtype,
         };
-        // Override the in-memory config (never the on-disk .env.json). The
-        // base import supplies tier 0 / apiKey; this overrides model/device/dtype.
-        (window as unknown as Record<string, unknown>).TRANSFORMERS_CONFIG = applyTierToConfig(
-          transformersConfig as Record<string, unknown>,
-          tier,
-        );
         // Safety net for a soft tier change inside a still-live document
         // (ADR-R1/R3): if a session is already loaded for a DIFFERENT tier,
         // destroy it and null sessionPromise before creating, so two loads never
@@ -381,6 +375,22 @@ function handleWarmup(msg: WarmupRequest, sendResponse: SendResponse): void {
           sessionPromise = null;
         }
         activeTier = tier;
+        // Load the heavy singleton BEFORE applying the override. loadHeavy()
+        // sets window.TRANSFORMERS_CONFIG to the base import as part of its
+        // one-time init; on a freshly recreated document (heavyPromise === null,
+        // i.e. every ladder rung) that reset would otherwise clobber the tier
+        // override before LanguageModel.create() reads it — so every rung would
+        // load the base .env.json config and the ladder would never actually
+        // vary dtype/device. Running it first lets the override land last;
+        // ensureSession's own loadHeavy() below then returns the cached promise
+        // and does not reset the config again.
+        await loadHeavy();
+        // Override the in-memory config (never the on-disk .env.json). The
+        // base import supplies tier 0 / apiKey; this overrides model/device/dtype.
+        (window as unknown as Record<string, unknown>).TRANSFORMERS_CONFIG = applyTierToConfig(
+          transformersConfig as Record<string, unknown>,
+          tier,
+        );
       }
       // Relay download progress to any connected progress port (ADR-R10). The
       // broadcast is per-event and individually guarded, so a disconnected

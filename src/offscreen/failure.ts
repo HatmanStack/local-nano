@@ -38,9 +38,13 @@ export type LoadFailureClass = 'terminal' | 'transient' | 'network';
  *   (trailing slash / scheme) so a non-network error that merely names
  *   "huggingface" (e.g. an auth or config message) is NOT misread as a
  *   download failure and shunted away from the ladder.
- * - `status code 4` / `status code 5` / `(status 4` / `(status 5`: a non-200
- *   HTTP status from the HF fetch (4xx/5xx), e.g. a 403 on a gated repo or a
- *   503 on an HF outage.
+ * - `status code 5` / `(status 5`: a 5xx HTTP status from the HF fetch (e.g. a
+ *   503 outage or 500 server error) — genuinely transient, so retry the same
+ *   tier. 4xx statuses are deliberately NOT listed: a 403 (gated repo) or 404
+ *   (bad model id) is permanent for this tier, so it falls through to the
+ *   transient/terminal path, letting the ladder advance and surface the real
+ *   error in the terminal diagnostic instead of looping on a misleading "check
+ *   your connection" retry.
  */
 const NETWORK_SIGNALS: readonly string[] = [
   'failed to fetch',
@@ -54,9 +58,7 @@ const NETWORK_SIGNALS: readonly string[] = [
   'failed to download',
   'huggingface.co/',
   '://hf.co/',
-  'status code 4',
   'status code 5',
-  '(status 4',
   '(status 5',
 ];
 

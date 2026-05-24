@@ -87,11 +87,16 @@ describe('classifyLoadFailure', () => {
     ).toBe('network');
   });
 
-  it('classifies a non-200 HF status string as network', () => {
-    expect(classifyLoadFailure(new Error('Unauthorized access to model file (status 403)'))).toBe(
-      'network',
-    );
+  it('classifies a 5xx HF status as network but a 4xx as transient', () => {
+    // 5xx is a transient server-side issue — retry the same tier.
     expect(classifyLoadFailure(new Error('Request failed with status code 503'))).toBe('network');
+    expect(classifyLoadFailure(new Error('(status 500) internal server error'))).toBe('network');
+    // 4xx is permanent for this tier (403 gated, 404 bad id) — fall through to
+    // transient so the ladder advances instead of looping on "check connection".
+    expect(classifyLoadFailure(new Error('Unauthorized access to model file (status 403)'))).toBe(
+      'transient',
+    );
+    expect(classifyLoadFailure(new Error('Request failed with status code 404'))).toBe('transient');
   });
 
   it('classifies a download-failed message as network', () => {
