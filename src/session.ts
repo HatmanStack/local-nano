@@ -8,6 +8,7 @@ import {
   saveHistory as saveHistoryToStorage,
   storageKey,
 } from './history.js';
+import { CAPABLE_MIN_BUFFER_BYTES } from './offscreen/capability.js';
 import {
   type CapabilitySnapshot,
   clearCapabilityRecord,
@@ -119,7 +120,7 @@ export function preflightWarning(info: GpuInfoSnapshot): string | null {
   if (info.isFallback) {
     return 'Heads up: no hardware WebGPU adapter detected (software fallback). The model may fail to load on this device — if it does, set "device": "wasm" in .env.json (CPU, slower but reliable).';
   }
-  if (info.maxBufferSize !== null && info.maxBufferSize < 1024 * 1024 * 1024) {
+  if (info.maxBufferSize !== null && info.maxBufferSize < CAPABLE_MIN_BUFFER_BYTES) {
     const mb = Math.round(info.maxBufferSize / (1024 * 1024));
     return `Heads up: this GPU's max buffer is ~${mb} MiB, which may be too small to load the model. If it fails, try a smaller model or "device": "wasm" in .env.json.`;
   }
