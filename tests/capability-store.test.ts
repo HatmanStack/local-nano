@@ -97,6 +97,19 @@ describe('capability-store', () => {
     await expect(loadCapabilityRecord(VERSION)).resolves.toBeNull();
   });
 
+  it('rejects a record whose capability.maxBufferSize is non-finite', async () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      chromeMock.storage.local.store[CAPABILITY_KEY] = {
+        schemaVersion: SCHEMA_VERSION,
+        extensionVersion: VERSION,
+        knownGood: TIER_0,
+        knownBad: [],
+        capability: { device: 'webgpu', isFallback: false, maxBufferSize: bad },
+      };
+      await expect(loadCapabilityRecord(VERSION)).resolves.toBeNull();
+    }
+  });
+
   it('clearCapabilityRecord removes the record via storage.remove', async () => {
     await recordKnownGood(VERSION, TIER_WASM, CAP);
     expect(chromeMock.storage.local.store[CAPABILITY_KEY]).toBeTruthy();

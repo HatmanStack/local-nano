@@ -33,8 +33,11 @@ export type LoadFailureClass = 'terminal' | 'transient' | 'network';
  *   failure messages.
  * - `download failed` / `failed to download`: the transformers loader wording
  *   when a model file download does not complete.
- * - `huggingface` / `hf.co` / `huggingface.co`: the HF host, present in a fetch
- *   error against the weights repo.
+ * - `huggingface.co/` / `://hf.co/`: the HF host in URL-shaped context, present
+ *   in a fetch error against the weights repo. Required to be URL-shaped
+ *   (trailing slash / scheme) so a non-network error that merely names
+ *   "huggingface" (e.g. an auth or config message) is NOT misread as a
+ *   download failure and shunted away from the ladder.
  * - `status code 4` / `status code 5` / `(status 4` / `(status 5`: a non-200
  *   HTTP status from the HF fetch (4xx/5xx), e.g. a 403 on a gated repo or a
  *   503 on an HF outage.
@@ -49,8 +52,8 @@ const NETWORK_SIGNALS: readonly string[] = [
   'err_connection',
   'download failed',
   'failed to download',
-  'huggingface',
-  'hf.co',
+  'huggingface.co/',
+  '://hf.co/',
   'status code 4',
   'status code 5',
   '(status 4',

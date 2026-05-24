@@ -29,11 +29,8 @@ import {
   GPU_INFO_RESPONSE,
   type GpuInfoResponse,
   type HistoryTurn,
-  isCountTokensRequest,
-  isRebuildSessionRequest,
   isStreamAbort,
   isStreamRequest,
-  isWarmupRequest,
   type ProgressFrame,
   REBUILD_SESSION_RESPONSE,
   type RebuildSessionRequest,
@@ -413,14 +410,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     case 'gpu-info':
       handleGpuInfo(sendResponse);
       return true;
+    // classifyOffscreenMessage validated the shape with the same protocol
+    // guard, and each handler closes the reply channel via its own try/catch,
+    // so call unconditionally. A re-guard here could only fail on dispatch/
+    // protocol drift, and a false guard would skip the handler while still
+    // returning true — leaking the open reply channel until Chrome times it out.
     case 'rebuild-session':
-      if (isRebuildSessionRequest(msg)) handleRebuildSession(msg, sendResponse);
+      handleRebuildSession(msg as RebuildSessionRequest, sendResponse);
       return true;
     case 'count-tokens':
-      if (isCountTokensRequest(msg)) handleCountTokens(msg, sendResponse);
+      handleCountTokens(msg as CountTokensRequest, sendResponse);
       return true;
     case 'warmup':
-      if (isWarmupRequest(msg)) handleWarmup(msg, sendResponse);
+      handleWarmup(msg as WarmupRequest, sendResponse);
       return true;
   }
 });

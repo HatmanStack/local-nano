@@ -1104,7 +1104,7 @@ export function initSession(deps: SessionDeps): void {
       const knownBadKeys = new Set((record?.knownBad ?? []).map(tierKey));
       const knownGoodKey = record?.knownGood ? tierKey(record.knownGood) : null;
 
-      let attemptedIndex: number | null = firstTierIndex(ladder, knownGoodKey, knownBadKeys);
+      let attemptedIndex = firstTierIndex(ladder, knownGoodKey, knownBadKeys);
       let lastError: unknown = null;
       let loaded = false;
       // Set when a tier's failure was a weights-download/network error
@@ -1171,10 +1171,18 @@ export function initSession(deps: SessionDeps): void {
         renderNetworkFailure(lastError);
       } else {
         // The ladder is exhausted: surface the terminal bubble with the
-        // diagnostic, the tiers tried, and the manual controls.
+        // diagnostic, the tiers tried, and the manual controls. When the walk
+        // was pre-exhausted (every tier was already known-bad from a prior run,
+        // so the loop never ran and lastError is null), pass a synthetic error
+        // so the diagnostic explains why instead of rendering errorMessage:none.
         if (warmHint.parentNode) warmHint.remove();
         warmStarted = false;
-        renderTerminalFailure(lastError);
+        renderTerminalFailure(
+          lastError ??
+            new Error(
+              'All fallback options were already ruled out on this device from a prior run. Use "Reset and re-detect" to try again from the top.',
+            ),
+        );
       }
     } catch (err) {
       // An out-of-ladder failure (e.g. recreateOffscreen rejected between

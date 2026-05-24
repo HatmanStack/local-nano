@@ -16,7 +16,13 @@
 
 import { type Tier, tierKey } from './ladder.js';
 
-/** Single storage key for the per-device record. Distinct from history keys. */
+/**
+ * Single storage key for the per-device record. Distinct from history keys.
+ * The `:v1` suffix is frozen and is NOT the invalidation mechanism: record
+ * invalidation is field-driven via `schemaVersion` (shape changes) and
+ * `extensionVersion` (runtime/model changes), so the key string never changes
+ * even when `SCHEMA_VERSION` is bumped.
+ */
 export const CAPABILITY_KEY = 'local-nano:capability:v1';
 
 /** Bumped only when the record shape changes; a mismatch invalidates the record. */
@@ -49,7 +55,10 @@ function isCapabilitySnapshot(value: unknown): value is CapabilitySnapshot {
   const v = value as Record<string, unknown>;
   if (v.device !== 'webgpu' && v.device !== 'wasm') return false;
   if (typeof v.isFallback !== 'boolean') return false;
-  return v.maxBufferSize === null || typeof v.maxBufferSize === 'number';
+  return (
+    v.maxBufferSize === null ||
+    (typeof v.maxBufferSize === 'number' && Number.isFinite(v.maxBufferSize))
+  );
 }
 
 function isCapabilityRecord(value: unknown): value is CapabilityRecord {
@@ -83,6 +92,11 @@ export async function loadCapabilityRecord(
  * Read the current record (or a fresh empty one for this extension version),
  * apply `mutate`, and write it back. Always stamps the current schema and
  * extension version so a write also re-validates a stale record.
+ *
+ * NOT atomic: the read → mutate → write has no compare-and-swap. This is safe
+ * because the only writers are the sequential ladder walk (guarded by a single
+ * `warmStarted` flag and awaited per rung), so capability writes never overlap.
+ * Revisit if a future caller parallelizes capability writes.
  */
 async function readModifyWrite(
   extensionVersion: string,

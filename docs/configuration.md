@@ -46,7 +46,7 @@ When the panel opens, the extension queries the WebGPU adapter before the heavy 
 
 #### Automatic dtype/device fallback ladder
 
-When the model fails to LOAD at warmup, the panel automatically walks a fallback ladder within the configured model before giving up. The order is `q4f16` (the `.env.json` default), then `q8`, then `fp16` on WebGPU, then `q8` on WASM. Between each rung the panel force-recreates the offscreen document so a crashed or GPU-poisoned document never blocks the next attempt, and two loads never overlap. The elapsed counter keeps ticking across the whole walk; the per-tier internals are not surfaced.
+When the model fails to LOAD at warmup, the panel automatically walks a fallback ladder within the configured model before giving up. The order is `q4f16` (the `.env.json` default), then `q8`, then `fp16` on WebGPU, then `q8` on WASM. Between each rung the panel force-recreates the offscreen document, so a crashed or GPU-poisoned document never blocks the next attempt. Recreating between attempts also guarantees that two loads never overlap. The elapsed counter keeps ticking across the whole walk; the per-tier internals are not surfaced.
 
 The resolved outcome is persisted per device in `chrome.storage.local` under `local-nano:capability:v1`: the working tier (known-good) and any tiers that failed (known-bad), plus a capability snapshot. A later cold start skips straight to the known-good tier and skips known-bad tiers, so a device that already settled on a working tier does not re-walk the whole ladder. The record is ignored (re-walked from the top) after an extension version change, which is the safe default after a runtime or model update.
 
