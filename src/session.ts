@@ -25,7 +25,7 @@ import {
   subscribeProgress,
   warmupSession,
 } from './offscreen/client.js';
-import { buildDiagnostic, errorInfo } from './offscreen/diagnostic.js';
+import { buildDiagnostic, errorInfo, type LadderPathEntry } from './offscreen/diagnostic.js';
 import { classifyFailure, classifyLoadFailure } from './offscreen/failure.js';
 import {
   assembleLadder,
@@ -78,6 +78,13 @@ const BUTTON_CSS =
  * overrides everything.
  */
 const HISTORY_TOKEN_WARN_THRESHOLD_DEFAULT = 1500;
+
+/**
+ * The diagnostic's error fields when no failure has occurred (the
+ * always-available Copy affordance built before/without any load failure).
+ * Reads as `none` rather than a fabricated error.
+ */
+const NO_ERROR = { errorClass: 'none', errorMessage: 'none' };
 
 /**
  * How long the model-load elapsed counter ticks before it appends
@@ -721,11 +728,14 @@ export function initSession(deps: SessionDeps): void {
     maxBufferSize: null,
     configuredThreshold: null,
   };
-  // The tier last attempted and the ordered list of tiers tried this walk
-  // (ADR-R1: the panel owns ladder state). The terminal diagnostic reports
-  // the active tier and the path; persistence keys off the attempted tier.
+  // The tier last attempted and the ordered list of tiers tried this walk with
+  // their per-tier outcomes (ADR-R1: the panel owns ladder state). The
+  // diagnostic reports the active tier and the full path; persistence keys off
+  // the attempted tier. `chosenModel` is the model the ladder selected (the
+  // model of the tiers being walked), surfaced in the diagnostic.
   let activeTier: Tier | null = null;
-  let ladderPath: Tier[] = [];
+  let ladderPath: LadderPathEntry[] = [];
+  let chosenModel: string | null = null;
 
   // Map the queried GPU snapshot to the persistence capability shape (ADR-R7).
   // Drops the configuredThreshold, which is a panel-side derivation knob, not a
@@ -736,6 +746,17 @@ export function initSession(deps: SessionDeps): void {
       isFallback: lastGpuInfo.isFallback,
       maxBufferSize: lastGpuInfo.maxBufferSize,
     };
+  }
+
+  // Append a tier's resolved outcome to the per-walk path (the diagnostic
+  // reports it). One entry per attempt, in attempt order.
+  function recordPathOutcome(tier: Tier, outcome: LadderPathEntry['outcome']): void {
+    ladderPath.push({
+      modelName: tier.modelName,
+      device: tier.device,
+      dtype: tier.dtype,
+      outcome,
+    });
   }
 
   /**
@@ -752,34 +773,54 @@ export function initSession(deps: SessionDeps): void {
    * and re-detect", which clears the persisted record and re-walks from tier 0.
    * Both force-recreate the offscreen document first (ADR-R3/R4).
    */
+  /**
+   * Build the diagnostic input from the CURRENT live panel state (ADR-R11).
+   * One source of truth for every diagnostic surface (the terminal bubble, the
+   * network bubble, the always-available Copy affordance), so the rendered
+   * report is consistent. Built on demand, never cached, never auto-sent. When
+   * no error has occurred the caller passes `null` and the error fields read as
+   * `none`.
+   */
+  function buildDiagnosticInput(err: unknown) {
+    const { errorClass, errorMessage } = err === null ? NO_ERROR : errorInfo(err);
+    return {
+      device: lastGpuInfo.device,
+      isFallback: lastGpuInfo.isFallback,
+      maxBufferSize: lastGpuInfo.maxBufferSize,
+      chosenModel,
+      // The last tier attempted (null only if the walk never started a tier,
+      // e.g. a recreate failure before the first load, or no walk has run).
+      activeTier: activeTier
+        ? { modelName: activeTier.modelName, device: activeTier.device, dtype: activeTier.dtype }
+        : null,
+      // A fresh copy each build so the diagnostic captures a stable snapshot of
+      // the path and never shares the mutable accumulator.
+      ladderPath: ladderPath.slice(),
+      errorClass,
+      errorMessage,
+      extensionVersion: chrome.runtime.getManifest().version,
+      userAgent: navigator.userAgent,
+    };
+  }
+
   function renderTerminalFailure(err: unknown): void {
     // classifyFailure annotates the console log; the terminal UI is shown for
     // any exhausted ladder, since the load not completing IS the release-gate
     // scenario this feature removes the silent death from.
     const failureClass = classifyFailure(err);
-    const { errorClass, errorMessage } = errorInfo(err);
-    const diagnostic = buildDiagnostic({
-      device: lastGpuInfo.device,
-      isFallback: lastGpuInfo.isFallback,
-      maxBufferSize: lastGpuInfo.maxBufferSize,
-      // The last tier attempted when the ladder gave up (null only if the walk
-      // never started a tier, e.g. a recreate failure before the first load).
-      activeTier: activeTier
-        ? { modelName: activeTier.modelName, device: activeTier.device, dtype: activeTier.dtype }
-        : null,
-      errorClass,
-      errorMessage,
-      extensionVersion: chrome.runtime.getManifest().version,
-    });
+    const { errorMessage } = errorInfo(err);
+    const diagnostic = buildDiagnostic(buildDiagnosticInput(err));
     console.warn(
       `[local-nano] warmup failed (${failureClass}); showing terminal UI:`,
       errorMessage,
     );
 
-    // Phase 2 carries the ladder path in the message text via a simple join; the
-    // structured diagnostic field is deferred to Phase 5.
+    // The human-readable "Tiers tried" line in the message body stays for quick
+    // scanning; the structured per-tier outcomes live in the diagnostic block.
     const pathLine =
-      ladderPath.length > 0 ? `Tiers tried: ${ladderPath.map(tierKey).join(', ')}` : null;
+      ladderPath.length > 0
+        ? `Tiers tried: ${ladderPath.map((e) => `${e.modelName}|${e.device}|${e.dtype}`).join(', ')}`
+        : null;
 
     const bubble = addMessage(
       'system',
@@ -843,18 +884,8 @@ export function initSession(deps: SessionDeps): void {
    * clearly network-flavored.
    */
   function renderNetworkFailure(err: unknown): void {
-    const { errorClass, errorMessage } = errorInfo(err);
-    const diagnostic = buildDiagnostic({
-      device: lastGpuInfo.device,
-      isFallback: lastGpuInfo.isFallback,
-      maxBufferSize: lastGpuInfo.maxBufferSize,
-      activeTier: activeTier
-        ? { modelName: activeTier.modelName, device: activeTier.device, dtype: activeTier.dtype }
-        : null,
-      errorClass,
-      errorMessage,
-      extensionVersion: chrome.runtime.getManifest().version,
-    });
+    const { errorMessage } = errorInfo(err);
+    const diagnostic = buildDiagnostic(buildDiagnosticInput(err));
     console.warn('[local-nano] warmup failed (network); showing connection message:', errorMessage);
 
     const bubble = addMessage(
@@ -952,6 +983,7 @@ export function initSession(deps: SessionDeps): void {
     // Reset the per-walk ladder state so a Retry/Reset re-walk starts clean.
     activeTier = null;
     ladderPath = [];
+    chosenModel = null;
     try {
       // Preflight: query the adapter BEFORE the heavy load so an
       // unsupported device gets an upfront advisory instead of a silent
@@ -982,6 +1014,11 @@ export function initSession(deps: SessionDeps): void {
         capability,
         smallerEnabled: isSmallerModelEnabled(),
       });
+      // The model the ladder selected: the model of the first tier it will
+      // walk. Surfaced in the diagnostic so a bug report names the model even
+      // when the walk crashes before recording an outcome. With the flag off
+      // this is always the primary model.
+      chosenModel = ladder.length > 0 ? ladder[0].modelName : null;
 
       // Drive the pure ladder reducer (ADR-R1/R6). On cold start, skip straight
       // to the persisted known-good tier (or the first non-known-bad tier); on a
@@ -1006,9 +1043,9 @@ export function initSession(deps: SessionDeps): void {
       while (attemptedIndex !== -1) {
         const tier = ladder[attemptedIndex];
         activeTier = tier;
-        ladderPath.push(tier);
         try {
           await attemptTier(tier);
+          recordPathOutcome(tier, 'success');
           await recordKnownGood(extensionVersion, tier, capabilitySnapshot());
           loaded = true;
           break;
@@ -1019,10 +1056,12 @@ export function initSession(deps: SessionDeps): void {
             // The device is fine; the download failed. Do NOT record known-bad,
             // do NOT advance the ladder. Show the connection message with a
             // same-tier Retry and stop the walk here.
+            recordPathOutcome(tier, 'network');
             debugLog(`[local-nano] tier ${tierKey(tier)} load failed (network); not advancing`);
             networkFailed = true;
             break;
           }
+          recordPathOutcome(tier, 'load-failure');
           const failureClass = classifyFailure(err);
           debugLog(`[local-nano] tier ${tierKey(tier)} load failed (${failureClass}); advancing`);
           await recordKnownBad(extensionVersion, tier, capabilitySnapshot());
