@@ -199,6 +199,65 @@ export function isCountTokensResponse(value: unknown): value is CountTokensRespo
   return false;
 }
 
+export const WARMUP_REQUEST = 'offscreen/warmup-request' as const;
+export const WARMUP_RESPONSE = 'offscreen/warmup-response' as const;
+
+/**
+ * One `{ modelName, device, dtype }` triple the ladder can ask the offscreen
+ * document to load (ADR-R7). Mirrors `Tier` in `ladder.ts` but is redeclared
+ * here so the wire protocol owns its own shape and `ladder.ts` stays free of
+ * Chrome/protocol imports.
+ */
+export interface WarmupTier {
+  modelName: string;
+  device: 'webgpu' | 'wasm';
+  dtype: string;
+}
+
+/**
+ * Block-load (warmup) the offscreen session, optionally dictating the tier to
+ * load (Phase 2, ADR-R2). When `tier` is present the offscreen document
+ * overrides `window.TRANSFORMERS_CONFIG` with that model/device/dtype before
+ * `LanguageModel.create()`. When absent the offscreen document loads its base
+ * tier (the static `.env.json` import). Distinct from `COUNT_TOKENS_REQUEST`,
+ * which is also used mid-session for the soft cap and must not carry tier
+ * semantics.
+ */
+export interface WarmupRequest {
+  type: typeof WARMUP_REQUEST;
+  tier?: WarmupTier;
+}
+
+export type WarmupResponse =
+  | { type: typeof WARMUP_RESPONSE; ok: true }
+  | { type: typeof WARMUP_RESPONSE; ok: false; error: string };
+
+function isWarmupTier(value: unknown): value is WarmupTier {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.modelName !== 'string' || v.modelName.length === 0) return false;
+  if (v.device !== 'webgpu' && v.device !== 'wasm') return false;
+  return typeof v.dtype === 'string' && v.dtype.length > 0;
+}
+
+export function isWarmupRequest(value: unknown): value is WarmupRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== WARMUP_REQUEST) return false;
+  // tier is optional; when present it must be well-formed.
+  if (v.tier === undefined) return true;
+  return isWarmupTier(v.tier);
+}
+
+export function isWarmupResponse(value: unknown): value is WarmupResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== WARMUP_RESPONSE) return false;
+  if (v.ok === true) return true;
+  if (v.ok === false) return typeof v.error === 'string';
+  return false;
+}
+
 export const STREAM_PORT_NAME = 'offscreen-stream' as const;
 
 export const STREAM_REQUEST = 'stream/request' as const;

@@ -24,6 +24,8 @@ import {
   type StreamChunk,
   type StreamDone,
   type StreamRequest,
+  WARMUP_REQUEST,
+  WARMUP_RESPONSE,
 } from '../src/offscreen/protocol.js';
 import { chromeMock, type FakePort } from './setup.js';
 
@@ -382,7 +384,7 @@ describe('warmupSession (content-script client)', () => {
     chromeMock.runtime.lastError = undefined;
   });
 
-  it('ensures offscreen then sends an empty count-tokens request to force ensureSession', async () => {
+  it('ensures offscreen then sends a WARMUP_REQUEST (no tier) to force ensureSession', async () => {
     const seen: unknown[] = [];
     chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
       seen.push(msg);
@@ -390,26 +392,39 @@ describe('warmupSession (content-script client)', () => {
       if (type === ENSURE_OFFSCREEN_REQUEST) {
         return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
       }
-      if (type === COUNT_TOKENS_REQUEST) {
-        return { type: COUNT_TOKENS_RESPONSE, ok: true, count: 0 };
+      if (type === WARMUP_REQUEST) {
+        return { type: WARMUP_RESPONSE, ok: true };
       }
       return undefined;
     });
 
     await expect(warmupSession()).resolves.toBeUndefined();
-    expect(seen).toEqual([
-      { type: ENSURE_OFFSCREEN_REQUEST },
-      { type: COUNT_TOKENS_REQUEST, text: '' },
-    ]);
+    expect(seen).toEqual([{ type: ENSURE_OFFSCREEN_REQUEST }, { type: WARMUP_REQUEST }]);
   });
 
-  it('rejects when the count-tokens reply is ok:false', async () => {
+  it('forwards the requested tier in the WARMUP_REQUEST', async () => {
+    const seen: unknown[] = [];
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      seen.push(msg);
+      const type = (msg as { type?: string })?.type;
+      if (type === ENSURE_OFFSCREEN_REQUEST) {
+        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+      }
+      return { type: WARMUP_RESPONSE, ok: true };
+    });
+
+    const tier = { modelName: 'org/model', device: 'wasm' as const, dtype: 'q8' };
+    await expect(warmupSession(tier)).resolves.toBeUndefined();
+    expect(seen).toEqual([{ type: ENSURE_OFFSCREEN_REQUEST }, { type: WARMUP_REQUEST, tier }]);
+  });
+
+  it('rejects when the warmup reply is ok:false', async () => {
     chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
       const type = (msg as { type?: string })?.type;
       if (type === ENSURE_OFFSCREEN_REQUEST) {
         return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
       }
-      return { type: COUNT_TOKENS_RESPONSE, ok: false, error: 'model failed to load' };
+      return { type: WARMUP_RESPONSE, ok: false, error: 'model failed to load' };
     });
     await expect(warmupSession()).rejects.toThrow('model failed to load');
   });
@@ -425,7 +440,7 @@ describe('warmupSession (content-script client)', () => {
     await expect(warmupSession()).rejects.toThrow(/malformed/);
   });
 
-  it('rejects when chrome.runtime.lastError is set on the count call', async () => {
+  it('rejects when chrome.runtime.lastError is set on the warmup call', async () => {
     chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
       const type = (msg as { type?: string })?.type;
       if (type === ENSURE_OFFSCREEN_REQUEST) {

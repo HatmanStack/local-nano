@@ -20,6 +20,8 @@ import {
   isStreamChunk,
   isStreamDone,
   isStreamRequest,
+  isWarmupRequest,
+  isWarmupResponse,
   REBUILD_SESSION_REQUEST,
   REBUILD_SESSION_RESPONSE,
   RECREATE_OFFSCREEN_REQUEST,
@@ -29,6 +31,8 @@ import {
   STREAM_DONE,
   STREAM_PORT_NAME,
   STREAM_REQUEST,
+  WARMUP_REQUEST,
+  WARMUP_RESPONSE,
 } from '../src/offscreen/protocol.js';
 
 describe('protocol discriminators', () => {
@@ -63,6 +67,96 @@ describe('protocol discriminators', () => {
   it('keeps recreate-offscreen constants stable', () => {
     expect(RECREATE_OFFSCREEN_REQUEST).toBe('offscreen/recreate-request');
     expect(RECREATE_OFFSCREEN_RESPONSE).toBe('offscreen/recreate-response');
+  });
+
+  it('keeps warmup constants stable', () => {
+    expect(WARMUP_REQUEST).toBe('offscreen/warmup-request');
+    expect(WARMUP_RESPONSE).toBe('offscreen/warmup-response');
+  });
+});
+
+describe('isWarmupRequest', () => {
+  it('accepts a request with no tier (base-tier warmup)', () => {
+    expect(isWarmupRequest({ type: WARMUP_REQUEST })).toBe(true);
+  });
+
+  it('accepts a request with a well-formed tier', () => {
+    expect(
+      isWarmupRequest({
+        type: WARMUP_REQUEST,
+        tier: { modelName: 'org/model', device: 'webgpu', dtype: 'q4f16' },
+      }),
+    ).toBe(true);
+    expect(
+      isWarmupRequest({
+        type: WARMUP_REQUEST,
+        tier: { modelName: 'org/model', device: 'wasm', dtype: 'q8' },
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a tier with a bad device enum', () => {
+    expect(
+      isWarmupRequest({
+        type: WARMUP_REQUEST,
+        tier: { modelName: 'org/model', device: 'metal', dtype: 'q4f16' },
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a tier missing modelName or with empty modelName', () => {
+    expect(
+      isWarmupRequest({
+        type: WARMUP_REQUEST,
+        tier: { device: 'webgpu', dtype: 'q4f16' },
+      }),
+    ).toBe(false);
+    expect(
+      isWarmupRequest({
+        type: WARMUP_REQUEST,
+        tier: { modelName: '', device: 'webgpu', dtype: 'q4f16' },
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a tier with a missing or empty dtype', () => {
+    expect(
+      isWarmupRequest({
+        type: WARMUP_REQUEST,
+        tier: { modelName: 'org/model', device: 'webgpu' },
+      }),
+    ).toBe(false);
+    expect(
+      isWarmupRequest({
+        type: WARMUP_REQUEST,
+        tier: { modelName: 'org/model', device: 'webgpu', dtype: '' },
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects null, primitives, and the wrong discriminator', () => {
+    expect(isWarmupRequest(null)).toBe(false);
+    expect(isWarmupRequest('foo')).toBe(false);
+    expect(isWarmupRequest({ type: 'other' })).toBe(false);
+  });
+});
+
+describe('isWarmupResponse', () => {
+  it('accepts ok:true', () => {
+    expect(isWarmupResponse({ type: WARMUP_RESPONSE, ok: true })).toBe(true);
+  });
+
+  it('accepts ok:false with error string', () => {
+    expect(isWarmupResponse({ type: WARMUP_RESPONSE, ok: false, error: 'boom' })).toBe(true);
+  });
+
+  it('rejects ok:false without error', () => {
+    expect(isWarmupResponse({ type: WARMUP_RESPONSE, ok: false })).toBe(false);
+  });
+
+  it('rejects wrong discriminator and primitives', () => {
+    expect(isWarmupResponse(null)).toBe(false);
+    expect(isWarmupResponse({ type: 'other', ok: true })).toBe(false);
   });
 });
 

@@ -7,6 +7,7 @@
  * via `streamOverPort`.
  */
 
+import type { Tier } from './ladder.js';
 import {
   COUNT_TOKENS_REQUEST,
   type CountTokensRequest,
@@ -21,10 +22,13 @@ import {
   isGpuInfoResponse,
   isRebuildSessionResponse,
   isRecreateOffscreenResponse,
+  isWarmupResponse,
   REBUILD_SESSION_REQUEST,
   RECREATE_OFFSCREEN_REQUEST,
   type RebuildSessionRequest,
   type RecreateOffscreenRequest,
+  WARMUP_REQUEST,
+  type WarmupRequest,
 } from './protocol.js';
 import { type StreamPromptOptions, streamOverPort } from './stream-client.js';
 
@@ -136,20 +140,18 @@ export async function countTokens(
  * the offscreen doc has finished (model weights uploaded to WebGPU and
  * the polyfill session is live), or rejects if loading fails.
  *
- * Implemented as a count-tokens round-trip without the timeout race —
- * we want to actually wait for the load to complete, not fall back to a
- * heuristic. The offscreen side dedupes via its `sessionPromise`
- * singleton, so multiple concurrent warmups across tabs share one load.
+ * When `tier` is provided (Phase 2, the ladder walk), the offscreen
+ * document overrides `window.TRANSFORMERS_CONFIG` with that
+ * model/device/dtype before `LanguageModel.create()` (ADR-R2), so each
+ * rung loads the dictated tier. Without a tier the offscreen document
+ * loads its base tier (the static `.env.json` import). The panel
+ * force-recreates the document between failed rungs (ADR-R3/R4) so a
+ * tier change never overlaps two loads.
  *
- * DEPENDENCY NOTE: this relies on the offscreen count-tokens handler
- * calling `ensureSession()` (which loads the model) before measuring.
- * It assumes `measureContextUsage` exercises the same initialization
- * path as `promptStreaming`. If a future polyfill bump makes
- * `measureContextUsage` cheaper / lazier such that it no longer forces
- * a full model load, this probe will resolve before the model is
- * actually ready and the first real prompt will eat the warmup cost.
- * If that happens, switch this to a tiny throwaway `promptStreaming`
- * call instead.
+ * Implemented as a dedicated `WARMUP_REQUEST` round-trip without a
+ * timeout race — we want to actually wait for the load to complete. The
+ * offscreen side dedupes via its `sessionPromise` singleton, so multiple
+ * concurrent warmups across tabs share one load.
  *
  * NO TIMEOUT: a first run downloads multi-GB weights and can legitimately
  * take minutes, so a fixed timeout here false-fails a slow-but-healthy
@@ -163,15 +165,15 @@ export async function countTokens(
  * they can act on (reload / wasm) rather than being told a healthy load
  * "failed".
  */
-export async function warmupSession(): Promise<void> {
+export async function warmupSession(tier?: Tier): Promise<void> {
   await ensureViaServiceWorker();
-  const request: CountTokensRequest = { type: COUNT_TOKENS_REQUEST, text: '' };
+  const request: WarmupRequest = tier ? { type: WARMUP_REQUEST, tier } : { type: WARMUP_REQUEST };
   const reply = (await chrome.runtime.sendMessage(request)) as unknown;
   const lastError = chrome.runtime.lastError;
   if (lastError) {
     throw new Error(`warmup-session failed: ${lastError.message ?? 'unknown'}`);
   }
-  if (!isCountTokensResponse(reply)) {
+  if (!isWarmupResponse(reply)) {
     throw new Error('warmup-session: malformed reply from offscreen');
   }
   if (!reply.ok) throw new Error(reply.error);

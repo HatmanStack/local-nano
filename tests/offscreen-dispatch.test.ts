@@ -11,6 +11,8 @@ import {
   type RebuildSessionRequest,
   STREAM_REQUEST,
   type StreamRequest,
+  WARMUP_REQUEST,
+  type WarmupRequest,
 } from '../src/offscreen/protocol.js';
 
 describe('classifyOffscreenMessage', () => {
@@ -30,6 +32,28 @@ describe('classifyOffscreenMessage', () => {
   it('classifies a count-tokens request', () => {
     const msg: CountTokensRequest = { type: COUNT_TOKENS_REQUEST, text: 'hello' };
     expect(classifyOffscreenMessage(msg)).toBe('count-tokens');
+  });
+
+  it('classifies a warmup request with a tier', () => {
+    const msg: WarmupRequest = {
+      type: WARMUP_REQUEST,
+      tier: { modelName: 'org/model', device: 'webgpu', dtype: 'q4f16' },
+    };
+    expect(classifyOffscreenMessage(msg)).toBe('warmup');
+  });
+
+  it('classifies a warmup request without a tier (base tier)', () => {
+    const msg: WarmupRequest = { type: WARMUP_REQUEST };
+    expect(classifyOffscreenMessage(msg)).toBe('warmup');
+  });
+
+  it('returns null for a malformed warmup request (bad tier device)', () => {
+    expect(
+      classifyOffscreenMessage({
+        type: WARMUP_REQUEST,
+        tier: { modelName: 'org/model', device: 'metal', dtype: 'q4f16' },
+      }),
+    ).toBeNull();
   });
 
   it('returns null for an ensure-offscreen request (owned by the SW context)', () => {

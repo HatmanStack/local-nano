@@ -21,6 +21,7 @@ import transformersConfig from './.env.json';
 import { debugLog } from './src/debug.js';
 import { BusyGate } from './src/offscreen/busy-gate.js';
 import { classifyOffscreenMessage } from './src/offscreen/dispatch.js';
+import { applyTierToConfig, type Tier, tierKey } from './src/offscreen/ladder.js';
 import {
   COUNT_TOKENS_RESPONSE,
   type CountTokensRequest,
@@ -32,6 +33,7 @@ import {
   isRebuildSessionRequest,
   isStreamAbort,
   isStreamRequest,
+  isWarmupRequest,
   REBUILD_SESSION_RESPONSE,
   type RebuildSessionRequest,
   type RebuildSessionResponse,
@@ -40,6 +42,9 @@ import {
   STREAM_PORT_NAME,
   type StreamChunk,
   type StreamDone,
+  WARMUP_RESPONSE,
+  type WarmupRequest,
+  type WarmupResponse,
 } from './src/offscreen/protocol.js';
 
 interface LanguageModelSession {
@@ -60,6 +65,13 @@ const SYSTEM_INSTRUCTION = 'You are a helpful assistant. Answer concisely and di
 
 let heavyPromise: Promise<LoadedHeavy> | null = null;
 let sessionPromise: Promise<LanguageModelSession> | null = null;
+
+// The tier currently loaded into the live session (Phase 2, ADR-R2). Null until
+// a warmup with an explicit tier lands. Tracked module-scoped so a tier change
+// can guard against overlapping a prior generator (ADR-R1/R3) and so the
+// diagnostic can report what was loading. The panel drives the ladder and is
+// the source of truth; this is the offscreen-side mirror for the guard.
+let activeTier: Tier | null = null;
 
 // One generation at a time against the single shared session. The
 // polyfill mutates one `#history`; two ports streaming concurrently would
@@ -274,7 +286,55 @@ function handleCountTokens(msg: CountTokensRequest, sendResponse: SendResponse):
   })();
 }
 
-// Single dispatcher for the three request channels. Three sibling
+// Warmup channel (Phase 2). Block-loads the session, optionally dictating the
+// tier to load (ADR-R2). When a tier is present, override
+// `window.TRANSFORMERS_CONFIG` with the tier's model/device/dtype before
+// `ensureSession()` builds the polyfill session (the polyfill and the
+// transformers backend each read the config fresh per `create()`). A hard crash
+// drops the channel instead of replying; the panel detects that client-side.
+function handleWarmup(msg: WarmupRequest, sendResponse: SendResponse): void {
+  (async () => {
+    try {
+      if (msg.tier) {
+        const tier: Tier = {
+          modelName: msg.tier.modelName,
+          device: msg.tier.device,
+          dtype: msg.tier.dtype,
+        };
+        // Override the in-memory config (never the on-disk .env.json). The
+        // base import supplies tier 0 / apiKey; this overrides model/device/dtype.
+        (window as unknown as Record<string, unknown>).TRANSFORMERS_CONFIG = applyTierToConfig(
+          transformersConfig as Record<string, unknown>,
+          tier,
+        );
+        // Safety net for a soft tier change inside a still-live document
+        // (ADR-R1/R3): if a session is already loaded for a DIFFERENT tier,
+        // destroy it and null sessionPromise before creating, so two loads never
+        // overlap. The normal ladder advance recreates the whole document first,
+        // so sessionPromise is null and this is a no-op.
+        if (sessionPromise && (activeTier === null || tierKey(activeTier) !== tierKey(tier))) {
+          try {
+            const previous = await sessionPromise;
+            previous?.destroy();
+          } catch {
+            // Prior session may have failed to load; nothing to destroy.
+          }
+          sessionPromise = null;
+        }
+        activeTier = tier;
+      }
+      await ensureSession();
+      const ok: WarmupResponse = { type: WARMUP_RESPONSE, ok: true };
+      sendResponse(ok);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      const fail: WarmupResponse = { type: WARMUP_RESPONSE, ok: false, error: message };
+      sendResponse(fail);
+    }
+  })();
+}
+
+// Single dispatcher for the four request channels. Sibling
 // listeners each returning false for non-owned messages risk the MV3
 // sendResponse race: a false-returning listener can close the channel
 // before the async owner replies. This listener returns true only when
@@ -293,6 +353,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return true;
     case 'count-tokens':
       if (isCountTokensRequest(msg)) handleCountTokens(msg, sendResponse);
+      return true;
+    case 'warmup':
+      if (isWarmupRequest(msg)) handleWarmup(msg, sendResponse);
       return true;
   }
 });
