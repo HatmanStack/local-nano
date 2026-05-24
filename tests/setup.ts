@@ -19,6 +19,11 @@ class FakeStorageArea {
     Object.assign(this.store, items);
   });
 
+  remove = vi.fn(async (key: string | string[]) => {
+    const keys = typeof key === 'string' ? [key] : key;
+    for (const k of keys) delete this.store[k];
+  });
+
   clear = vi.fn(async () => {
     this.store = {};
   });
@@ -120,6 +125,7 @@ beforeEach(() => {
   local.store = {};
   local.get.mockClear();
   local.set.mockClear();
+  local.remove.mockClear();
   chromeMock.runtime.getURL.mockClear();
   chromeMock.runtime.getManifest.mockClear();
   chromeMock.runtime.getManifest.mockImplementation(() => ({ version: '0.2.4' }));
