@@ -56,7 +56,7 @@ Not every model publishes every variant — check the model's `onnx/` folder on 
 
 ### `apiKey` (string)
 
-A placeholder. The vendored polyfill **does** read this field (`prompt-api-polyfill.js:181`, `if (config && config.apiKey)`), but the Transformers.js backend ignores it — there is no cloud call to authenticate. The `"dummy"` value is a deliberate placeholder that the polyfill reads and the backend never uses. It exists because the upstream polyfill supports cloud backends (firebase / gemini / openai) that need real keys; the slimmed `backends-registry.js` in this repo only ships the Transformers.js backend, so keep it as `"dummy"`.
+A placeholder. The vendored polyfill **does** read this field (`prompt-api-polyfill.js:189`, `if (config && config.apiKey)`), but the Transformers.js backend ignores it — there is no cloud call to authenticate. The `"dummy"` value is a deliberate placeholder that the polyfill reads and the backend never uses. It exists because the upstream polyfill supports cloud backends (firebase / gemini / openai) that need real keys; the slimmed `backends-registry.js` in this repo only ships the Transformers.js backend, so keep it as `"dummy"`.
 
 ### `historyTokenWarnThreshold` (number, optional)
 

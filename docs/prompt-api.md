@@ -65,7 +65,7 @@ When pulling a new upstream commit of the polyfill:
 
 ## How it's wired in
 
-[`offscreen.ts`](../offscreen.ts) lazy-imports the polyfill alongside `@huggingface/transformers` on the first stream request (`offscreen.ts:64-67`):
+[`offscreen.ts`](../offscreen.ts) lazy-imports the polyfill alongside `@huggingface/transformers` on the first stream request (`offscreen.ts:76-79`):
 
 ```ts
 const [tfMod, polyfillMod] = await Promise.all([
@@ -78,7 +78,7 @@ The content script never loads these modules; it streams to the offscreen sessio
 
 The polyfill installs itself onto `globalThis.LanguageModel` at module load. We use the `LanguageModel` class exported directly from the module — not the global — so we never accidentally pick up a gated native implementation on hardware where it exists but doesn't actually run.
 
-Configuration flows through the polyfill via `window.TRANSFORMERS_CONFIG`, which the offscreen document populates: `offscreen.ts:20` does `import transformersConfig from './.env.json'` and `offscreen.ts:71` assigns it to `window.TRANSFORMERS_CONFIG`. The polyfill's Transformers backend reads `device`, `dtype`, and `modelName` from there. The content script does not touch the config.
+Configuration flows through the polyfill via `window.TRANSFORMERS_CONFIG`, which the offscreen document populates: `offscreen.ts:20` does `import transformersConfig from './.env.json'` and `offscreen.ts:83` assigns it to `window.TRANSFORMERS_CONFIG`. The polyfill's Transformers backend reads `device`, `dtype`, and `modelName` from there. The content script does not touch the config.
 
 The session itself is created once (`ensureSession`) and reused across every conversation turn and every tab:
 

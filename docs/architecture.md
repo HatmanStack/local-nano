@@ -59,13 +59,13 @@ When you send a message:
 
 ## Offscreen document (`offscreen.ts`)
 
-The offscreen document is the actual model host. The service worker creates it once via `chrome.offscreen.createDocument` and never tears it down — keeping the model warm is the whole point. On the first stream request it calls `loadHeavy()`, which dynamically imports `@huggingface/transformers` and the polyfill (`offscreen.ts:64-67`), sets the ONNX wasm path to the bundled `dist/ort/` copy, and injects the config (see below). `ensureSession()` then creates the single long-lived `LanguageModel` session, shared across all tabs and URLs. A second concurrent stream on the shared session is rejected with a busy error rather than queued (`src/offscreen/busy-gate.ts`).
+The offscreen document is the actual model host. The service worker creates it once via `chrome.offscreen.createDocument` and never tears it down — keeping the model warm is the whole point. On the first stream request it calls `loadHeavy()`, which dynamically imports `@huggingface/transformers` and the polyfill (`offscreen.ts:76-79`), sets the ONNX wasm path to the bundled `dist/ort/` copy, and injects the config (see below). `ensureSession()` then creates the single long-lived `LanguageModel` session, shared across all tabs and URLs. A second concurrent stream on the shared session is rejected with a busy error rather than queued (`src/offscreen/busy-gate.ts`).
 
 ## Prompt API polyfill
 
 `vendor/prompt-api-polyfill/` is a slimmed copy of Google's polyfill, loaded inside the offscreen document. We strip every backend except Transformers.js (in `backends-registry.js`), remove the upstream iframe-injection block from `prompt-api-polyfill.js` (a `MutationObserver` over `documentElement` that was a meaningful perf cost on SPA-style host pages), and raise `max_new_tokens` from 1024 to 2048 in the Transformers backend. See [docs/prompt-api.md](prompt-api.md) for the full inventory of modifications and the resync procedure.
 
-`TransformersBackend` (in `vendor/prompt-api-polyfill/backends/transformers.js`) wraps `@huggingface/transformers`'s `pipeline()` and `TextStreamer`. Configuration comes from `window.TRANSFORMERS_CONFIG`, which the offscreen document populates: `offscreen.ts:20` does `import transformersConfig from './.env.json'` and `offscreen.ts:71` assigns it to `window.TRANSFORMERS_CONFIG` (model name, device, dtype). The content script never touches the config.
+`TransformersBackend` (in `vendor/prompt-api-polyfill/backends/transformers.js`) wraps `@huggingface/transformers`'s `pipeline()` and `TextStreamer`. Configuration comes from `window.TRANSFORMERS_CONFIG`, which the offscreen document populates: `offscreen.ts:20` does `import transformersConfig from './.env.json'` and `offscreen.ts:83` assigns it to `window.TRANSFORMERS_CONFIG` (model name, device, dtype). The content script never touches the config.
 
 ## Why a service worker, a content script, and an offscreen document?
 
