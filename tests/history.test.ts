@@ -41,6 +41,27 @@ describe('loadHistory', () => {
     chromeMock.storage.local.store.k = entries;
     expect(await loadHistory('k')).toEqual(entries);
   });
+
+  it('drops malformed entries and keeps the valid ones in order', async () => {
+    chromeMock.storage.local.store.k = [
+      { role: 'user', text: 'one' },
+      { role: 'bogus', text: 'bad role' },
+      { role: 'model', text: 123 },
+      null,
+      42,
+      {},
+      { role: 'system', text: 'two' },
+    ];
+    expect(await loadHistory('k')).toEqual([
+      { role: 'user', text: 'one' },
+      { role: 'system', text: 'two' },
+    ]);
+  });
+
+  it('returns [] when every stored entry is malformed', async () => {
+    chromeMock.storage.local.store.k = [{ role: 'nope' }, null, 7, { text: 5 }];
+    expect(await loadHistory('k')).toEqual([]);
+  });
 });
 
 describe('saveHistory', () => {
