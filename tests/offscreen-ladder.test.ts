@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyTierToConfig,
+  assembleLadder,
   firstTierIndex,
   type LadderAction,
   nextAction,
   PRIMARY_LADDER,
   PRIMARY_MODEL,
+  SMALLER_MODEL_CANDIDATE,
+  SMALLER_MODEL_ENABLED,
   type Tier,
   tierKey,
 } from '../src/offscreen/ladder.js';
@@ -158,6 +161,77 @@ describe('firstTierIndex', () => {
 
   it('falls back to the first non-bad index when the known-good key is not in the ladder', () => {
     expect(firstTierIndex(PRIMARY_LADDER, 'org/other|webgpu|q4f16', EMPTY)).toBe(0);
+  });
+});
+
+describe('SMALLER_MODEL_ENABLED', () => {
+  it('ships default-off (the live rung is dormant pending manual WebGPU vetting)', () => {
+    expect(SMALLER_MODEL_ENABLED).toBe(false);
+  });
+});
+
+describe('SMALLER_MODEL_CANDIDATE', () => {
+  it('is the WASM-vetted candidate from docs/models.md at wasm/q8', () => {
+    expect(SMALLER_MODEL_CANDIDATE[0]).toEqual({
+      modelName: 'onnx-community/Qwen2.5-0.5B-Instruct',
+      device: 'wasm',
+      dtype: 'q8',
+    });
+  });
+
+  it('only names the documented candidate model across every rung', () => {
+    for (const tier of SMALLER_MODEL_CANDIDATE) {
+      expect(tier.modelName).toBe('onnx-community/Qwen2.5-0.5B-Instruct');
+    }
+  });
+});
+
+describe('assembleLadder', () => {
+  it('returns exactly PRIMARY_LADDER when the flag is off, for a capable device', () => {
+    expect(assembleLadder({ capability: 'capable', smallerEnabled: false })).toEqual(
+      PRIMARY_LADDER,
+    );
+  });
+
+  it('returns exactly PRIMARY_LADDER when the flag is off, for a weak device', () => {
+    expect(assembleLadder({ capability: 'weak', smallerEnabled: false })).toEqual(PRIMARY_LADDER);
+  });
+
+  it('defaults to the production flag (off) when smallerEnabled is omitted', () => {
+    // SMALLER_MODEL_ENABLED is false, so the default path is primary-only.
+    expect(assembleLadder({ capability: 'weak' })).toEqual(PRIMARY_LADDER);
+    expect(assembleLadder({ capability: 'capable' })).toEqual(PRIMARY_LADDER);
+  });
+
+  it('puts the smaller ladder FIRST for a weak device when the flag is on', () => {
+    const ladder = assembleLadder({ capability: 'weak', smallerEnabled: true });
+    expect(ladder).toEqual([...SMALLER_MODEL_CANDIDATE, ...PRIMARY_LADDER]);
+  });
+
+  it('appends the smaller ladder LAST for a capable device when the flag is on', () => {
+    const ladder = assembleLadder({ capability: 'capable', smallerEnabled: true });
+    expect(ladder).toEqual([...PRIMARY_LADDER, ...SMALLER_MODEL_CANDIDATE]);
+  });
+
+  it('produces a ladder nextAction walks to exhausted across all rungs', () => {
+    const ladder = assembleLadder({ capability: 'weak', smallerEnabled: true });
+    let attemptedIndex: number | null = null;
+    let outcome: 'success' | 'load-failure' | null = null;
+    const loaded: Tier[] = [];
+    for (let guard = 0; guard < 50; guard++) {
+      const action: LadderAction = nextAction({
+        ladder,
+        attemptedIndex,
+        outcome,
+        knownBadKeys: EMPTY,
+      });
+      if (action.kind === 'exhausted') break;
+      if (action.kind === 'done') throw new Error('unexpected done in all-fail walk');
+      loaded.push(action.tier);
+      attemptedIndex = ladder.indexOf(action.tier);
+      outcome = 'load-failure';
+    }
+    expect(loaded).toEqual(ladder);
   });
 });
 

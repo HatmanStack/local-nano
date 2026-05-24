@@ -14,6 +14,8 @@
  * (warmup, recreate, persistence).
  */
 
+import type { DeviceCapability } from './capability.js';
+
 export interface Tier {
   modelName: string;
   device: 'webgpu' | 'wasm';
@@ -45,6 +47,64 @@ const primaryLadder: Tier[] = [
 ];
 
 export const PRIMARY_LADDER: Tier[] = [...primaryLadder];
+
+/**
+ * Build-time flag gating the smaller-model fallback rung (ADR-R8). DEFAULT OFF.
+ *
+ * WARNING: enabling this ships a live second model. It must NOT be flipped to
+ * true until the candidate below has been manually smoke-vetted on WebGPU at
+ * each of its tiers (CI cannot exercise WebGPU; see the manual WebGPU smoke
+ * matrix, ROADMAP #6). The candidate is vetted on WASM only (see
+ * `docs/models.md`, "Smaller-model fallback rung (gated)"). While off, the
+ * capability classifier and `assembleLadder` are still built and unit-tested,
+ * but `assembleLadder` returns the primary ladder unchanged, so live behavior
+ * is identical to the primary-model-only path.
+ */
+export const SMALLER_MODEL_ENABLED = false;
+
+/**
+ * The smaller-model fallback ladder (ADR-R8), held behind
+ * `SMALLER_MODEL_ENABLED`. The candidate is `onnx-community/Qwen2.5-0.5B-Instruct`,
+ * the smallest model `docs/models.md` reports as actually answering questions.
+ * Tier 0 (wasm/q8) is the only combination `docs/models.md` confirms working for
+ * this model. The webgpu/q4f16 rung is UNVETTED on WebGPU (the whole reason the
+ * flag stays off) and is listed so the manual vetting task has a concrete target;
+ * it must not ship live until that smoke vetting passes.
+ */
+export const SMALLER_MODEL_CANDIDATE: Tier[] = [
+  // Vetted on WASM in docs/models.md ("Smallest model that actually answers").
+  { modelName: 'onnx-community/Qwen2.5-0.5B-Instruct', device: 'wasm', dtype: 'q8' },
+  // UNVETTED on WebGPU. Present only as the manual-vetting target (ROADMAP #6).
+  { modelName: 'onnx-community/Qwen2.5-0.5B-Instruct', device: 'webgpu', dtype: 'q4f16' },
+];
+
+/**
+ * Assemble the full tier ladder for a device (ADR-R8). The smaller-model rung
+ * is gated: when disabled, the result is `PRIMARY_LADDER` unchanged regardless
+ * of capability, so live behavior matches the primary-only path. When enabled,
+ * the order depends on capability:
+ *
+ * - `weak`: the smaller ladder runs FIRST (a weak device should try the small
+ *   model before the heavier primary), with the primary appended as a last
+ *   resort so a weak device that can somehow run the primary still has a path.
+ * - `capable`: the primary ladder runs first, the smaller ladder is appended as
+ *   the final fallback (so a capable device that exhausts the whole primary
+ *   ladder still drops to the small model).
+ *
+ * Pure: it only composes arrays. `nextAction`/`firstTierIndex` operate on any
+ * `Tier[]`, so the assembled ladder feeds the existing reducer unchanged.
+ */
+export function assembleLadder(opts: {
+  capability: DeviceCapability;
+  smallerEnabled?: boolean;
+}): Tier[] {
+  const smallerEnabled = opts.smallerEnabled ?? SMALLER_MODEL_ENABLED;
+  if (!smallerEnabled) return [...PRIMARY_LADDER];
+  if (opts.capability === 'weak') {
+    return [...SMALLER_MODEL_CANDIDATE, ...PRIMARY_LADDER];
+  }
+  return [...PRIMARY_LADDER, ...SMALLER_MODEL_CANDIDATE];
+}
 
 /** The outcome of a single tier load attempt (reducer input). */
 export type LadderOutcome = 'success' | 'load-failure';
