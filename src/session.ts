@@ -9,6 +9,13 @@ import {
   storageKey,
 } from './history.js';
 import {
+  type CapabilitySnapshot,
+  clearCapabilityRecord,
+  loadCapabilityRecord,
+  recordKnownBad,
+  recordKnownGood,
+} from './offscreen/capability-store.js';
+import {
   countTokens,
   getGpuInfo,
   rebuildSession,
@@ -18,6 +25,13 @@ import {
 } from './offscreen/client.js';
 import { buildDiagnostic, errorInfo } from './offscreen/diagnostic.js';
 import { classifyFailure } from './offscreen/failure.js';
+import {
+  firstTierIndex,
+  nextAction,
+  PRIMARY_LADDER,
+  type Tier,
+  tierKey,
+} from './offscreen/ladder.js';
 import type { GpuInfoSnapshot, HistoryTurn } from './offscreen/protocol.js';
 import { pageContext } from './pageContext.js';
 import {
@@ -698,28 +712,52 @@ export function initSession(deps: SessionDeps): void {
     maxBufferSize: null,
     configuredThreshold: null,
   };
+  // The tier last attempted and the ordered list of tiers tried this walk
+  // (ADR-R1: the panel owns ladder state). The terminal diagnostic reports
+  // the active tier and the path; persistence keys off the attempted tier.
+  let activeTier: Tier | null = null;
+  let ladderPath: Tier[] = [];
+
+  // Map the queried GPU snapshot to the persistence capability shape (ADR-R7).
+  // Drops the configuredThreshold, which is a panel-side derivation knob, not a
+  // device-capability fact.
+  function capabilitySnapshot(): CapabilitySnapshot {
+    return {
+      device: lastGpuInfo.device,
+      isFallback: lastGpuInfo.isFallback,
+      maxBufferSize: lastGpuInfo.maxBufferSize,
+    };
+  }
 
   /**
-   * Render the proactive terminal-failure bubble for a warmup load failure
-   * (ADR-R4/R5/R11). The model could not be loaded on this device, so instead
-   * of degrading silently to lazy loading we surface an actionable headline, a
-   * line of guidance, the copy-only diagnostic, and a manual Retry button. The
-   * Retry force-recreates the offscreen document (resetting the sticky
-   * documentReady) and re-runs warmup. Recovery is manual only: no auto-retry,
+   * Render the proactive terminal-failure bubble after the fallback ladder is
+   * exhausted (ADR-R4/R5/R11). The model could not be loaded on any tier this
+   * device tried, so instead of degrading silently to lazy loading we surface an
+   * actionable headline, a line of guidance, the tiers tried, the copy-only
+   * diagnostic, and two manual controls. Recovery is manual only: no auto-retry,
    * no timer (constraint 2).
+   *
+   * "Retry" re-walks the ladder skipping known-bad tiers (so it does not
+   * re-crash on the same tier). After a full exhaustion this typically reaches
+   * exhaustion again unless the environment changed, so it also offers "Reset
+   * and re-detect", which clears the persisted record and re-walks from tier 0.
+   * Both force-recreate the offscreen document first (ADR-R3/R4).
    */
   function renderTerminalFailure(err: unknown): void {
-    // classifyFailure annotates the console log; the warmup-failure terminal UI
-    // is shown for any failed proactive load, since the load not completing IS
-    // the release-gate scenario this phase removes the silent death from.
+    // classifyFailure annotates the console log; the terminal UI is shown for
+    // any exhausted ladder, since the load not completing IS the release-gate
+    // scenario this feature removes the silent death from.
     const failureClass = classifyFailure(err);
     const { errorClass, errorMessage } = errorInfo(err);
     const diagnostic = buildDiagnostic({
       device: lastGpuInfo.device,
       isFallback: lastGpuInfo.isFallback,
       maxBufferSize: lastGpuInfo.maxBufferSize,
-      // No tier concept yet; tiers arrive in Phase 2.
-      activeTier: null,
+      // The last tier attempted when the ladder gave up (null only if the walk
+      // never started a tier, e.g. a recreate failure before the first load).
+      activeTier: activeTier
+        ? { modelName: activeTier.modelName, device: activeTier.device, dtype: activeTier.dtype }
+        : null,
       errorClass,
       errorMessage,
       extensionVersion: chrome.runtime.getManifest().version,
@@ -729,40 +767,71 @@ export function initSession(deps: SessionDeps): void {
       errorMessage,
     );
 
+    // Phase 2 carries the ladder path in the message text via a simple join; the
+    // structured diagnostic field is deferred to Phase 5.
+    const pathLine =
+      ladderPath.length > 0 ? `Tiers tried: ${ladderPath.map(tierKey).join(', ')}` : null;
+
     const bubble = addMessage(
       'system',
       [
         "Couldn't load the model on this device.",
         'Try Retry below; if it keeps failing, set "device": "wasm" in .env.json for a slower CPU fallback.',
+        ...(pathLine ? [pathLine] : []),
         '',
         diagnostic,
       ].join('\n'),
     );
 
-    const retryBtn = window.document.createElement('button');
-    retryBtn.textContent = 'Retry';
-    retryBtn.style.cssText = `margin-top: 6px; ${BUTTON_CSS}`;
-    retryBtn.addEventListener('click', () => {
-      retryBtn.disabled = true;
+    // Shared re-walk driver for both controls. Force-recreates the document
+    // (ADR-R4) then re-runs the ladder. `resetFirst` clears the persisted record
+    // so the walk starts from tier 0 again (Reset and re-detect).
+    const rewalk = (button: HTMLButtonElement, resetFirst: boolean) => {
+      button.disabled = true;
       bubble.remove();
-      // Reset so ensureWarm runs again; both flags must clear so a true retry
-      // (not a no-op) happens and the model is treated as not-yet-ready.
+      // Reset so ensureWarm runs again; both flags clear so a true retry (not a
+      // no-op) happens and the model is treated as not-yet-ready.
       warmStarted = false;
       modelReady = false;
       void (async () => {
         try {
+          if (resetFirst) await clearCapabilityRecord();
           await recreateOffscreen();
         } catch (recreateErr) {
-          // A failed recreate leaves the panel without a dead button: re-render
-          // the terminal message so the user can act again.
+          // A failed recreate/clear leaves the panel without a dead button:
+          // re-render the terminal message so the user can act again.
           renderTerminalFailure(recreateErr);
           return;
         }
         await ensureWarm();
       })();
-    });
-    bubble.appendChild(window.document.createElement('br'));
-    bubble.appendChild(retryBtn);
+    };
+
+    const controls = window.document.createElement('div');
+    controls.style.cssText = 'margin-top: 6px; display: flex; gap: 6px;';
+
+    const retryBtn = window.document.createElement('button');
+    retryBtn.textContent = 'Retry';
+    retryBtn.style.cssText = BUTTON_CSS;
+    retryBtn.addEventListener('click', () => rewalk(retryBtn, false));
+
+    const resetBtn = window.document.createElement('button');
+    resetBtn.textContent = 'Reset and re-detect';
+    resetBtn.style.cssText = BUTTON_CSS;
+    resetBtn.addEventListener('click', () => rewalk(resetBtn, true));
+
+    controls.append(retryBtn, resetBtn);
+    bubble.appendChild(controls);
+  }
+
+  /**
+   * Attempt a single tier: warm the offscreen session with that
+   * model/device/dtype. Resolves on a live session; throws the offscreen error
+   * on a catchable load failure (a hard crash drops the channel, which surfaces
+   * as a terminal-shaped throw too).
+   */
+  async function attemptTier(tier: Tier): Promise<void> {
+    await warmupSession(tier);
   }
 
   async function ensureWarm(): Promise<void> {
@@ -775,9 +844,10 @@ export function initSession(deps: SessionDeps): void {
     // exactly what a fixed 30s cap did). The ticking counter is the
     // proof-of-life that a static "Loading" lacked, and after
     // WARMUP_SLOW_NOTICE_MS we append remedies in case it really is
-    // stuck — without giving up. A genuine load failure still rejects
-    // warmupSession (offscreen returns ok:false) and surfaces the
-    // terminal bubble below.
+    // stuck — without giving up. The counter ticks across the WHOLE ladder
+    // walk: per-rung re-entry does not reset the clock (single startedAt), so
+    // the user sees one continuous proof-of-life and never learns about tier
+    // internals. A fully exhausted ladder surfaces the terminal bubble below.
     const warmHint = addMessage('system', 'Loading model… 0s');
     const startedAt = Date.now();
     const renderHint = () => {
@@ -789,6 +859,9 @@ export function initSession(deps: SessionDeps): void {
     };
     renderHint();
     const ticker = setInterval(renderHint, 1000);
+    // Reset the per-walk ladder state so a Retry/Reset re-walk starts clean.
+    activeTier = null;
+    ladderPath = [];
     try {
       // Preflight: query the adapter BEFORE the heavy load so an
       // unsupported device gets an upfront advisory instead of a silent
@@ -808,15 +881,73 @@ export function initSession(deps: SessionDeps): void {
         // the diagnostic still renders if warmup then fails.
         console.warn('[local-nano] gpu-info preflight failed; proceeding:', gpuErr);
       }
-      await warmupSession();
-      modelReady = true;
-      if (warmHint.parentNode) warmHint.remove();
+
+      // Drive the pure ladder reducer (ADR-R1/R6). On cold start, skip straight
+      // to the persisted known-good tier (or the first non-known-bad tier); on a
+      // load failure, record the known-bad tier, force-recreate the document
+      // (ADR-R3/R4: never overlap; the prior generator's GPU memory is only freed
+      // by recreating the document), then attempt the next rung. On exhaustion,
+      // fall through to the terminal bubble.
+      const extensionVersion = chrome.runtime.getManifest().version;
+      const record = await loadCapabilityRecord(extensionVersion);
+      const knownBadKeys = new Set((record?.knownBad ?? []).map(tierKey));
+      const knownGoodKey = record?.knownGood ? tierKey(record.knownGood) : null;
+
+      let attemptedIndex: number | null = firstTierIndex(
+        PRIMARY_LADDER,
+        knownGoodKey,
+        knownBadKeys,
+      );
+      let lastError: unknown = null;
+      let loaded = false;
+
+      while (attemptedIndex !== -1) {
+        const tier = PRIMARY_LADDER[attemptedIndex];
+        activeTier = tier;
+        ladderPath.push(tier);
+        try {
+          await attemptTier(tier);
+          await recordKnownGood(extensionVersion, tier, capabilitySnapshot());
+          loaded = true;
+          break;
+        } catch (err) {
+          lastError = err;
+          const failureClass = classifyFailure(err);
+          debugLog(`[local-nano] tier ${tierKey(tier)} load failed (${failureClass}); advancing`);
+          await recordKnownBad(extensionVersion, tier, capabilitySnapshot());
+          knownBadKeys.add(tierKey(tier));
+          const action = nextAction({
+            ladder: PRIMARY_LADDER,
+            attemptedIndex,
+            outcome: 'load-failure',
+            knownBadKeys,
+          });
+          if (action.kind === 'exhausted') {
+            attemptedIndex = -1;
+            break;
+          }
+          // Another rung remains: force-recreate the document BEFORE the next
+          // attempt so the crashed/poisoned document never blocks it and two
+          // loads never overlap (ADR-R3/R4). A recreate failure ends the walk.
+          await recreateOffscreen();
+          attemptedIndex = PRIMARY_LADDER.indexOf(action.tier);
+        }
+      }
+
+      if (loaded) {
+        modelReady = true;
+        if (warmHint.parentNode) warmHint.remove();
+      } else {
+        // The ladder is exhausted: surface the terminal bubble with the
+        // diagnostic, the tiers tried, and the manual controls.
+        if (warmHint.parentNode) warmHint.remove();
+        warmStarted = false;
+        renderTerminalFailure(lastError);
+      }
     } catch (err) {
-      // The proactive load failed. Do NOT degrade silently to lazy loading:
-      // surface a terminal bubble with the diagnostic and a manual Retry that
-      // force-recreates the offscreen document (ADR-R4). warmStarted is reset
-      // so a later panel toggle can also retry, matching today's reset
-      // semantics, but the bubble stays until the user acts.
+      // An out-of-ladder failure (e.g. recreateOffscreen rejected between
+      // rungs). Surface the terminal bubble; warmStarted is reset so a later
+      // panel toggle can also retry.
       if (warmHint.parentNode) warmHint.remove();
       warmStarted = false;
       renderTerminalFailure(err);
