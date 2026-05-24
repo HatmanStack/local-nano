@@ -19,18 +19,20 @@
 
 import transformersConfig from './.env.json';
 import { debugLog } from './src/debug.js';
+import { classifyOffscreenMessage } from './src/offscreen/dispatch.js';
 import {
   COUNT_TOKENS_RESPONSE,
+  type CountTokensRequest,
   type CountTokensResponse,
   GPU_INFO_RESPONSE,
   type GpuInfoResponse,
   type HistoryTurn,
   isCountTokensRequest,
-  isGpuInfoRequest,
   isRebuildSessionRequest,
   isStreamAbort,
   isStreamRequest,
   REBUILD_SESSION_RESPONSE,
+  type RebuildSessionRequest,
   type RebuildSessionResponse,
   STREAM_CHUNK,
   STREAM_DONE,
@@ -210,8 +212,9 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (!isGpuInfoRequest(msg)) return false;
+type SendResponse = (response: unknown) => void;
+
+function handleGpuInfo(sendResponse: SendResponse): void {
   collectGpuInfo().then(
     (reply) => sendResponse(reply),
     (err: unknown) => {
@@ -220,11 +223,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse(fail);
     },
   );
-  return true;
-});
+}
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (!isRebuildSessionRequest(msg)) return false;
+function handleRebuildSession(msg: RebuildSessionRequest, sendResponse: SendResponse): void {
   rebuildSession(msg.history).then(
     () => {
       const ok: RebuildSessionResponse = { type: REBUILD_SESSION_RESPONSE, ok: true };
@@ -240,14 +241,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse(fail);
     },
   );
-  return true;
-});
+}
 
 // Count-tokens channel. Best-effort: failures here do not destroy or
 // rebuild the session — the client side has a heuristic fallback so a
 // slow or broken count never blocks a transform.
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (!isCountTokensRequest(msg)) return false;
+function handleCountTokens(msg: CountTokensRequest, sendResponse: SendResponse): void {
   (async () => {
     try {
       const session = await ensureSession();
@@ -264,7 +263,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse(fail);
     }
   })();
-  return true;
+}
+
+// Single dispatcher for the three request channels. Three sibling
+// listeners each returning false for non-owned messages risk the MV3
+// sendResponse race: a false-returning listener can close the channel
+// before the async owner replies. This listener returns true only when
+// it owns the message (keeping the async channel open) and false for
+// everything else, letting other contexts' listeners field their own
+// messages.
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  const kind = classifyOffscreenMessage(msg);
+  if (!kind) return false;
+  switch (kind) {
+    case 'gpu-info':
+      handleGpuInfo(sendResponse);
+      return true;
+    case 'rebuild-session':
+      if (isRebuildSessionRequest(msg)) handleRebuildSession(msg, sendResponse);
+      return true;
+    case 'count-tokens':
+      if (isCountTokensRequest(msg)) handleCountTokens(msg, sendResponse);
+      return true;
+  }
 });
 
 chrome.runtime.onConnect.addListener((port) => {

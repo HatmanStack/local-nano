@@ -129,11 +129,11 @@ uses `classifyOffscreenMessage`, runs the matching async handler, and returns
 
 **Verification Checklist:**
 
-- `offscreen.ts` contains exactly one `chrome.runtime.onMessage.addListener`.
-- The single listener returns `true` for gpu-info, rebuild-session, and
+- [x] `offscreen.ts` contains exactly one `chrome.runtime.onMessage.addListener`.
+- [x] The single listener returns `true` for gpu-info, rebuild-session, and
   count-tokens requests and `false` for anything else.
-- Each response posts the same `type` constant and `ok` shape as before.
-- `npm run typecheck` exits 0; `npm run lint:ci` clean; `npm run build`
+- [x] Each response posts the same `type` constant and `ok` shape as before.
+- [x] `npm run typecheck` exits 0; `npm run lint:ci` clean; `npm run build`
   succeeds and emits `dist/offscreen.js`.
 
 **Testing Instructions:** The listener body lives in `offscreen.ts` (outside the
@@ -160,10 +160,10 @@ identical.
 
 ## Phase Verification
 
-- One `onMessage` listener in `offscreen.ts`; `onConnect` untouched.
-- All three request/response round-trips behave as before (verified by the
+- [x] One `onMessage` listener in `offscreen.ts`; `onConnect` untouched.
+- [x] All three request/response round-trips behave as before (verified by the
   unchanged client tests and the manual smoke test).
-- `npm run typecheck`, `npm run lint:ci`, `npm run coverage`, `npm run build`
+- [x] `npm run typecheck`, `npm run lint:ci`, `npm run coverage`, `npm run build`
   pass.
 
 Integration points: Phase-5 adds offscreen-side serialization to the
