@@ -3,8 +3,10 @@ import {
   countTokens,
   getGpuInfo,
   rebuildSession,
+  recreateOffscreen,
   sendPrompt,
   streamPrompt,
+  subscribeProgress,
   warmupSession,
 } from '../src/offscreen/client.js';
 import {
@@ -16,11 +18,17 @@ import {
   GPU_INFO_RESPONSE,
   REBUILD_SESSION_REQUEST,
   REBUILD_SESSION_RESPONSE,
+  RECREATE_OFFSCREEN_REQUEST,
+  RECREATE_OFFSCREEN_RESPONSE,
   STREAM_CHUNK,
   STREAM_DONE,
+  STREAM_PROGRESS,
+  STREAM_PROGRESS_PORT,
   type StreamChunk,
   type StreamDone,
   type StreamRequest,
+  WARMUP_REQUEST,
+  WARMUP_RESPONSE,
 } from '../src/offscreen/protocol.js';
 import { chromeMock, type FakePort } from './setup.js';
 
@@ -200,6 +208,48 @@ describe('rebuildSession (content-script client)', () => {
   });
 });
 
+describe('recreateOffscreen (content-script client)', () => {
+  beforeEach(() => {
+    chromeMock.runtime.lastError = undefined;
+  });
+
+  it('sends RECREATE_OFFSCREEN_REQUEST and resolves on ok:true', async () => {
+    const calls: unknown[] = [];
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      calls.push(msg);
+      return { type: RECREATE_OFFSCREEN_RESPONSE, ok: true };
+    });
+    await expect(recreateOffscreen()).resolves.toBeUndefined();
+    expect(calls).toEqual([{ type: RECREATE_OFFSCREEN_REQUEST }]);
+  });
+
+  it('throws the SW error message on ok:false', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: RECREATE_OFFSCREEN_RESPONSE,
+      ok: false,
+      error: 'recreate blocked',
+    }));
+    await expect(recreateOffscreen()).rejects.toThrow('recreate blocked');
+  });
+
+  it('throws when chrome.runtime.lastError is set', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => {
+      chromeMock.runtime.lastError = { message: 'no SW' };
+      return undefined;
+    });
+    await expect(recreateOffscreen()).rejects.toThrow(/no SW/);
+    chromeMock.runtime.lastError = undefined;
+  });
+
+  it('throws when the reply is malformed', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: 'something-else',
+      ok: true,
+    }));
+    await expect(recreateOffscreen()).rejects.toThrow(/malformed/);
+  });
+});
+
 describe('countTokens (content-script client)', () => {
   beforeEach(() => {
     chromeMock.runtime.lastError = undefined;
@@ -337,7 +387,7 @@ describe('warmupSession (content-script client)', () => {
     chromeMock.runtime.lastError = undefined;
   });
 
-  it('ensures offscreen then sends an empty count-tokens request to force ensureSession', async () => {
+  it('ensures offscreen then sends a WARMUP_REQUEST (no tier) to force ensureSession', async () => {
     const seen: unknown[] = [];
     chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
       seen.push(msg);
@@ -345,26 +395,39 @@ describe('warmupSession (content-script client)', () => {
       if (type === ENSURE_OFFSCREEN_REQUEST) {
         return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
       }
-      if (type === COUNT_TOKENS_REQUEST) {
-        return { type: COUNT_TOKENS_RESPONSE, ok: true, count: 0 };
+      if (type === WARMUP_REQUEST) {
+        return { type: WARMUP_RESPONSE, ok: true };
       }
       return undefined;
     });
 
     await expect(warmupSession()).resolves.toBeUndefined();
-    expect(seen).toEqual([
-      { type: ENSURE_OFFSCREEN_REQUEST },
-      { type: COUNT_TOKENS_REQUEST, text: '' },
-    ]);
+    expect(seen).toEqual([{ type: ENSURE_OFFSCREEN_REQUEST }, { type: WARMUP_REQUEST }]);
   });
 
-  it('rejects when the count-tokens reply is ok:false', async () => {
+  it('forwards the requested tier in the WARMUP_REQUEST', async () => {
+    const seen: unknown[] = [];
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      seen.push(msg);
+      const type = (msg as { type?: string })?.type;
+      if (type === ENSURE_OFFSCREEN_REQUEST) {
+        return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
+      }
+      return { type: WARMUP_RESPONSE, ok: true };
+    });
+
+    const tier = { modelName: 'org/model', device: 'wasm' as const, dtype: 'q8' };
+    await expect(warmupSession(tier)).resolves.toBeUndefined();
+    expect(seen).toEqual([{ type: ENSURE_OFFSCREEN_REQUEST }, { type: WARMUP_REQUEST, tier }]);
+  });
+
+  it('rejects when the warmup reply is ok:false', async () => {
     chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
       const type = (msg as { type?: string })?.type;
       if (type === ENSURE_OFFSCREEN_REQUEST) {
         return { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
       }
-      return { type: COUNT_TOKENS_RESPONSE, ok: false, error: 'model failed to load' };
+      return { type: WARMUP_RESPONSE, ok: false, error: 'model failed to load' };
     });
     await expect(warmupSession()).rejects.toThrow('model failed to load');
   });
@@ -380,7 +443,7 @@ describe('warmupSession (content-script client)', () => {
     await expect(warmupSession()).rejects.toThrow(/malformed/);
   });
 
-  it('rejects when chrome.runtime.lastError is set on the count call', async () => {
+  it('rejects when chrome.runtime.lastError is set on the warmup call', async () => {
     chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
       const type = (msg as { type?: string })?.type;
       if (type === ENSURE_OFFSCREEN_REQUEST) {
@@ -499,3 +562,59 @@ describe('getGpuInfo (content-script client)', () => {
     }
   });
 });
+
+describe('subscribeProgress (content-script client)', () => {
+  beforeEach(() => {
+    chromeMock.runtime.lastError = undefined;
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: ENSURE_OFFSCREEN_RESPONSE,
+      ok: true,
+    }));
+  });
+
+  it('opens a STREAM_PROGRESS_PORT and forwards well-formed frames to onFrame', async () => {
+    const frames: Array<{ loaded: number; total: number }> = [];
+    subscribeProgress((loaded, total) => frames.push({ loaded, total }));
+    const port = await awaitPort();
+    expect(port.name).toBe(STREAM_PROGRESS_PORT);
+    port._emit({ type: STREAM_PROGRESS, loaded: 0.25, total: 1 });
+    port._emit({ type: STREAM_PROGRESS, loaded: 0.75, total: 1 });
+    expect(frames).toEqual([
+      { loaded: 0.25, total: 1 },
+      { loaded: 0.75, total: 1 },
+    ]);
+  });
+
+  it('ignores malformed messages on the port', async () => {
+    const frames: Array<{ loaded: number; total: number }> = [];
+    subscribeProgress((loaded, total) => frames.push({ loaded, total }));
+    const port = await awaitPort();
+    port._emit({ type: 'something-else', loaded: 0.5, total: 1 });
+    port._emit({ type: STREAM_PROGRESS, loaded: Number.NaN, total: 1 });
+    expect(frames).toEqual([]);
+  });
+
+  it('returns an unsubscribe that disconnects the port', async () => {
+    const unsubscribe = subscribeProgress(() => undefined);
+    const port = await awaitPort();
+    expect(port.isConnected).toBe(true);
+    unsubscribe();
+    expect(port.isConnected).toBe(false);
+  });
+
+  it('does not reject when the ensure step fails (fire-and-forget)', async () => {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: ENSURE_OFFSCREEN_RESPONSE,
+      ok: false,
+      error: 'offscreen blocked',
+    }));
+    // No throw; returns an unsubscribe that is safe to call.
+    const unsubscribe = subscribeProgress(() => undefined);
+    await flushTimers();
+    expect(() => unsubscribe()).not.toThrow();
+  });
+});
+
+async function flushTimers(): Promise<void> {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+}

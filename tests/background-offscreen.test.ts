@@ -4,8 +4,14 @@ import {
   closeOffscreen,
   ensureOffscreen,
   installEnsureListener,
+  recreateOffscreen,
 } from '../src/background/offscreen.js';
-import { ENSURE_OFFSCREEN_REQUEST, ENSURE_OFFSCREEN_RESPONSE } from '../src/offscreen/protocol.js';
+import {
+  ENSURE_OFFSCREEN_REQUEST,
+  ENSURE_OFFSCREEN_RESPONSE,
+  RECREATE_OFFSCREEN_REQUEST,
+  RECREATE_OFFSCREEN_RESPONSE,
+} from '../src/offscreen/protocol.js';
 import { chromeMock } from './setup.js';
 
 describe('ensureOffscreen', () => {
@@ -87,6 +93,34 @@ describe('closeOffscreen', () => {
   });
 });
 
+describe('recreateOffscreen', () => {
+  beforeEach(() => {
+    _resetForTests();
+  });
+
+  it('closes then recreates the document and the next ensureOffscreen no-ops', async () => {
+    chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+    await ensureOffscreen();
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(1);
+    await recreateOffscreen();
+    expect(chromeMock.offscreen.closeDocument).toHaveBeenCalledTimes(1);
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(2);
+    // The document is ready again, so a follow-up ensure does not re-create.
+    await ensureOffscreen();
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it('still calls createDocument when closeDocument rejects', async () => {
+    chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+    chromeMock.offscreen.closeDocument.mockImplementation(async () => {
+      throw new Error('no document to close');
+    });
+    await recreateOffscreen();
+    expect(chromeMock.offscreen.closeDocument).toHaveBeenCalledTimes(1);
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('installEnsureListener', () => {
   type Listener = (msg: unknown, sender: unknown, sendResponse: (r: unknown) => void) => boolean;
 
@@ -145,5 +179,37 @@ describe('installEnsureListener', () => {
     const reply = sendResponse.mock.calls[0]?.[0] as { ok: boolean; error: string };
     expect(reply.ok).toBe(false);
     expect(reply.error).toBe('blocked');
+  });
+
+  it('replies ok:true after a RECREATE_OFFSCREEN_REQUEST resolves', async () => {
+    chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+    installEnsureListener();
+    const listener = captureListener();
+    const sendResponse = vi.fn();
+    const kept = listener({ type: RECREATE_OFFSCREEN_REQUEST }, {}, sendResponse);
+    expect(kept).toBe(true);
+    for (let i = 0; i < 10 && sendResponse.mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect(sendResponse).toHaveBeenCalledWith({ type: RECREATE_OFFSCREEN_RESPONSE, ok: true });
+    expect(chromeMock.offscreen.closeDocument).toHaveBeenCalledTimes(1);
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it('replies ok:false with the error when recreate createDocument rejects', async () => {
+    chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+    chromeMock.offscreen.createDocument.mockImplementation(async () => {
+      throw new Error('recreate blocked');
+    });
+    installEnsureListener();
+    const listener = captureListener();
+    const sendResponse = vi.fn();
+    listener({ type: RECREATE_OFFSCREEN_REQUEST }, {}, sendResponse);
+    for (let i = 0; i < 10 && sendResponse.mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const reply = sendResponse.mock.calls[0]?.[0] as { ok: boolean; error: string };
+    expect(reply.ok).toBe(false);
+    expect(reply.error).toBe('recreate blocked');
   });
 });

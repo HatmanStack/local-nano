@@ -21,6 +21,7 @@ import transformersConfig from './.env.json';
 import { debugLog } from './src/debug.js';
 import { BusyGate } from './src/offscreen/busy-gate.js';
 import { classifyOffscreenMessage } from './src/offscreen/dispatch.js';
+import { applyTierToConfig, type Tier, tierKey } from './src/offscreen/ladder.js';
 import {
   COUNT_TOKENS_RESPONSE,
   type CountTokensRequest,
@@ -28,24 +29,42 @@ import {
   GPU_INFO_RESPONSE,
   type GpuInfoResponse,
   type HistoryTurn,
-  isCountTokensRequest,
-  isRebuildSessionRequest,
   isStreamAbort,
   isStreamRequest,
+  type ProgressFrame,
   REBUILD_SESSION_RESPONSE,
   type RebuildSessionRequest,
   type RebuildSessionResponse,
   STREAM_CHUNK,
   STREAM_DONE,
   STREAM_PORT_NAME,
+  STREAM_PROGRESS,
+  STREAM_PROGRESS_PORT,
   type StreamChunk,
   type StreamDone,
+  WARMUP_RESPONSE,
+  type WarmupRequest,
+  type WarmupResponse,
 } from './src/offscreen/protocol.js';
 
 interface LanguageModelSession {
   promptStreaming(input: string, options?: { signal?: AbortSignal }): ReadableStream<string>;
   measureContextUsage(input: string): Promise<number>;
   destroy(): void;
+}
+
+/**
+ * The polyfill's public `monitor` callback (ADR-R10). The polyfill calls
+ * `monitor(monitorTarget)` with a fresh `EventTarget` per `create()` and
+ * dispatches `downloadprogress` ProgressEvents on it. We attach a listener and
+ * relay `loaded`/`total` to the panel. Read through the public surface only;
+ * no polyfill patching.
+ */
+type ProgressMonitorTarget = EventTarget;
+type ProgressMonitor = (target: ProgressMonitorTarget) => void;
+interface DownloadProgressEvent extends Event {
+  loaded?: number;
+  total?: number;
 }
 
 interface LoadedHeavy {
@@ -61,6 +80,13 @@ const SYSTEM_INSTRUCTION = 'You are a helpful assistant. Answer concisely and di
 let heavyPromise: Promise<LoadedHeavy> | null = null;
 let sessionPromise: Promise<LanguageModelSession> | null = null;
 
+// The tier currently loaded into the live session (Phase 2, ADR-R2). Null until
+// a warmup with an explicit tier lands. Tracked module-scoped so a tier change
+// can guard against overlapping a prior generator (ADR-R1/R3) and so the
+// diagnostic can report what was loading. The panel drives the ladder and is
+// the source of truth; this is the offscreen-side mirror for the guard.
+let activeTier: Tier | null = null;
+
 // One generation at a time against the single shared session. The
 // polyfill mutates one `#history`; two ports streaming concurrently would
 // interleave on one ONNX generator and corrupt that history, so a second
@@ -68,6 +94,27 @@ let sessionPromise: Promise<LanguageModelSession> | null = null;
 // (reject-when-busy is YAGNI-sufficient for a single-user extension). The
 // gate is module-scoped because the session it guards is module-scoped.
 const generationGate = new BusyGate();
+
+// Connected first-run progress ports (ADR-R10). In practice at most one panel
+// warms at a time, but tolerate zero or many cleanly. Each `downloadprogress`
+// event is forwarded to every connected port; a disconnected port is dropped
+// on its own onDisconnect and a postMessage to a stale port is swallowed.
+const progressPorts = new Set<chrome.runtime.Port>();
+
+/**
+ * Forward one progress event to every connected progress port. A disconnected
+ * panel must not break the load, so each post is individually guarded.
+ */
+function broadcastProgress(loaded: number, total: number): void {
+  const frame: ProgressFrame = { type: STREAM_PROGRESS, loaded, total };
+  for (const port of progressPorts) {
+    try {
+      port.postMessage(frame);
+    } catch {
+      // Port gone; its onDisconnect removes it from the set.
+    }
+  }
+}
 
 function loadHeavy(): Promise<LoadedHeavy> {
   if (heavyPromise) return heavyPromise;
@@ -113,15 +160,39 @@ function buildInitialPrompts(
   return seeded;
 }
 
-function ensureSession(history?: HistoryTurn[]): Promise<LanguageModelSession> {
+/**
+ * Build (or return the in-flight singleton for) the shared session.
+ *
+ * `onProgress` is the ADR-R10 hook: when provided, a `monitor` is passed into
+ * the polyfill `create()` so each `downloadprogress` event's `loaded`/`total`
+ * is relayed to the panel. The monitor is per `create()`; it only fires on the
+ * one load this call kicks off. A concurrent caller that shares the existing
+ * `sessionPromise` does not re-attach a monitor (the download already started),
+ * which is fine: there is one panel warming at a time in practice.
+ */
+function ensureSession(
+  history?: HistoryTurn[],
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<LanguageModelSession> {
   if (sessionPromise) return sessionPromise;
   sessionPromise = (async () => {
     try {
       const { LanguageModel } = await loadHeavy();
+      const monitor: ProgressMonitor | undefined = onProgress
+        ? (target) => {
+            target.addEventListener('downloadprogress', (event: Event) => {
+              const e = event as DownloadProgressEvent;
+              if (typeof e.loaded === 'number' && typeof e.total === 'number') {
+                onProgress(e.loaded, e.total);
+              }
+            });
+          }
+        : undefined;
       return await LanguageModel.create({
         expectedInputs: [{ type: 'text', languages: ['en'] }],
         expectedOutputs: [{ type: 'text', languages: ['en'] }],
         initialPrompts: buildInitialPrompts(history),
+        ...(monitor ? { monitor } : {}),
       });
     } catch (err) {
       sessionPromise = null;
@@ -274,7 +345,68 @@ function handleCountTokens(msg: CountTokensRequest, sendResponse: SendResponse):
   })();
 }
 
-// Single dispatcher for the three request channels. Three sibling
+// Warmup channel (Phase 2). Block-loads the session, optionally dictating the
+// tier to load (ADR-R2). When a tier is present, override
+// `window.TRANSFORMERS_CONFIG` with the tier's model/device/dtype before
+// `ensureSession()` builds the polyfill session (the polyfill and the
+// transformers backend each read the config fresh per `create()`). A hard crash
+// drops the channel instead of replying; the panel detects that client-side.
+function handleWarmup(msg: WarmupRequest, sendResponse: SendResponse): void {
+  (async () => {
+    try {
+      if (msg.tier) {
+        const tier: Tier = {
+          modelName: msg.tier.modelName,
+          device: msg.tier.device,
+          dtype: msg.tier.dtype,
+        };
+        // Safety net for a soft tier change inside a still-live document
+        // (ADR-R1/R3): if a session is already loaded for a DIFFERENT tier,
+        // destroy it and null sessionPromise before creating, so two loads never
+        // overlap. The normal ladder advance recreates the whole document first,
+        // so sessionPromise is null and this is a no-op.
+        if (sessionPromise && (activeTier === null || tierKey(activeTier) !== tierKey(tier))) {
+          try {
+            const previous = await sessionPromise;
+            previous?.destroy();
+          } catch {
+            // Prior session may have failed to load; nothing to destroy.
+          }
+          sessionPromise = null;
+        }
+        activeTier = tier;
+        // Load the heavy singleton BEFORE applying the override. loadHeavy()
+        // sets window.TRANSFORMERS_CONFIG to the base import as part of its
+        // one-time init; on a freshly recreated document (heavyPromise === null,
+        // i.e. every ladder rung) that reset would otherwise clobber the tier
+        // override before LanguageModel.create() reads it — so every rung would
+        // load the base .env.json config and the ladder would never actually
+        // vary dtype/device. Running it first lets the override land last;
+        // ensureSession's own loadHeavy() below then returns the cached promise
+        // and does not reset the config again.
+        await loadHeavy();
+        // Override the in-memory config (never the on-disk .env.json). The
+        // base import supplies tier 0 / apiKey; this overrides model/device/dtype.
+        (window as unknown as Record<string, unknown>).TRANSFORMERS_CONFIG = applyTierToConfig(
+          transformersConfig as Record<string, unknown>,
+          tier,
+        );
+      }
+      // Relay download progress to any connected progress port (ADR-R10). The
+      // broadcast is per-event and individually guarded, so a disconnected
+      // panel never breaks the load.
+      await ensureSession(undefined, broadcastProgress);
+      const ok: WarmupResponse = { type: WARMUP_RESPONSE, ok: true };
+      sendResponse(ok);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      const fail: WarmupResponse = { type: WARMUP_RESPONSE, ok: false, error: message };
+      sendResponse(fail);
+    }
+  })();
+}
+
+// Single dispatcher for the four request channels. Sibling
 // listeners each returning false for non-owned messages risk the MV3
 // sendResponse race: a false-returning listener can close the channel
 // before the async owner replies. This listener returns true only when
@@ -288,13 +420,32 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     case 'gpu-info':
       handleGpuInfo(sendResponse);
       return true;
+    // classifyOffscreenMessage validated the shape with the same protocol
+    // guard, and each handler closes the reply channel via its own try/catch,
+    // so call unconditionally. A re-guard here could only fail on dispatch/
+    // protocol drift, and a false guard would skip the handler while still
+    // returning true — leaking the open reply channel until Chrome times it out.
     case 'rebuild-session':
-      if (isRebuildSessionRequest(msg)) handleRebuildSession(msg, sendResponse);
+      handleRebuildSession(msg as RebuildSessionRequest, sendResponse);
       return true;
     case 'count-tokens':
-      if (isCountTokensRequest(msg)) handleCountTokens(msg, sendResponse);
+      handleCountTokens(msg as CountTokensRequest, sendResponse);
+      return true;
+    case 'warmup':
+      handleWarmup(msg as WarmupRequest, sendResponse);
       return true;
   }
+});
+
+// First-run download-progress port (ADR-R10). The panel opens this during
+// warmup; the offscreen monitor broadcasts `downloadprogress` frames to it.
+// Fire-and-forget: it carries no inbound messages, just the relayed frames.
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== STREAM_PROGRESS_PORT) return;
+  progressPorts.add(port);
+  port.onDisconnect.addListener(() => {
+    progressPorts.delete(port);
+  });
 });
 
 chrome.runtime.onConnect.addListener((port) => {

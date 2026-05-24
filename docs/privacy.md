@@ -17,6 +17,7 @@ That's the entire list of outbound traffic the extension causes.
 - **The page content you ask about.** On the first turn of a conversation, the page title, URL, and a body excerpt (capped at 1500 characters) are included in the prompt. They are not transmitted anywhere — they are passed to the local model.
 - **Conversation history.** Persisted in `chrome.storage.local`, scoped per `origin + pathname`. This storage is local to your browser profile.
 - **Model responses.** Generated locally.
+- **The load diagnostic.** The "Copy diagnostic" control in the panel (and the diagnostic embedded in a load-failure message) contains only device/capability info (device, software-fallback flag, adapter buffer size), the chosen model and active tier, the ladder path that was walked, an error class and message, the extension version, and the browser user agent. It holds no prompts, page content, or chat history. It is built on demand and copied to your clipboard locally; nothing is ever auto-sent, logged to the network, or persisted.
 
 ## Permissions, explained
 

@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TOGGLE_MESSAGE } from '../src/background/handler.js';
 import { MAX_HISTORY } from '../src/history.js';
+import * as ladderModule from '../src/offscreen/ladder.js';
+import { SMALLER_MODEL_CANDIDATE } from '../src/offscreen/ladder.js';
 import type { SelectionSnapshot } from '../src/selection-rewrite.js';
 import {
   deriveHistoryThreshold,
@@ -38,8 +40,10 @@ vi.mock('../src/offscreen/client.js', () => ({
   }),
   sendPrompt: vi.fn(),
   rebuildSession: vi.fn(() => Promise.resolve()),
+  recreateOffscreen: vi.fn(() => Promise.resolve()),
   countTokens: vi.fn(async (text: string) => Math.ceil(text.length / 3)),
   warmupSession: vi.fn(() => Promise.resolve()),
+  subscribeProgress: vi.fn((_onFrame: (loaded: number, total: number) => void) => () => undefined),
   getGpuInfo: vi.fn(async () => ({
     device: 'webgpu' as const,
     isFallback: false,
@@ -52,14 +56,18 @@ import {
   countTokens as mockedCountTokens,
   getGpuInfo as mockedGetGpuInfo,
   rebuildSession as mockedRebuildSession,
+  recreateOffscreen as mockedRecreateOffscreen,
   streamPrompt as mockedStreamPrompt,
+  subscribeProgress as mockedSubscribeProgress,
   warmupSession as mockedWarmupSession,
 } from '../src/offscreen/client.js';
 
 const streamPromptMock = mockedStreamPrompt as unknown as ReturnType<typeof vi.fn>;
 const rebuildSessionMock = mockedRebuildSession as unknown as ReturnType<typeof vi.fn>;
+const recreateOffscreenMock = mockedRecreateOffscreen as unknown as ReturnType<typeof vi.fn>;
 const countTokensMock = mockedCountTokens as unknown as ReturnType<typeof vi.fn>;
 const warmupSessionMock = mockedWarmupSession as unknown as ReturnType<typeof vi.fn>;
+const subscribeProgressMock = mockedSubscribeProgress as unknown as ReturnType<typeof vi.fn>;
 const getGpuInfoMock = mockedGetGpuInfo as unknown as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
@@ -404,42 +412,762 @@ describe('initSession — toggle behavior', () => {
     expect(deps._actionBtn.textContent).toBe('Send');
   });
 
-  it('allows a retry on the next open if warmupSession rejects', async () => {
-    warmupSessionMock.mockRejectedValueOnce(new Error('offscreen unavailable'));
+  it('renders Downloading model NN% during the download then Loading into GPU at 100%', async () => {
+    // Capture the progress onFrame so the test can push frames, and keep warmup
+    // pending so the hint stays visible through the phase transition.
+    let onFrame: ((loaded: number, total: number) => void) | undefined;
+    subscribeProgressMock.mockImplementation((cb: (loaded: number, total: number) => void) => {
+      onFrame = cb;
+      return () => undefined;
+    });
+    let resolveWarm: (() => void) | undefined;
+    warmupSessionMock.mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolveWarm = r;
+        }),
+    );
     const deps = makeDeps();
     initSession(deps);
-    const listener = getToggleListener();
-    listener(TOGGLE_MESSAGE);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks(); // preflight resolves, warmup starts, progress subscribed
+    const bubble = () =>
+      Array.from(deps._messages.children)
+        .map((c) => c.textContent ?? '')
+        .find((t) => t.includes('Downloading model') || t.includes('Loading')) ?? '';
+    // A real download frame switches the hint to the percentage.
+    onFrame?.(0.42, 1);
+    expect(bubble()).toContain('Downloading model 42%');
+    // Progress advances.
+    onFrame?.(0.9, 1);
+    expect(bubble()).toContain('Downloading model 90%');
+    // At 100% the hint flips to the indeterminate GPU-loading text.
+    onFrame?.(1, 1);
+    expect(bubble()).toContain('Loading into GPU');
+    expect(bubble()).not.toContain('Downloading model');
+    resolveWarm?.();
     await flushMicrotasks();
-    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
-    // After failure the button is back to idle (not stuck on Loading…).
-    expect(deps._actionBtn.disabled).toBe(false);
-    // Closing and reopening retries the warmup.
-    listener(TOGGLE_MESSAGE);
-    listener(TOGGLE_MESSAGE);
-    await flushMicrotasks();
-    expect(warmupSessionMock).toHaveBeenCalledTimes(2);
   });
 
-  it('degrades silently on a warmup failure — no error guard on the load path', async () => {
-    warmupSessionMock.mockRejectedValueOnce(
-      new Error(
-        'Deserialize tensor model_embed_tokens_weight_quant failed. Failed to load external data file "embed_tokens_q4.onnx_data", error: Unknown error occurred in memory copy.',
-      ),
+  it('falls back to the elapsed counter when no progress frames arrive', async () => {
+    // The default subscribeProgress mock never calls onFrame (cached load).
+    let resolveWarm: (() => void) | undefined;
+    warmupSessionMock.mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolveWarm = r;
+        }),
     );
     const deps = makeDeps();
     initSession(deps);
     getToggleListener()(TOGGLE_MESSAGE);
     await flushMicrotasks();
-    // The preload guard must NOT fire on the load path: no "Model load
-    // failed" bubble, no remedies, no Retry button, no leftover loading
-    // bubble. The model loads lazily on the first send instead.
-    const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
-    expect(texts.some((t) => t.includes('Model load failed'))).toBe(false);
-    expect(texts.some((t) => t.includes('Loading model'))).toBe(false);
-    // Button is back to idle so the user can send (which lazy-loads).
-    expect(deps._actionBtn.disabled).toBe(false);
-    expect(deps._actionBtn.textContent).toBe('Send');
+    const texts = () => Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+    // No percentage; the elapsed counter wording is shown exactly as before.
+    expect(texts().some((t) => t.includes('Downloading model'))).toBe(false);
+    expect(texts().some((t) => /Loading model… \ds/.test(t))).toBe(true);
+    resolveWarm?.();
+    await flushMicrotasks();
+  });
+
+  it('unsubscribes from progress on warmup success', async () => {
+    const unsubscribe = vi.fn();
+    subscribeProgressMock.mockImplementation(() => unsubscribe);
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    expect(subscribeProgressMock).toHaveBeenCalled();
+    expect(unsubscribe).toHaveBeenCalled();
+  });
+
+  it('unsubscribes from progress on warmup failure', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const unsubscribe = vi.fn();
+      subscribeProgressMock.mockImplementation(() => unsubscribe);
+      warmupSessionMock.mockRejectedValue(new Error('offscreen unavailable'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      // One unsubscribe per ensureWarm invocation (the ladder walk is a single
+      // ensureWarm), regardless of how many tiers were attempted.
+      expect(unsubscribe).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('resets warmStarted after a full ladder failure so a reopen re-runs ensureWarm', async () => {
+    // Reject every tier on the first walk so the panel reaches the terminal
+    // bubble. Persistence records all four tiers known-bad, so the reopen
+    // re-runs the ladder but skips every (known-bad) tier and re-exhausts
+    // immediately, re-rendering the terminal bubble — proving warmStarted was
+    // reset and the cycle is not dead.
+    warmupSessionMock.mockRejectedValue(new Error('offscreen unavailable'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const deps = makeDeps();
+      initSession(deps);
+      const listener = getToggleListener();
+      listener(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      // One full ladder walk = PRIMARY_LADDER.length attempts.
+      expect(warmupSessionMock).toHaveBeenCalledTimes(4);
+      // After full failure the button is back to idle (not stuck on Loading…).
+      expect(deps._actionBtn.disabled).toBe(false);
+      const terminalCount = () =>
+        Array.from(deps._messages.children).filter((c) =>
+          (c.textContent ?? '').includes("Couldn't load the model on this device."),
+        ).length;
+      expect(terminalCount()).toBe(1);
+      // Closing and reopening re-runs ensureWarm. All four tiers are known-bad
+      // (persisted), so no warmup re-fires, but a fresh terminal bubble appears.
+      listener(TOGGLE_MESSAGE);
+      listener(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      // No additional warmup attempts (every tier is known-bad).
+      expect(warmupSessionMock).toHaveBeenCalledTimes(4);
+      // The reopen re-rendered a terminal bubble (warmStarted was reset).
+      expect(terminalCount()).toBe(2);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('surfaces a terminal bubble with a diagnostic and both controls when the ladder is exhausted', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      warmupSessionMock.mockRejectedValue(new Error('offscreen port disconnected: unknown reason'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      // The transient loading bubble is gone; the terminal bubble is shown.
+      const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(texts.some((t) => t.includes('Loading model…'))).toBe(false);
+      const terminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      expect(terminal).toBeTruthy();
+      const txt = terminal?.textContent ?? '';
+      // Headline + guidance + diagnostic block embedded.
+      expect(txt).toContain('set "device": "wasm" in .env.json');
+      expect(txt).toContain('device: webgpu');
+      expect(txt).toContain('errorMessage: offscreen port disconnected: unknown reason');
+      expect(txt).toContain('extensionVersion: 0.2.4');
+      // The active tier in the diagnostic is the last (wasm) tier tried.
+      expect(txt).toContain('activeTier: onnx-community/gemma-4-E2B-it-ONNX/wasm/q8');
+      // The ladder path is listed.
+      expect(txt).toContain('Tiers tried:');
+      // It has Retry and Reset-and-re-detect controls.
+      const buttons = Array.from(terminal?.querySelectorAll('button') ?? []).map(
+        (b) => b.textContent,
+      );
+      expect(buttons).toEqual(['Retry', 'Reset and re-detect']);
+      // Button is back to idle (the finally ran).
+      expect(deps._actionBtn.disabled).toBe(false);
+      expect(deps._actionBtn.textContent).toBe('Send');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('embeds the full ladder path with per-tier outcomes, the chosen model, and the UA in the terminal diagnostic', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      // Reject every tier so the whole primary ladder is walked and recorded.
+      warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      const terminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      const txt = terminal?.textContent ?? '';
+      // The chosen model is named.
+      expect(txt).toContain('chosenModel: onnx-community/gemma-4-E2B-it-ONNX');
+      // Every attempted tier is listed with its load-failure outcome.
+      expect(txt).toContain('ladderPath:');
+      expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q4f16 -> load-failure');
+      expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q8 -> load-failure');
+      expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/fp16 -> load-failure');
+      expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/wasm/q8 -> load-failure');
+      // jsdom supplies a userAgent; it is included verbatim.
+      expect(txt).toContain(`userAgent: ${navigator.userAgent}`);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('Retry force-recreates and re-walks, skipping known-bad tiers (re-exhausts after a full failure)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      warmupSessionMock.mockRejectedValue(new Error('the message channel closed'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      const terminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      const retryBtn = terminal?.querySelector('button') as HTMLButtonElement;
+      expect(retryBtn?.textContent).toBe('Retry');
+      const recreateBefore = recreateOffscreenMock.mock.calls.length;
+      const warmupBefore = warmupSessionMock.mock.calls.length;
+      retryBtn.click();
+      await flushMicrotasks();
+      // Retry force-recreates the document before re-walking (ADR-R4).
+      expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+      // All four tiers are persisted known-bad, so the re-walk skips every tier
+      // and never re-attempts warmup — it reaches exhaustion immediately.
+      expect(warmupSessionMock.mock.calls.length).toBe(warmupBefore);
+      // The terminal bubble is shown again with fresh controls.
+      const stillTerminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      expect(stillTerminal).toBeTruthy();
+      const buttons = Array.from(stillTerminal?.querySelectorAll('button') ?? []).map(
+        (b) => b.textContent,
+      );
+      expect(buttons).toEqual(['Retry', 'Reset and re-detect']);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('Reset and re-detect clears known-bad and re-walks from tier 0; recovery removes the bubble', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      warmupSessionMock.mockRejectedValue(new Error('the message channel closed'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      const terminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      const buttons = terminal?.querySelectorAll('button') ?? [];
+      const resetBtn = buttons[1] as HTMLButtonElement;
+      expect(resetBtn?.textContent).toBe('Reset and re-detect');
+      const recreateBefore = recreateOffscreenMock.mock.calls.length;
+      // After the reset clears known-bad, tier 0 resolves (environment changed).
+      warmupSessionMock.mockReset();
+      warmupSessionMock.mockResolvedValue(undefined);
+      resetBtn.click();
+      await flushMicrotasks();
+      // Reset force-recreates the document, then the re-walk loads tier 0.
+      expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+      expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+      // The first re-walked tier is tier 0 (the persisted known-bad was cleared).
+      const firstTier = warmupSessionMock.mock.calls[0][0] as { dtype?: string } | undefined;
+      expect(firstTier?.dtype).toBe('q4f16');
+      // Terminal bubble is gone and the model is ready.
+      const after = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(after.some((t) => t.includes("Couldn't load the model on this device."))).toBe(false);
+      expect(deps._actionBtn.disabled).toBe(false);
+      // Known-bad record cleared by the reset.
+      expect(chromeMock.storage.local.store['local-nano:capability:v1']).toBeTruthy();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('re-renders a terminal bubble when Retry recreateOffscreen rejects', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      warmupSessionMock.mockRejectedValue(new Error('offscreen port disconnected: unknown reason'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      const terminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      const retryBtn = terminal?.querySelector('button') as HTMLButtonElement;
+      const warmupBefore = warmupSessionMock.mock.calls.length;
+      recreateOffscreenMock.mockRejectedValueOnce(new Error('recreate blocked'));
+      retryBtn.click();
+      await flushMicrotasks();
+      // warmup not re-run on the new walk (the pre-walk recreate failed first).
+      expect(warmupSessionMock.mock.calls.length).toBe(warmupBefore);
+      // A terminal bubble is shown again (with the recreate error), not a dead panel.
+      const stillTerminal = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes("Couldn't load the model on this device."),
+      );
+      expect(stillTerminal).toBeTruthy();
+      expect(stillTerminal?.textContent ?? '').toContain('recreate blocked');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe('initSession — fallback ladder', () => {
+  const CAPABILITY_KEY = 'local-nano:capability:v1';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    // vi.clearAllMocks() clears call history but keeps the FakeStorageArea's
+    // inline get/set/remove implementations (those survive clearAllMocks; only
+    // resetAllMocks would drop them), so storage persistence works as written.
+    warmupSessionMock.mockReset();
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    // Restore the capable default so a per-test weak-snapshot override does not
+    // leak into a later test (clearAllMocks keeps implementations).
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  type StoredRecord = {
+    knownGood: { dtype: string } | null;
+    knownBad: Array<{ dtype: string }>;
+  };
+
+  it('cold start with no record loads tier 0 and persists it as known-good on success', async () => {
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    // Tier 0 (q4f16) was attempted first.
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    const firstTier = warmupSessionMock.mock.calls[0][0] as { dtype?: string };
+    expect(firstTier.dtype).toBe('q4f16');
+    // Persisted as known-good.
+    const record = chromeMock.storage.local.store[CAPABILITY_KEY] as StoredRecord;
+    expect(record.knownGood?.dtype).toBe('q4f16');
+    expect(record.knownBad).toEqual([]);
+  });
+
+  it('on a tier-0 load failure records known-bad, recreates, and loads tier 1', async () => {
+    // Tier 0 rejects, tier 1 resolves.
+    warmupSessionMock.mockRejectedValueOnce(new Error('load failed')).mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    // Two attempts: q4f16 then q8.
+    expect(warmupSessionMock).toHaveBeenCalledTimes(2);
+    expect((warmupSessionMock.mock.calls[0][0] as { dtype: string }).dtype).toBe('q4f16');
+    expect((warmupSessionMock.mock.calls[1][0] as { dtype: string }).dtype).toBe('q8');
+    // recreateOffscreen called once, between the two rungs.
+    expect(recreateOffscreenMock).toHaveBeenCalledTimes(1);
+    // Persisted: tier 0 known-bad, tier 1 known-good.
+    const record = chromeMock.storage.local.store[CAPABILITY_KEY] as StoredRecord;
+    expect(record.knownBad.map((t) => t.dtype)).toEqual(['q4f16']);
+    expect(record.knownGood?.dtype).toBe('q8');
+  });
+
+  it('recreates the document between every failed rung and never overlaps loads', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      // All tiers fail.
+      warmupSessionMock.mockRejectedValue(new Error('crash'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      // Four attempts (the whole ladder).
+      expect(warmupSessionMock).toHaveBeenCalledTimes(4);
+      // recreate fires between rungs: 3 times for 4 failed attempts.
+      expect(recreateOffscreenMock).toHaveBeenCalledTimes(3);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('a subsequent cold start with a persisted known-good skips straight to that tier', async () => {
+    // Seed a known-good of tier 2 (fp16) under the live extension version.
+    chromeMock.storage.local.store[CAPABILITY_KEY] = {
+      schemaVersion: 1,
+      extensionVersion: '0.2.4',
+      knownGood: {
+        modelName: 'onnx-community/gemma-4-E2B-it-ONNX',
+        device: 'webgpu',
+        dtype: 'fp16',
+      },
+      knownBad: [],
+      capability: { device: 'webgpu', isFallback: false, maxBufferSize: null },
+    };
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    // The first warmup is for the known-good tier, not tier 0.
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    expect((warmupSessionMock.mock.calls[0][0] as { dtype: string }).dtype).toBe('fp16');
+  });
+
+  it('skips a persisted known-bad tier on a cold-start walk', async () => {
+    // Tier 0 known-bad; no known-good. The walk should start at tier 1.
+    chromeMock.storage.local.store[CAPABILITY_KEY] = {
+      schemaVersion: 1,
+      extensionVersion: '0.2.4',
+      knownGood: null,
+      knownBad: [
+        { modelName: 'onnx-community/gemma-4-E2B-it-ONNX', device: 'webgpu', dtype: 'q4f16' },
+      ],
+      capability: { device: 'webgpu', isFallback: false, maxBufferSize: null },
+    };
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    expect((warmupSessionMock.mock.calls[0][0] as { dtype: string }).dtype).toBe('q8');
+  });
+
+  it('flag OFF: a weak-classified device still walks only the primary ladder', async () => {
+    // A weak snapshot (software fallback) classifies as weak, but with
+    // SMALLER_MODEL_ENABLED off the assembled ladder is the primary ladder, so
+    // the first tier is still the primary model at q4f16 (Phase 2 behavior).
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: true,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
+    expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
+    expect(firstTier.dtype).toBe('q4f16');
+  });
+
+  it('flag ON (forced in test): a weak device tries the smaller model first', async () => {
+    // Force the flag on through the function seam without flipping the
+    // production constant. A weak device then gets the smaller ladder first.
+    const flagSpy = vi.spyOn(ladderModule, 'isSmallerModelEnabled').mockReturnValue(true);
+    try {
+      getGpuInfoMock.mockResolvedValue({
+        device: 'webgpu' as const,
+        isFallback: true,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      });
+      warmupSessionMock.mockResolvedValue(undefined);
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+      const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
+      expect(firstTier).toMatchObject({
+        modelName: SMALLER_MODEL_CANDIDATE[0].modelName,
+        device: SMALLER_MODEL_CANDIDATE[0].device,
+        dtype: SMALLER_MODEL_CANDIDATE[0].dtype,
+      });
+    } finally {
+      flagSpy.mockRestore();
+    }
+  });
+
+  it('persists the classified capability snapshot in the per-device record', async () => {
+    // A weak snapshot (small max buffer) must be recorded verbatim in the
+    // persisted capability field, independent of the flag.
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: 512 * 1024 * 1024,
+      configuredThreshold: null,
+    });
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    const record = chromeMock.storage.local.store[CAPABILITY_KEY] as {
+      capability: { device: string; isFallback: boolean; maxBufferSize: number | null };
+    };
+    expect(record.capability).toEqual({
+      device: 'webgpu',
+      isFallback: false,
+      maxBufferSize: 512 * 1024 * 1024,
+    });
+  });
+});
+
+describe('initSession — network/download failure', () => {
+  const CAPABILITY_KEY = 'local-nano:capability:v1';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  const networkText = "Couldn't download the model. Check your connection and try again.";
+
+  it('a network failure shows the connection message, does not advance the ladder or record known-bad', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      warmupSessionMock.mockRejectedValue(new Error('Failed to fetch'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      // Only tier 0 was attempted; the ladder did NOT advance.
+      expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+      // No recreate (the device is fine, only the download failed).
+      expect(recreateOffscreenMock).not.toHaveBeenCalled();
+      // The connection message is shown, not the device-incapability terminal one.
+      const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(texts.some((t) => t.includes(networkText))).toBe(true);
+      expect(texts.some((t) => t.includes("Couldn't load the model on this device."))).toBe(false);
+      // No known-bad write (no capability record was persisted at all).
+      expect(chromeMock.storage.local.store[CAPABILITY_KEY]).toBeUndefined();
+      // Diagnostic is embedded, with the network outcome recorded on the
+      // attempted tier and the chosen model named.
+      const bubble = texts.find((t) => t.includes(networkText)) ?? '';
+      expect(bubble).toContain('device: webgpu');
+      expect(bubble).toContain('chosenModel: onnx-community/gemma-4-E2B-it-ONNX');
+      expect(bubble).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q4f16 -> network');
+      // Back to idle.
+      expect(deps._actionBtn.disabled).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('the network Retry re-runs warmup for the same tier and recovers on success', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      warmupSessionMock.mockRejectedValueOnce(new Error('NetworkError: failed to fetch'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      const bubble = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes(networkText),
+      );
+      expect(bubble).toBeTruthy();
+      const retryBtn = bubble?.querySelector('button') as HTMLButtonElement;
+      expect(retryBtn?.textContent).toBe('Retry');
+      // The first attempt was tier 0 (q4f16).
+      expect((warmupSessionMock.mock.calls[0][0] as { dtype: string }).dtype).toBe('q4f16');
+      // On Retry the download succeeds; the same tier is re-attempted (no
+      // recreate, no ladder walk).
+      warmupSessionMock.mockResolvedValue(undefined);
+      retryBtn.click();
+      await flushMicrotasks();
+      expect(recreateOffscreenMock).not.toHaveBeenCalled();
+      // Second warmup is tier 0 again (same tier, not advanced).
+      expect((warmupSessionMock.mock.calls[1][0] as { dtype: string }).dtype).toBe('q4f16');
+      // The connection bubble is gone and the model is ready.
+      const after = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(after.some((t) => t.includes(networkText))).toBe(false);
+      expect(deps._actionBtn.disabled).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('a device-incapability failure still advances the ladder (not the network path)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      // A non-network load failure walks the full ladder as in Phase 2.
+      warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      // The whole ladder was walked (4 tiers) and recreates fired between rungs.
+      expect(warmupSessionMock).toHaveBeenCalledTimes(4);
+      expect(recreateOffscreenMock).toHaveBeenCalledTimes(3);
+      // The terminal device message is shown, not the connection one.
+      const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(texts.some((t) => t.includes("Couldn't load the model on this device."))).toBe(true);
+      expect(texts.some((t) => t.includes(networkText))).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe('initSession — copy-diagnostic affordance', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  function findCopyButton(root: HTMLElement): HTMLButtonElement {
+    const btn = Array.from(root.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Copy diagnostic',
+    );
+    if (!btn) throw new Error('Copy diagnostic affordance not found');
+    return btn as HTMLButtonElement;
+  }
+
+  it('renders the affordance on the panel root right after init, with no failure', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    // Present immediately, independent of any load/failure state.
+    const btn = findCopyButton(deps._root);
+    expect(btn.textContent).toBe('Copy diagnostic');
+  });
+
+  it('builds a diagnostic and writes it to the clipboard on click', async () => {
+    const writeText = vi.fn((_t: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      const deps = makeDeps();
+      initSession(deps);
+      const btn = findCopyButton(deps._root);
+      btn.click();
+      await flushMicrotasks();
+      expect(writeText).toHaveBeenCalledTimes(1);
+      const copied = writeText.mock.calls[0][0] as string;
+      // The built diagnostic carries the expected fields, with no error yet.
+      expect(copied).toContain('device: webgpu');
+      expect(copied).toContain('errorClass: none');
+      expect(copied).toContain('extensionVersion: 0.2.4');
+      expect(copied).toContain(`userAgent: ${navigator.userAgent}`);
+      // The label flips to a confirmation.
+      expect(btn.textContent).toBe('Copied');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
+  it('falls back to execCommand when clipboard.writeText rejects', async () => {
+    const writeText = vi.fn(() => Promise.reject(new Error('denied')));
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const execCommand = vi.fn(() => true);
+    (document as unknown as { execCommand: typeof execCommand }).execCommand = execCommand;
+    try {
+      const deps = makeDeps();
+      initSession(deps);
+      const btn = findCopyButton(deps._root);
+      btn.click();
+      await flushMicrotasks();
+      // The async path was attempted first, then the synchronous fallback ran.
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(execCommand).toHaveBeenCalledWith('copy');
+      expect(btn.textContent).toBe('Copied');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      Reflect.deleteProperty(document as unknown as Record<string, unknown>, 'execCommand');
+    }
+  });
+
+  it('shows "Copy failed" when both clipboard paths fail, without throwing', async () => {
+    const writeText = vi.fn(() => Promise.reject(new Error('denied')));
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const execCommand = vi.fn(() => {
+      throw new Error('execCommand unavailable');
+    });
+    (document as unknown as { execCommand: typeof execCommand }).execCommand = execCommand;
+    try {
+      const deps = makeDeps();
+      initSession(deps);
+      const btn = findCopyButton(deps._root);
+      expect(() => btn.click()).not.toThrow();
+      await flushMicrotasks();
+      expect(btn.textContent).toBe('Copy failed');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      Reflect.deleteProperty(document as unknown as Record<string, unknown>, 'execCommand');
+    }
+  });
+
+  it('includes the live failure and ladder path after a terminal failure', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const writeText = vi.fn((_t: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      const btn = findCopyButton(deps._root);
+      btn.click();
+      await flushMicrotasks();
+      const copied = writeText.mock.calls[0][0] as string;
+      // The on-demand diagnostic reflects the last failure and the walked path.
+      expect(copied).toContain('errorMessage: VK_ERROR_OUT_OF_DEVICE_MEMORY');
+      expect(copied).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q4f16 -> load-failure');
+      expect(copied).toContain('chosenModel: onnx-community/gemma-4-E2B-it-ONNX');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('does not send the diagnostic over the network (no fetch, no sendMessage)', async () => {
+    const writeText = vi.fn((_t: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const fetchSpy = vi.fn();
+    (globalThis as unknown as { fetch: typeof fetchSpy }).fetch = fetchSpy;
+    const sendMessageBefore = chromeMock.runtime.sendMessage.mock.calls.length;
+    try {
+      const deps = makeDeps();
+      initSession(deps);
+      const btn = findCopyButton(deps._root);
+      btn.click();
+      await flushMicrotasks();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      // No new runtime.sendMessage was issued for the copy.
+      expect(chromeMock.runtime.sendMessage.mock.calls.length).toBe(sendMessageBefore);
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      Reflect.deleteProperty(globalThis as unknown as Record<string, unknown>, 'fetch');
+    }
   });
 });
 

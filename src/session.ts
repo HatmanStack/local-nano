@@ -8,13 +8,39 @@ import {
   saveHistory as saveHistoryToStorage,
   storageKey,
 } from './history.js';
+import { CAPABLE_MIN_BUFFER_BYTES, classifyCapability } from './offscreen/capability.js';
+import {
+  type CapabilitySnapshot,
+  clearCapabilityRecord,
+  loadCapabilityRecord,
+  recordKnownBad,
+  recordKnownGood,
+} from './offscreen/capability-store.js';
 import {
   countTokens,
   getGpuInfo,
   rebuildSession,
+  recreateOffscreen,
   streamPrompt,
+  subscribeProgress,
   warmupSession,
 } from './offscreen/client.js';
+import { buildDiagnostic, errorInfo, type LadderPathEntry } from './offscreen/diagnostic.js';
+import { classifyFailure, classifyLoadFailure } from './offscreen/failure.js';
+import {
+  assembleLadder,
+  firstTierIndex,
+  isSmallerModelEnabled,
+  nextAction,
+  type Tier,
+  tierKey,
+} from './offscreen/ladder.js';
+import {
+  formatProgressText,
+  GPU_LOADING_TEXT,
+  nextProgress,
+  type ProgressState,
+} from './offscreen/progress.js';
 import type { GpuInfoSnapshot, HistoryTurn } from './offscreen/protocol.js';
 import { pageContext } from './pageContext.js';
 import {
@@ -52,6 +78,13 @@ const BUTTON_CSS =
  * overrides everything.
  */
 const HISTORY_TOKEN_WARN_THRESHOLD_DEFAULT = 1500;
+
+/**
+ * The diagnostic's error fields when no failure has occurred (the
+ * always-available Copy affordance built before/without any load failure).
+ * Reads as `none` rather than a fabricated error.
+ */
+const NO_ERROR = { errorClass: 'none', errorMessage: 'none' };
 
 /**
  * How long the model-load elapsed counter ticks before it appends
@@ -102,7 +135,7 @@ export function preflightWarning(info: GpuInfoSnapshot): string | null {
   if (info.isFallback) {
     return 'Heads up: no hardware WebGPU adapter detected (software fallback). The model may fail to load on this device — if it does, set "device": "wasm" in .env.json (CPU, slower but reliable).';
   }
-  if (info.maxBufferSize !== null && info.maxBufferSize < 1024 * 1024 * 1024) {
+  if (info.maxBufferSize !== null && info.maxBufferSize < CAPABLE_MIN_BUFFER_BYTES) {
     const mb = Math.round(info.maxBufferSize / (1024 * 1024));
     return `Heads up: this GPU's max buffer is ~${mb} MiB, which may be too small to load the model. If it fails, try a smaller model or "device": "wasm" in .env.json.`;
   }
@@ -686,6 +719,285 @@ export function initSession(deps: SessionDeps): void {
   // offscreen `ensureSession` singleton handles cross-tab dedupe.
   let warmStarted = false;
   let modelReady = false;
+  // Captured during the ensureWarm preflight so the failure path can feed the
+  // diagnostic the same adapter snapshot the load saw. Conservative default
+  // (ADR-R11 / Task 1.4) until the preflight resolves.
+  let lastGpuInfo: GpuInfoSnapshot = {
+    device: 'webgpu',
+    isFallback: false,
+    maxBufferSize: null,
+    configuredThreshold: null,
+  };
+  // The tier last attempted and the ordered list of tiers tried this walk with
+  // their per-tier outcomes (ADR-R1: the panel owns ladder state). The
+  // diagnostic reports the active tier and the full path; persistence keys off
+  // the attempted tier. `chosenModel` is the model the ladder selected (the
+  // model of the tiers being walked), surfaced in the diagnostic.
+  let activeTier: Tier | null = null;
+  let ladderPath: LadderPathEntry[] = [];
+  let chosenModel: string | null = null;
+  // The most recent warmup failure, so the always-available Copy affordance can
+  // include it in the on-demand diagnostic. Null before any failure and after a
+  // successful load; the diagnostic renders its error fields as `none` then.
+  let lastWarmError: unknown = null;
+
+  // Map the queried GPU snapshot to the persistence capability shape (ADR-R7).
+  // Drops the configuredThreshold, which is a panel-side derivation knob, not a
+  // device-capability fact.
+  function capabilitySnapshot(): CapabilitySnapshot {
+    return {
+      device: lastGpuInfo.device,
+      isFallback: lastGpuInfo.isFallback,
+      maxBufferSize: lastGpuInfo.maxBufferSize,
+    };
+  }
+
+  // Append a tier's resolved outcome to the per-walk path (the diagnostic
+  // reports it). One entry per attempt, in attempt order.
+  function recordPathOutcome(tier: Tier, outcome: LadderPathEntry['outcome']): void {
+    ladderPath.push({
+      modelName: tier.modelName,
+      device: tier.device,
+      dtype: tier.dtype,
+      outcome,
+    });
+  }
+
+  /**
+   * Render the proactive terminal-failure bubble after the fallback ladder is
+   * exhausted (ADR-R4/R5/R11). The model could not be loaded on any tier this
+   * device tried, so instead of degrading silently to lazy loading we surface an
+   * actionable headline, a line of guidance, the tiers tried, the copy-only
+   * diagnostic, and two manual controls. Recovery is manual only: no auto-retry,
+   * no timer (constraint 2).
+   *
+   * "Retry" re-walks the ladder skipping known-bad tiers (so it does not
+   * re-crash on the same tier). After a full exhaustion this typically reaches
+   * exhaustion again unless the environment changed, so it also offers "Reset
+   * and re-detect", which clears the persisted record and re-walks from tier 0.
+   * Both force-recreate the offscreen document first (ADR-R3/R4).
+   */
+  /**
+   * Build the diagnostic input from the CURRENT live panel state (ADR-R11).
+   * One source of truth for every diagnostic surface (the terminal bubble, the
+   * network bubble, the always-available Copy affordance), so the rendered
+   * report is consistent. Built on demand, never cached, never auto-sent. When
+   * no error has occurred the caller passes `null` and the error fields read as
+   * `none`.
+   */
+  function buildDiagnosticInput(err: unknown) {
+    const { errorClass, errorMessage } = err === null ? NO_ERROR : errorInfo(err);
+    return {
+      device: lastGpuInfo.device,
+      isFallback: lastGpuInfo.isFallback,
+      maxBufferSize: lastGpuInfo.maxBufferSize,
+      chosenModel,
+      // The last tier attempted (null only if the walk never started a tier,
+      // e.g. a recreate failure before the first load, or no walk has run).
+      activeTier: activeTier
+        ? { modelName: activeTier.modelName, device: activeTier.device, dtype: activeTier.dtype }
+        : null,
+      // A fresh copy each build so the diagnostic captures a stable snapshot of
+      // the path and never shares the mutable accumulator.
+      ladderPath: ladderPath.slice(),
+      errorClass,
+      errorMessage,
+      extensionVersion: chrome.runtime.getManifest().version,
+      userAgent: navigator.userAgent,
+    };
+  }
+
+  function renderTerminalFailure(err: unknown): void {
+    // Record for the always-available Copy affordance so a later copy carries
+    // this failure even after the bubble is dismissed.
+    lastWarmError = err;
+    // classifyFailure annotates the console log; the terminal UI is shown for
+    // any exhausted ladder, since the load not completing IS the release-gate
+    // scenario this feature removes the silent death from.
+    const failureClass = classifyFailure(err);
+    const { errorMessage } = errorInfo(err);
+    const diagnostic = buildDiagnostic(buildDiagnosticInput(err));
+    console.warn(
+      `[local-nano] warmup failed (${failureClass}); showing terminal UI:`,
+      errorMessage,
+    );
+
+    // The human-readable "Tiers tried" line in the message body stays for quick
+    // scanning; the structured per-tier outcomes live in the diagnostic block.
+    const pathLine =
+      ladderPath.length > 0
+        ? `Tiers tried: ${ladderPath.map((e) => `${e.modelName}|${e.device}|${e.dtype}`).join(', ')}`
+        : null;
+
+    const bubble = addMessage(
+      'system',
+      [
+        "Couldn't load the model on this device.",
+        'Try Retry below; if it keeps failing, set "device": "wasm" in .env.json for a slower CPU fallback.',
+        ...(pathLine ? [pathLine] : []),
+        '',
+        diagnostic,
+      ].join('\n'),
+    );
+
+    // Shared re-walk driver for both controls. Force-recreates the document
+    // (ADR-R4) then re-runs the ladder. `resetFirst` clears the persisted record
+    // so the walk starts from tier 0 again (Reset and re-detect).
+    const rewalk = (button: HTMLButtonElement, resetFirst: boolean) => {
+      button.disabled = true;
+      bubble.remove();
+      // Reset so ensureWarm runs again; both flags clear so a true retry (not a
+      // no-op) happens and the model is treated as not-yet-ready.
+      warmStarted = false;
+      modelReady = false;
+      void (async () => {
+        try {
+          if (resetFirst) await clearCapabilityRecord();
+          await recreateOffscreen();
+        } catch (recreateErr) {
+          // A failed recreate/clear leaves the panel without a dead button:
+          // re-render the terminal message so the user can act again.
+          renderTerminalFailure(recreateErr);
+          return;
+        }
+        await ensureWarm();
+      })();
+    };
+
+    const controls = window.document.createElement('div');
+    controls.style.cssText = 'margin-top: 6px; display: flex; gap: 6px;';
+
+    const retryBtn = window.document.createElement('button');
+    retryBtn.textContent = 'Retry';
+    retryBtn.style.cssText = BUTTON_CSS;
+    retryBtn.addEventListener('click', () => rewalk(retryBtn, false));
+
+    const resetBtn = window.document.createElement('button');
+    resetBtn.textContent = 'Reset and re-detect';
+    resetBtn.style.cssText = BUTTON_CSS;
+    resetBtn.addEventListener('click', () => rewalk(resetBtn, true));
+
+    controls.append(retryBtn, resetBtn);
+    bubble.appendChild(controls);
+  }
+
+  /**
+   * Render the network/download-failure bubble (Phase 4, ADR-R10). Distinct
+   * from the device-incapability terminal bubble: the device is capable, only
+   * the HF weights fetch failed, so this is a retryable connection error. The
+   * Retry re-runs `ensureWarm` against the SAME tier path (no recreate, no
+   * ladder walk, no known-bad write) since nothing about the device changed.
+   * The diagnostic is embedded too (cheap and useful), but the headline is
+   * clearly network-flavored.
+   */
+  function renderNetworkFailure(err: unknown): void {
+    lastWarmError = err;
+    const { errorMessage } = errorInfo(err);
+    const diagnostic = buildDiagnostic(buildDiagnosticInput(err));
+    console.warn('[local-nano] warmup failed (network); showing connection message:', errorMessage);
+
+    const bubble = addMessage(
+      'system',
+      ["Couldn't download the model. Check your connection and try again.", '', diagnostic].join(
+        '\n',
+      ),
+    );
+
+    const controls = window.document.createElement('div');
+    controls.style.cssText = 'margin-top: 6px; display: flex; gap: 6px;';
+    const retryBtn = window.document.createElement('button');
+    retryBtn.textContent = 'Retry';
+    retryBtn.style.cssText = BUTTON_CSS;
+    retryBtn.addEventListener('click', () => {
+      retryBtn.disabled = true;
+      bubble.remove();
+      // The device is fine; only the download failed. Reset the warm flags and
+      // re-run ensureWarm against the same tier path. No recreate (the document
+      // is healthy) and the ladder/known-bad state is untouched (constraint 2:
+      // single-shot, manual).
+      warmStarted = false;
+      modelReady = false;
+      void ensureWarm();
+    });
+    controls.appendChild(retryBtn);
+    bubble.appendChild(controls);
+  }
+
+  /**
+   * Copy text to the clipboard (ADR-R11). Prefers the async
+   * `navigator.clipboard.writeText`; on rejection or when the API is absent
+   * (restricted contexts, older runtimes), falls back to a hidden textarea plus
+   * the synchronous `document.execCommand('copy')`. Both paths are wrapped so a
+   * failure resolves false rather than throwing. This is the ONLY side effect of
+   * the diagnostic: nothing is sent, logged to the network, or persisted.
+   */
+  async function copyToClipboard(text: string): Promise<boolean> {
+    const clip = (navigator as { clipboard?: { writeText?: (t: string) => Promise<void> } })
+      .clipboard;
+    if (clip?.writeText) {
+      try {
+        await clip.writeText(text);
+        return true;
+      } catch {
+        // Fall through to the execCommand path below.
+      }
+    }
+    try {
+      const ta = window.document.createElement('textarea');
+      ta.value = text;
+      // Keep it out of the visible layout and off-screen.
+      ta.style.cssText = 'position: fixed; top: -9999px; left: -9999px; opacity: 0;';
+      window.document.body.appendChild(ta);
+      ta.select();
+      const ok = window.document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Build the always-available "Copy diagnostic" affordance (ADR-R11, Task 5.3).
+   * Present whenever the panel is open, independent of failure state. On click it
+   * builds the diagnostic from the CURRENT live state (the last capability
+   * snapshot, the current ladder path and chosen model, the most recent error if
+   * any) and copies it locally. Copy-only: nothing is sent or persisted.
+   */
+  function makeCopyDiagnosticAffordance(): HTMLButtonElement {
+    const btn = window.document.createElement('button');
+    btn.textContent = 'Copy diagnostic';
+    btn.setAttribute('aria-label', 'Copy diagnostic to clipboard');
+    // Muted, unobtrusive, top-right of the panel root, consistent with BUTTON_CSS
+    // but quieter so it never competes with the chat. Absolute within the
+    // position: fixed panel root so it does not disturb the chat flex layout.
+    btn.style.cssText =
+      'position: absolute; top: 4px; right: 4px; z-index: 1; padding: 1px 6px; font: inherit; font-size: 11px; cursor: pointer; background: transparent; color: #999; border: 1px solid #555; border-radius: 4px;';
+    let restoreTimer: ReturnType<typeof setTimeout> | null = null;
+    btn.addEventListener('click', () => {
+      const text = buildDiagnostic(buildDiagnosticInput(lastWarmError));
+      void (async () => {
+        const ok = await copyToClipboard(text);
+        btn.textContent = ok ? 'Copied' : 'Copy failed';
+        if (restoreTimer) clearTimeout(restoreTimer);
+        restoreTimer = setTimeout(() => {
+          btn.textContent = 'Copy diagnostic';
+        }, 1500);
+      })();
+    });
+    return btn;
+  }
+
+  /**
+   * Attempt a single tier: warm the offscreen session with that
+   * model/device/dtype. Resolves on a live session; throws the offscreen error
+   * on a catchable load failure (a hard crash drops the channel, which surfaces
+   * as a terminal-shaped throw too).
+   */
+  async function attemptTier(tier: Tier): Promise<void> {
+    await warmupSession(tier);
+  }
+
   async function ensureWarm(): Promise<void> {
     if (warmStarted) return;
     warmStarted = true;
@@ -696,20 +1008,55 @@ export function initSession(deps: SessionDeps): void {
     // exactly what a fixed 30s cap did). The ticking counter is the
     // proof-of-life that a static "Loading" lacked, and after
     // WARMUP_SLOW_NOTICE_MS we append remedies in case it really is
-    // stuck — without giving up. A genuine load failure still rejects
-    // warmupSession (offscreen returns ok:false) and surfaces the error
-    // bubble below.
+    // stuck — without giving up. The counter ticks across the WHOLE ladder
+    // walk: per-rung re-entry does not reset the clock (single startedAt), so
+    // the user sees one continuous proof-of-life and never learns about tier
+    // internals. A fully exhausted ladder surfaces the terminal bubble below.
     const warmHint = addMessage('system', 'Loading model… 0s');
     const startedAt = Date.now();
-    const renderHint = () => {
+    // Phased first-run progress (ADR-R10). `progressPhase` tracks where we are:
+    // - 'none': no download frame seen yet; the elapsed counter is the hint
+    //   (fallback for a fully cached load or a transport hiccup).
+    // - 'downloading': real percent frames are arriving; the hint shows
+    //   "Downloading model NN%" and the elapsed counter is suppressed so the
+    //   user sees the real percentage, not a competing timer.
+    // - 'gpu-loading': the download hit 100% but the session has not resolved;
+    //   the hint shows the indeterminate "Loading into GPU…" with the elapsed
+    //   counter resumed (the GPU compile/upload phase has no real percentage).
+    let progressPhase: 'none' | 'downloading' | 'gpu-loading' = 'none';
+    let progress: ProgressState = { percent: 0 };
+    const elapsedHint = () => {
       const secs = Math.round((Date.now() - startedAt) / 1000);
-      warmHint.textContent =
-        Date.now() - startedAt >= WARMUP_SLOW_NOTICE_MS
-          ? `Loading model… ${secs}s. Taking longer than usual. A first run downloads a few GB, so this can be slow — it's still working. If it seems truly stuck, reload the extension from chrome://extensions, or set "device": "wasm" in .env.json for a CPU fallback.`
-          : `Loading model… ${secs}s (first run downloads the model; later loads start from cache).`;
+      return Date.now() - startedAt >= WARMUP_SLOW_NOTICE_MS
+        ? `Loading model… ${secs}s. Taking longer than usual. A first run downloads a few GB, so this can be slow — it's still working. If it seems truly stuck, reload the extension from chrome://extensions, or set "device": "wasm" in .env.json for a CPU fallback.`
+        : `Loading model… ${secs}s (first run downloads the model; later loads start from cache).`;
+    };
+    const renderHint = () => {
+      if (progressPhase === 'downloading') {
+        warmHint.textContent = formatProgressText(progress.percent);
+      } else if (progressPhase === 'gpu-loading') {
+        const secs = Math.round((Date.now() - startedAt) / 1000);
+        warmHint.textContent = `${GPU_LOADING_TEXT} ${secs}s`;
+      } else {
+        warmHint.textContent = elapsedHint();
+      }
     };
     renderHint();
     const ticker = setInterval(renderHint, 1000);
+    // Subscribe to download-progress frames for this warmup invocation. Each
+    // frame folds through the pure parser; the phase drives the hint text. The
+    // subscription is fire-and-forget (no frames => the elapsed counter stays).
+    // Cleaned up in the finally so a Retry/Reset re-walk opens a fresh port
+    // against the recreated document.
+    const unsubscribeProgress = subscribeProgress((loaded, total) => {
+      progress = nextProgress(progress, { loaded, total });
+      progressPhase = progress.percent >= 100 ? 'gpu-loading' : 'downloading';
+      renderHint();
+    });
+    // Reset the per-walk ladder state so a Retry/Reset re-walk starts clean.
+    activeTier = null;
+    ladderPath = [];
+    chosenModel = null;
     try {
       // Preflight: query the adapter BEFORE the heavy load so an
       // unsupported device gets an upfront advisory instead of a silent
@@ -717,6 +1064,7 @@ export function initSession(deps: SessionDeps): void {
       // Non-fatal — the default threshold covers the typical case.
       try {
         const info = await getGpuInfo();
+        lastGpuInfo = info;
         historyThreshold = deriveHistoryThreshold(info);
         debugLog(
           `[local-nano] history threshold: ${historyThreshold} (device=${info.device}, isFallback=${info.isFallback}, maxBufferSize=${info.maxBufferSize ?? 'n/a'}, configured=${info.configuredThreshold ?? 'n/a'})`,
@@ -724,31 +1072,142 @@ export function initSession(deps: SessionDeps): void {
         const advisory = preflightWarning(info);
         if (advisory) addMessage('system', advisory);
       } catch (gpuErr) {
+        // The preflight snapshot failed; keep the conservative lastGpuInfo so
+        // the diagnostic still renders if warmup then fails.
         console.warn('[local-nano] gpu-info preflight failed; proceeding:', gpuErr);
       }
-      await warmupSession();
-      modelReady = true;
-      if (warmHint.parentNode) warmHint.remove();
+
+      // Classify device capability from the (possibly conservative) snapshot
+      // and assemble the ladder accordingly (ADR-R8/R9). With the smaller-model
+      // flag off, `assembleLadder` returns the primary ladder unchanged, so the
+      // loop below is behaviorally identical to the primary-only path; the
+      // capability verdict only feeds the diagnostic until the flag is enabled.
+      const capability = classifyCapability(lastGpuInfo);
+      const ladder = assembleLadder({
+        capability,
+        smallerEnabled: isSmallerModelEnabled(),
+      });
+      // The model the ladder selected: the model of the first tier it will
+      // walk. Surfaced in the diagnostic so a bug report names the model even
+      // when the walk crashes before recording an outcome. With the flag off
+      // this is always the primary model.
+      chosenModel = ladder.length > 0 ? ladder[0].modelName : null;
+
+      // Drive the pure ladder reducer (ADR-R1/R6). On cold start, skip straight
+      // to the persisted known-good tier (or the first non-known-bad tier); on a
+      // load failure, record the known-bad tier, force-recreate the document
+      // (ADR-R3/R4: never overlap; the prior generator's GPU memory is only freed
+      // by recreating the document), then attempt the next rung. On exhaustion,
+      // fall through to the terminal bubble.
+      const extensionVersion = chrome.runtime.getManifest().version;
+      const record = await loadCapabilityRecord(extensionVersion);
+      const knownBadKeys = new Set((record?.knownBad ?? []).map(tierKey));
+      const knownGoodKey = record?.knownGood ? tierKey(record.knownGood) : null;
+
+      let attemptedIndex = firstTierIndex(ladder, knownGoodKey, knownBadKeys);
+      let lastError: unknown = null;
+      let loaded = false;
+      // Set when a tier's failure was a weights-download/network error
+      // (constraint 2 + ADR-R10): the device is capable, only the fetch failed,
+      // so we show a distinct retryable connection message instead of advancing
+      // the ladder, recording known-bad, or showing the terminal bubble.
+      let networkFailed = false;
+
+      while (attemptedIndex !== -1) {
+        const tier = ladder[attemptedIndex];
+        activeTier = tier;
+        try {
+          await attemptTier(tier);
+          recordPathOutcome(tier, 'success');
+          await recordKnownGood(extensionVersion, tier, capabilitySnapshot());
+          loaded = true;
+          break;
+        } catch (err) {
+          lastError = err;
+          const loadClass = classifyLoadFailure(err);
+          if (loadClass === 'network') {
+            // The device is fine; the download failed. Do NOT record known-bad,
+            // do NOT advance the ladder. Show the connection message with a
+            // same-tier Retry and stop the walk here.
+            recordPathOutcome(tier, 'network');
+            debugLog(`[local-nano] tier ${tierKey(tier)} load failed (network); not advancing`);
+            networkFailed = true;
+            break;
+          }
+          recordPathOutcome(tier, 'load-failure');
+          const failureClass = classifyFailure(err);
+          debugLog(`[local-nano] tier ${tierKey(tier)} load failed (${failureClass}); advancing`);
+          await recordKnownBad(extensionVersion, tier, capabilitySnapshot());
+          knownBadKeys.add(tierKey(tier));
+          const action = nextAction({
+            ladder,
+            attemptedIndex,
+            outcome: 'load-failure',
+            knownBadKeys,
+          });
+          if (action.kind === 'exhausted') {
+            attemptedIndex = -1;
+            break;
+          }
+          // Another rung remains: force-recreate the document BEFORE the next
+          // attempt so the crashed/poisoned document never blocks it and two
+          // loads never overlap (ADR-R3/R4). A recreate failure ends the walk.
+          await recreateOffscreen();
+          attemptedIndex = ladder.indexOf(action.tier);
+        }
+      }
+
+      if (loaded) {
+        modelReady = true;
+        // A successful load clears any prior failure from the on-demand
+        // diagnostic (the Copy affordance now reports a healthy state).
+        lastWarmError = null;
+        if (warmHint.parentNode) warmHint.remove();
+      } else if (networkFailed) {
+        // A weights-download/network failure: distinct retryable connection
+        // message (same tier on Retry, no recreate, no ladder walk).
+        if (warmHint.parentNode) warmHint.remove();
+        warmStarted = false;
+        renderNetworkFailure(lastError);
+      } else {
+        // The ladder is exhausted: surface the terminal bubble with the
+        // diagnostic, the tiers tried, and the manual controls. When the walk
+        // was pre-exhausted (every tier was already known-bad from a prior run,
+        // so the loop never ran and lastError is null), pass a synthetic error
+        // so the diagnostic explains why instead of rendering errorMessage:none.
+        if (warmHint.parentNode) warmHint.remove();
+        warmStarted = false;
+        renderTerminalFailure(
+          lastError ??
+            new Error(
+              'All fallback options were already ruled out on this device from a prior run. Use "Reset and re-detect" to try again from the top.',
+            ),
+        );
+      }
     } catch (err) {
-      // Preload is best-effort: a failed warmup must NOT alarm the user.
-      // The load is resource-heavy, and a failure here (e.g. transient
-      // VRAM pressure on panel open) degrades quietly to lazy loading.
-      // warmStarted is reset so the next panel toggle retries the
-      // preload; otherwise the model loads on the first send, where any
-      // error surfaces plainly in the response bubble.
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn('[local-nano] warmup failed (will load lazily on first send):', message);
+      // An out-of-ladder failure (e.g. recreateOffscreen rejected between
+      // rungs). Surface the terminal bubble; warmStarted is reset so a later
+      // panel toggle can also retry.
       if (warmHint.parentNode) warmHint.remove();
       warmStarted = false;
+      renderTerminalFailure(err);
     } finally {
       // Single cleanup point — the interval is cleared exactly once here
-      // regardless of success or failure above.
+      // regardless of success or failure above. The progress subscription is
+      // torn down here too, so success, failure, and Retry all release the
+      // port (a Retry re-subscribes against the recreated document).
       clearInterval(ticker);
+      unsubscribeProgress();
       // Only return to idle if a real send didn't sneak in ahead of us.
       // activeAbort is set inside the send paths, so respect it here.
       if (!activeAbort) setIdleState(actionBtn, i);
     }
   }
+
+  // ---- Always-available copy-diagnostic affordance (ADR-R11, Task 5.3) ----
+  // Mounted on the panel root once, so it is present whenever the panel is open
+  // regardless of load state. Copy-only: nothing leaves the device.
+  root.appendChild(makeCopyDiagnosticAffordance());
 
   // ---- Toggle listener ----
   let convertedAnchor = false;

@@ -19,6 +19,11 @@ class FakeStorageArea {
     Object.assign(this.store, items);
   });
 
+  remove = vi.fn(async (key: string | string[]) => {
+    const keys = typeof key === 'string' ? [key] : key;
+    for (const k of keys) delete this.store[k];
+  });
+
   clear = vi.fn(async () => {
     this.store = {};
   });
@@ -95,6 +100,7 @@ const chromeMock = {
   storage: { local },
   runtime: {
     getURL: vi.fn((p: string) => `chrome-extension://test/${p}`),
+    getManifest: vi.fn(() => ({ version: '0.2.4' })),
     onMessage: { addListener: vi.fn() },
     sendMessage: vi.fn(async (_msg: unknown) => undefined as unknown),
     lastError: undefined as { message?: string } | undefined,
@@ -119,7 +125,10 @@ beforeEach(() => {
   local.store = {};
   local.get.mockClear();
   local.set.mockClear();
+  local.remove.mockClear();
   chromeMock.runtime.getURL.mockClear();
+  chromeMock.runtime.getManifest.mockClear();
+  chromeMock.runtime.getManifest.mockImplementation(() => ({ version: '0.2.4' }));
   chromeMock.runtime.onMessage.addListener.mockClear();
   chromeMock.runtime.sendMessage.mockClear();
   chromeMock.runtime.sendMessage.mockImplementation(async (_msg: unknown) => undefined);
