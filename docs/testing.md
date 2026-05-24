@@ -28,6 +28,7 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 | `tests/offscreen-client.test.ts`     | `streamPrompt` content-script client over the SW |
 | `tests/offscreen-protocol.test.ts`   | Wire-message discriminators and finiteness guards |
 | `tests/offscreen-dispatch.test.ts`   | `classifyOffscreenMessage` listener routing  |
+| `tests/offscreen-failure.test.ts`    | `classifyFailure`/`isTerminalFailure` terminal-vs-transient seam |
 | `tests/offscreen-busy-gate.test.ts`  | `BusyGate` concurrent-stream rejection       |
 | `tests/docs-config.test.ts`          | Doc cross-references and test-file table drift |
 
