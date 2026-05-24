@@ -54,12 +54,26 @@ This auto-fallback applies only to a LOAD failure. A mid-stream or runtime crash
 
 #### Terminal load failure, Retry, and Reset and re-detect
 
-If every tier in the ladder fails, the panel shows a terminal system message ("Couldn't load the model on this device.") with a line of guidance, the list of tiers tried, and a copyable diagnostic block (device, software-fallback flag, adapter buffer size, the active tier, the error class and message, and the extension version). It offers two controls:
+If every tier in the ladder fails, the panel shows a terminal system message ("Couldn't load the model on this device.") with a line of guidance, the list of tiers tried, and the copyable diagnostic block described under "Copy diagnostic" below. It offers two controls:
 
 - **Retry** force-recreates the offscreen document and re-walks the ladder, skipping the tiers already recorded known-bad. After a full exhaustion this usually reaches the terminal message again unless something on the device changed.
 - **Reset and re-detect** clears the persisted `local-nano:capability:v1` record (forgetting the known-good and known-bad tiers), force-recreates the document, and re-walks the ladder from the top tier.
 
 Recovery is manual: nothing retries automatically, and there is no timer. Use Retry or Reset and re-detect, or set `"device": "wasm"` in `.env.json` for a slower CPU fallback. The diagnostic block is copy-only; nothing leaves your device.
+
+#### Copy diagnostic
+
+A small, muted "Copy diagnostic" control sits in the top-right corner of the chat panel. It is available whenever the panel is open, not only on failure, so you can grab a report at any time when something looks wrong. Clicking it builds a snapshot of the current state and copies it to your clipboard (with a synchronous fallback when the async Clipboard API is blocked); the label briefly shows "Copied" (or "Copy failed").
+
+The report contains:
+
+- the device (`webgpu` or `wasm`), the software-fallback flag, and the adapter's max buffer size;
+- the chosen model and the active tier;
+- the full ladder path that was walked, one tier per line with its outcome (`success`, `load-failure`, or `network`);
+- the error class and message of the most recent load failure (or `none` when there has been none);
+- the extension version, the parsed Chrome version, and the raw browser user agent.
+
+Paste it into a bug report so the model, tier, device class, and failure are all captured. The report is built on demand and copied locally only: nothing is auto-sent, logged to the network, or persisted (see `docs/privacy.md`).
 
 ### `dtype` (string)
 
