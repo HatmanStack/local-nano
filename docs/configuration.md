@@ -40,6 +40,10 @@ Where inference runs.
 
 If WebGPU isn't available the polyfill will surface an error in the chat panel; switch to `"wasm"` in that case.
 
+#### Preflight device-capability advisory
+
+When the panel opens, the extension queries the WebGPU adapter before the heavy model load. If it finds no hardware WebGPU adapter (a software fallback) or an adapter whose max buffer size looks too small to hold the model, it shows a one-time "Heads up…" system message in the chat advising you to set `"device": "wasm"` in `.env.json` (CPU — slower but reliable). The advisory is informational only: the load is still attempted, since the capability snapshot can false-negative. If the load then fails, the advisory tells you what to try.
+
 ### `dtype` (string)
 
 Quantization level for model weights. Smaller dtypes mean smaller download, lower memory, and slightly worse quality. Common values:
