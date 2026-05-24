@@ -8,7 +8,7 @@ import {
   saveHistory as saveHistoryToStorage,
   storageKey,
 } from './history.js';
-import { CAPABLE_MIN_BUFFER_BYTES } from './offscreen/capability.js';
+import { CAPABLE_MIN_BUFFER_BYTES, classifyCapability } from './offscreen/capability.js';
 import {
   type CapabilitySnapshot,
   clearCapabilityRecord,
@@ -27,9 +27,10 @@ import {
 import { buildDiagnostic, errorInfo } from './offscreen/diagnostic.js';
 import { classifyFailure } from './offscreen/failure.js';
 import {
+  assembleLadder,
   firstTierIndex,
+  isSmallerModelEnabled,
   nextAction,
-  PRIMARY_LADDER,
   type Tier,
   tierKey,
 } from './offscreen/ladder.js';
@@ -883,6 +884,17 @@ export function initSession(deps: SessionDeps): void {
         console.warn('[local-nano] gpu-info preflight failed; proceeding:', gpuErr);
       }
 
+      // Classify device capability from the (possibly conservative) snapshot
+      // and assemble the ladder accordingly (ADR-R8/R9). With the smaller-model
+      // flag off, `assembleLadder` returns the primary ladder unchanged, so the
+      // loop below is behaviorally identical to the primary-only path; the
+      // capability verdict only feeds the diagnostic until the flag is enabled.
+      const capability = classifyCapability(lastGpuInfo);
+      const ladder = assembleLadder({
+        capability,
+        smallerEnabled: isSmallerModelEnabled(),
+      });
+
       // Drive the pure ladder reducer (ADR-R1/R6). On cold start, skip straight
       // to the persisted known-good tier (or the first non-known-bad tier); on a
       // load failure, record the known-bad tier, force-recreate the document
@@ -894,16 +906,12 @@ export function initSession(deps: SessionDeps): void {
       const knownBadKeys = new Set((record?.knownBad ?? []).map(tierKey));
       const knownGoodKey = record?.knownGood ? tierKey(record.knownGood) : null;
 
-      let attemptedIndex: number | null = firstTierIndex(
-        PRIMARY_LADDER,
-        knownGoodKey,
-        knownBadKeys,
-      );
+      let attemptedIndex: number | null = firstTierIndex(ladder, knownGoodKey, knownBadKeys);
       let lastError: unknown = null;
       let loaded = false;
 
       while (attemptedIndex !== -1) {
-        const tier = PRIMARY_LADDER[attemptedIndex];
+        const tier = ladder[attemptedIndex];
         activeTier = tier;
         ladderPath.push(tier);
         try {
@@ -918,7 +926,7 @@ export function initSession(deps: SessionDeps): void {
           await recordKnownBad(extensionVersion, tier, capabilitySnapshot());
           knownBadKeys.add(tierKey(tier));
           const action = nextAction({
-            ladder: PRIMARY_LADDER,
+            ladder,
             attemptedIndex,
             outcome: 'load-failure',
             knownBadKeys,
@@ -931,7 +939,7 @@ export function initSession(deps: SessionDeps): void {
           // attempt so the crashed/poisoned document never blocks it and two
           // loads never overlap (ADR-R3/R4). A recreate failure ends the walk.
           await recreateOffscreen();
-          attemptedIndex = PRIMARY_LADDER.indexOf(action.tier);
+          attemptedIndex = ladder.indexOf(action.tier);
         }
       }
 

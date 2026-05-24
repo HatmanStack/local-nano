@@ -63,6 +63,16 @@ export const PRIMARY_LADDER: Tier[] = [...primaryLadder];
 export const SMALLER_MODEL_ENABLED = false;
 
 /**
+ * Read the smaller-model flag through a function seam so the panel can be
+ * exercised with the rung both on and off in tests (`vi.spyOn`) without
+ * flipping the production constant. Production always returns
+ * `SMALLER_MODEL_ENABLED` (false).
+ */
+export function isSmallerModelEnabled(): boolean {
+  return SMALLER_MODEL_ENABLED;
+}
+
+/**
  * The smaller-model fallback ladder (ADR-R8), held behind
  * `SMALLER_MODEL_ENABLED`. The candidate is `onnx-community/Qwen2.5-0.5B-Instruct`,
  * the smallest model `docs/models.md` reports as actually answering questions.

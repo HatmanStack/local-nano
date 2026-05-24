@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TOGGLE_MESSAGE } from '../src/background/handler.js';
 import { MAX_HISTORY } from '../src/history.js';
+import * as ladderModule from '../src/offscreen/ladder.js';
+import { SMALLER_MODEL_CANDIDATE } from '../src/offscreen/ladder.js';
 import type { SelectionSnapshot } from '../src/selection-rewrite.js';
 import {
   deriveHistoryThreshold,
@@ -597,6 +599,15 @@ describe('initSession — fallback ladder', () => {
     warmupSessionMock.mockReset();
     recreateOffscreenMock.mockReset();
     recreateOffscreenMock.mockResolvedValue(undefined);
+    // Restore the capable default so a per-test weak-snapshot override does not
+    // leak into a later test (clearAllMocks keeps implementations).
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
   });
 
   type StoredRecord = {
@@ -698,6 +709,79 @@ describe('initSession — fallback ladder', () => {
     await flushMicrotasks();
     expect(warmupSessionMock).toHaveBeenCalledTimes(1);
     expect((warmupSessionMock.mock.calls[0][0] as { dtype: string }).dtype).toBe('q8');
+  });
+
+  it('flag OFF: a weak-classified device still walks only the primary ladder', async () => {
+    // A weak snapshot (software fallback) classifies as weak, but with
+    // SMALLER_MODEL_ENABLED off the assembled ladder is the primary ladder, so
+    // the first tier is still the primary model at q4f16 (Phase 2 behavior).
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: true,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
+    expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
+    expect(firstTier.dtype).toBe('q4f16');
+  });
+
+  it('flag ON (forced in test): a weak device tries the smaller model first', async () => {
+    // Force the flag on through the function seam without flipping the
+    // production constant. A weak device then gets the smaller ladder first.
+    const flagSpy = vi.spyOn(ladderModule, 'isSmallerModelEnabled').mockReturnValue(true);
+    try {
+      getGpuInfoMock.mockResolvedValue({
+        device: 'webgpu' as const,
+        isFallback: true,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      });
+      warmupSessionMock.mockResolvedValue(undefined);
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+      const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
+      expect(firstTier).toMatchObject({
+        modelName: SMALLER_MODEL_CANDIDATE[0].modelName,
+        device: SMALLER_MODEL_CANDIDATE[0].device,
+        dtype: SMALLER_MODEL_CANDIDATE[0].dtype,
+      });
+    } finally {
+      flagSpy.mockRestore();
+    }
+  });
+
+  it('persists the classified capability snapshot in the per-device record', async () => {
+    // A weak snapshot (small max buffer) must be recorded verbatim in the
+    // persisted capability field, independent of the flag.
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: 512 * 1024 * 1024,
+      configuredThreshold: null,
+    });
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    const record = chromeMock.storage.local.store[CAPABILITY_KEY] as {
+      capability: { device: string; isFallback: boolean; maxBufferSize: number | null };
+    };
+    expect(record.capability).toEqual({
+      device: 'webgpu',
+      isFallback: false,
+      maxBufferSize: 512 * 1024 * 1024,
+    });
   });
 });
 
