@@ -18,6 +18,7 @@
  */
 
 import transformersConfig from './.env.json';
+import { debugLog } from './src/debug.js';
 import {
   COUNT_TOKENS_RESPONSE,
   type CountTokensResponse,
@@ -69,7 +70,7 @@ function loadHeavy(): Promise<LoadedHeavy> {
       (tfMod.env as unknown as OnnxWasmEnv).backends.onnx.wasm.wasmPaths = ortPath;
       (tfMod.env as unknown as OnnxWasmEnv).backends.onnx.wasm.numThreads = 1;
       (window as unknown as Record<string, unknown>).TRANSFORMERS_CONFIG = transformersConfig;
-      console.log('[local-nano/offscreen] heavy modules loaded; ORT wasmPaths =', ortPath);
+      debugLog('[local-nano/offscreen] heavy modules loaded; ORT wasmPaths =', ortPath);
       return {
         LanguageModel: (
           polyfillMod as unknown as {
@@ -290,7 +291,7 @@ chrome.runtime.onConnect.addListener((port) => {
       let chunkCount = 0;
       let totalChars = 0;
       try {
-        console.log(
+        debugLog(
           `[local-nano/offscreen] stream/request id=${id} prompt.length=${raw.prompt.length}`,
         );
         const session = await ensureSession();
@@ -315,7 +316,7 @@ chrome.runtime.onConnect.addListener((port) => {
         } finally {
           reader.releaseLock();
         }
-        console.log(
+        debugLog(
           `[local-nano/offscreen] stream/done id=${id} chunks=${chunkCount} chars=${totalChars} sessionMs=${tSession.toFixed(0)} totalMs=${(performance.now() - t0).toFixed(0)}`,
         );
         const done: StreamDone = controller.signal.aborted
@@ -352,4 +353,4 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-console.log('[local-nano/offscreen] listener ready');
+debugLog('[local-nano/offscreen] listener ready');

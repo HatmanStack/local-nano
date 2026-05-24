@@ -137,15 +137,17 @@ calls untouched.
 
 **Verification Checklist:**
 
-- No unconditional `console.log` remains in `src/session.ts` or `offscreen.ts`
+- [x] No unconditional `console.log` remains in `src/session.ts` or `offscreen.ts`
   for diagnostics; each is `debugLog(...)` (or the local `dbg()` in offscreen).
-- `console.error` / `console.warn` / `console.debug` calls are unchanged in
+- [x] `console.error` / `console.warn` / `console.debug` calls are unchanged in
   count and level.
-- With `DEBUG = false`, a built bundle emits no per-turn `console.log`. Confirm
+- [x] With `DEBUG = false`, a built bundle emits no per-turn `console.log`. Confirm
   by grepping `dist/content.js` and `dist/offscreen.js` after `npm run build`
   for the leaked strings (e.g. `first token at`, `stream/request id=`) — they
-  must be absent (tree-shaken) or unreachable.
-- `npm run typecheck`, `npm run lint:ci`, `npm run coverage`, `npm run build`
+  must be absent (tree-shaken) or unreachable. The build has no minify pass, so
+  the strings remain as `debugLog(...)` args but the `console.log` is unreachable
+  behind `if (DEBUG)` (`DEBUG === false`): runtime is quiet.
+- [x] `npm run typecheck`, `npm run lint:ci`, `npm run coverage`, `npm run build`
   all pass.
 
 **Testing Instructions:** Add `tests/debug.test.ts` (if a shared `src/debug.ts`

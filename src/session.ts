@@ -1,4 +1,5 @@
 import { TOGGLE_MESSAGE } from './background/handler.js';
+import { debugLog } from './debug.js';
 import {
   type Entry,
   loadHistory as loadHistoryFromStorage,
@@ -265,7 +266,7 @@ export function initSession(deps: SessionDeps): void {
       undoBtn.disabled = true;
       if (result.ok) {
         undoBtn.textContent = 'Undone';
-        console.log('[local-nano] undo: restored original selection');
+        debugLog('[local-nano] undo: restored original selection');
       } else {
         undoBtn.textContent = 'Undo failed';
         console.warn(`[local-nano] undo failed: ${result.reason ?? 'unknown'}`);
@@ -289,7 +290,7 @@ export function initSession(deps: SessionDeps): void {
       askMode = false;
       updatePlaceholder();
       updateChip();
-      console.log('[local-nano] rewrite accepted; selection state reset');
+      debugLog('[local-nano] rewrite accepted; selection state reset');
     });
 
     bar.append(undoBtn, acceptBtn);
@@ -321,7 +322,7 @@ export function initSession(deps: SessionDeps): void {
     const t0 = performance.now();
     const onChunk = (chunk: string) => {
       if (firstChunk) {
-        console.log(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
+        debugLog(`[local-nano] first token at ${(performance.now() - t0).toFixed(0)}ms`);
         if (firstTurnHint?.parentNode) firstTurnHint.remove();
         responseEl.textContent = '';
         firstChunk = false;
@@ -332,7 +333,7 @@ export function initSession(deps: SessionDeps): void {
     };
     try {
       await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
-      console.log(
+      debugLog(
         `[local-nano] stream done in ${(performance.now() - t0).toFixed(0)}ms, chars=${modelText.length}, prompt.length=${prompt.length}`,
       );
       recordSentTurn(prompt.length, modelText.length);
@@ -654,7 +655,7 @@ export function initSession(deps: SessionDeps): void {
       try {
         const info = await getGpuInfo();
         historyThreshold = deriveHistoryThreshold(info);
-        console.log(
+        debugLog(
           `[local-nano] history threshold: ${historyThreshold} (device=${info.device}, isFallback=${info.isFallback}, maxBufferSize=${info.maxBufferSize ?? 'n/a'}, configured=${info.configuredThreshold ?? 'n/a'})`,
         );
         const advisory = preflightWarning(info);
