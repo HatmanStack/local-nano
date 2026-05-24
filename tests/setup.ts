@@ -112,6 +112,7 @@ const chromeMock = {
   },
 };
 
+// biome-ignore lint/suspicious/noExplicitAny: global chrome mock requires any
 (globalThis as any).chrome = chromeMock;
 
 beforeEach(() => {
