@@ -876,6 +876,111 @@ describe('initSession — fallback ladder', () => {
   });
 });
 
+describe('initSession — network/download failure', () => {
+  const CAPABILITY_KEY = 'local-nano:capability:v1';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  const networkText = "Couldn't download the model. Check your connection and try again.";
+
+  it('a network failure shows the connection message, does not advance the ladder or record known-bad', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      warmupSessionMock.mockRejectedValue(new Error('Failed to fetch'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      // Only tier 0 was attempted; the ladder did NOT advance.
+      expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+      // No recreate (the device is fine, only the download failed).
+      expect(recreateOffscreenMock).not.toHaveBeenCalled();
+      // The connection message is shown, not the device-incapability terminal one.
+      const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(texts.some((t) => t.includes(networkText))).toBe(true);
+      expect(texts.some((t) => t.includes("Couldn't load the model on this device."))).toBe(false);
+      // No known-bad write (no capability record was persisted at all).
+      expect(chromeMock.storage.local.store[CAPABILITY_KEY]).toBeUndefined();
+      // Diagnostic is embedded.
+      const bubble = texts.find((t) => t.includes(networkText)) ?? '';
+      expect(bubble).toContain('device: webgpu');
+      // Back to idle.
+      expect(deps._actionBtn.disabled).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('the network Retry re-runs warmup for the same tier and recovers on success', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      warmupSessionMock.mockRejectedValueOnce(new Error('NetworkError: failed to fetch'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      const bubble = Array.from(deps._messages.children).find((c) =>
+        (c.textContent ?? '').includes(networkText),
+      );
+      expect(bubble).toBeTruthy();
+      const retryBtn = bubble?.querySelector('button') as HTMLButtonElement;
+      expect(retryBtn?.textContent).toBe('Retry');
+      // The first attempt was tier 0 (q4f16).
+      expect((warmupSessionMock.mock.calls[0][0] as { dtype: string }).dtype).toBe('q4f16');
+      // On Retry the download succeeds; the same tier is re-attempted (no
+      // recreate, no ladder walk).
+      warmupSessionMock.mockResolvedValue(undefined);
+      retryBtn.click();
+      await flushMicrotasks();
+      expect(recreateOffscreenMock).not.toHaveBeenCalled();
+      // Second warmup is tier 0 again (same tier, not advanced).
+      expect((warmupSessionMock.mock.calls[1][0] as { dtype: string }).dtype).toBe('q4f16');
+      // The connection bubble is gone and the model is ready.
+      const after = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(after.some((t) => t.includes(networkText))).toBe(false);
+      expect(deps._actionBtn.disabled).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('a device-incapability failure still advances the ladder (not the network path)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      // A non-network load failure walks the full ladder as in Phase 2.
+      warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      // The whole ladder was walked (4 tiers) and recreates fired between rungs.
+      expect(warmupSessionMock).toHaveBeenCalledTimes(4);
+      expect(recreateOffscreenMock).toHaveBeenCalledTimes(3);
+      // The terminal device message is shown, not the connection one.
+      const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(texts.some((t) => t.includes("Couldn't load the model on this device."))).toBe(true);
+      expect(texts.some((t) => t.includes(networkText))).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
 describe('initSession — streaming', () => {
   beforeEach(() => {
     vi.clearAllMocks();

@@ -15,6 +15,49 @@
 export type FailureClass = 'terminal' | 'transient';
 
 /**
+ * Load-time classification (Phase 4, ADR-R10). Extends the terminal/transient
+ * split with a `'network'` class for a weights-download/network failure: the
+ * device is capable, only the HF fetch failed, so the right response is a
+ * retryable "check your connection" message that retries the SAME tier without
+ * recording a known-bad tier or walking the ladder.
+ */
+export type LoadFailureClass = 'terminal' | 'transient' | 'network';
+
+/**
+ * Network/download signals. Origins:
+ * - `failed to fetch`: the browser fetch rejection wording (Chrome/Firefox)
+ *   when a request never completes (offline, DNS, CORS-style network drop).
+ * - `networkerror` / `network error`: DOMException name and prose form.
+ * - `err_internet` / `err_network` / `err_name_not_resolved` /
+ *   `err_connection`: Chrome net-stack error-code prefixes surfaced in fetch
+ *   failure messages.
+ * - `download failed` / `failed to download`: the transformers loader wording
+ *   when a model file download does not complete.
+ * - `huggingface` / `hf.co` / `huggingface.co`: the HF host, present in a fetch
+ *   error against the weights repo.
+ * - `status code 4` / `status code 5` / `(status 4` / `(status 5`: a non-200
+ *   HTTP status from the HF fetch (4xx/5xx), e.g. a 403 on a gated repo or a
+ *   503 on an HF outage.
+ */
+const NETWORK_SIGNALS: readonly string[] = [
+  'failed to fetch',
+  'networkerror',
+  'network error',
+  'err_internet',
+  'err_network',
+  'err_name_not_resolved',
+  'err_connection',
+  'download failed',
+  'failed to download',
+  'huggingface',
+  'hf.co',
+  'status code 4',
+  'status code 5',
+  '(status 4',
+  '(status 5',
+];
+
+/**
  * Crash-shaped signals. Each indicates the offscreen document or its message
  * channel died, so recovery must recreate the document rather than retry in
  * place. Matched case-insensitively as substrings of the failure message.
@@ -54,4 +97,23 @@ export function classifyFailure(error: unknown): FailureClass {
 /** Readability wrapper for call sites. */
 export function isTerminalFailure(error: unknown): boolean {
   return classifyFailure(error) === 'terminal';
+}
+
+/**
+ * Classify a model-LOAD failure into terminal / transient / network.
+ *
+ * Terminal crash signals win: a port death is terminal regardless of the
+ * underlying cause, because the document is gone and must be recreated. Only
+ * when the failure is NOT crash-shaped do we look for a network/download
+ * signal, in which case the device is fine and only the HF fetch failed
+ * (retry the same tier, no ladder walk, no known-bad). Everything else is
+ * transient (the existing default).
+ */
+export function classifyLoadFailure(error: unknown): LoadFailureClass {
+  if (classifyFailure(error) === 'terminal') return 'terminal';
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  for (const signal of NETWORK_SIGNALS) {
+    if (message.includes(signal)) return 'network';
+  }
+  return 'transient';
 }

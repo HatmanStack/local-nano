@@ -26,7 +26,7 @@ import {
   warmupSession,
 } from './offscreen/client.js';
 import { buildDiagnostic, errorInfo } from './offscreen/diagnostic.js';
-import { classifyFailure } from './offscreen/failure.js';
+import { classifyFailure, classifyLoadFailure } from './offscreen/failure.js';
 import {
   assembleLadder,
   firstTierIndex,
@@ -834,6 +834,57 @@ export function initSession(deps: SessionDeps): void {
   }
 
   /**
+   * Render the network/download-failure bubble (Phase 4, ADR-R10). Distinct
+   * from the device-incapability terminal bubble: the device is capable, only
+   * the HF weights fetch failed, so this is a retryable connection error. The
+   * Retry re-runs `ensureWarm` against the SAME tier path (no recreate, no
+   * ladder walk, no known-bad write) since nothing about the device changed.
+   * The diagnostic is embedded too (cheap and useful), but the headline is
+   * clearly network-flavored.
+   */
+  function renderNetworkFailure(err: unknown): void {
+    const { errorClass, errorMessage } = errorInfo(err);
+    const diagnostic = buildDiagnostic({
+      device: lastGpuInfo.device,
+      isFallback: lastGpuInfo.isFallback,
+      maxBufferSize: lastGpuInfo.maxBufferSize,
+      activeTier: activeTier
+        ? { modelName: activeTier.modelName, device: activeTier.device, dtype: activeTier.dtype }
+        : null,
+      errorClass,
+      errorMessage,
+      extensionVersion: chrome.runtime.getManifest().version,
+    });
+    console.warn('[local-nano] warmup failed (network); showing connection message:', errorMessage);
+
+    const bubble = addMessage(
+      'system',
+      ["Couldn't download the model. Check your connection and try again.", '', diagnostic].join(
+        '\n',
+      ),
+    );
+
+    const controls = window.document.createElement('div');
+    controls.style.cssText = 'margin-top: 6px; display: flex; gap: 6px;';
+    const retryBtn = window.document.createElement('button');
+    retryBtn.textContent = 'Retry';
+    retryBtn.style.cssText = BUTTON_CSS;
+    retryBtn.addEventListener('click', () => {
+      retryBtn.disabled = true;
+      bubble.remove();
+      // The device is fine; only the download failed. Reset the warm flags and
+      // re-run ensureWarm against the same tier path. No recreate (the document
+      // is healthy) and the ladder/known-bad state is untouched (constraint 2:
+      // single-shot, manual).
+      warmStarted = false;
+      modelReady = false;
+      void ensureWarm();
+    });
+    controls.appendChild(retryBtn);
+    bubble.appendChild(controls);
+  }
+
+  /**
    * Attempt a single tier: warm the offscreen session with that
    * model/device/dtype. Resolves on a live session; throws the offscreen error
    * on a catchable load failure (a hard crash drops the channel, which surfaces
@@ -946,6 +997,11 @@ export function initSession(deps: SessionDeps): void {
       let attemptedIndex: number | null = firstTierIndex(ladder, knownGoodKey, knownBadKeys);
       let lastError: unknown = null;
       let loaded = false;
+      // Set when a tier's failure was a weights-download/network error
+      // (constraint 2 + ADR-R10): the device is capable, only the fetch failed,
+      // so we show a distinct retryable connection message instead of advancing
+      // the ladder, recording known-bad, or showing the terminal bubble.
+      let networkFailed = false;
 
       while (attemptedIndex !== -1) {
         const tier = ladder[attemptedIndex];
@@ -958,6 +1014,15 @@ export function initSession(deps: SessionDeps): void {
           break;
         } catch (err) {
           lastError = err;
+          const loadClass = classifyLoadFailure(err);
+          if (loadClass === 'network') {
+            // The device is fine; the download failed. Do NOT record known-bad,
+            // do NOT advance the ladder. Show the connection message with a
+            // same-tier Retry and stop the walk here.
+            debugLog(`[local-nano] tier ${tierKey(tier)} load failed (network); not advancing`);
+            networkFailed = true;
+            break;
+          }
           const failureClass = classifyFailure(err);
           debugLog(`[local-nano] tier ${tierKey(tier)} load failed (${failureClass}); advancing`);
           await recordKnownBad(extensionVersion, tier, capabilitySnapshot());
@@ -983,6 +1048,12 @@ export function initSession(deps: SessionDeps): void {
       if (loaded) {
         modelReady = true;
         if (warmHint.parentNode) warmHint.remove();
+      } else if (networkFailed) {
+        // A weights-download/network failure: distinct retryable connection
+        // message (same tier on Retry, no recreate, no ladder walk).
+        if (warmHint.parentNode) warmHint.remove();
+        warmStarted = false;
+        renderNetworkFailure(lastError);
       } else {
         // The ladder is exhausted: surface the terminal bubble with the
         // diagnostic, the tiers tried, and the manual controls.

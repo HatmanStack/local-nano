@@ -31,7 +31,7 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 | `tests/offscreen-ladder.test.ts`     | `nextAction`/`firstTierIndex`/`tierKey`/`applyTierToConfig` fallback-ladder reducer |
 | `tests/capability.test.ts`           | `classifyCapability`/`CAPABLE_MIN_BUFFER_BYTES` pure device-capability classifier |
 | `tests/capability-store.test.ts`     | `loadCapabilityRecord`/`recordKnownGood`/`recordKnownBad`/`clearCapabilityRecord` per-device tier persistence |
-| `tests/offscreen-failure.test.ts`    | `classifyFailure`/`isTerminalFailure` terminal-vs-transient seam |
+| `tests/offscreen-failure.test.ts`    | `classifyFailure`/`classifyLoadFailure`/`isTerminalFailure` terminal/transient/network seam |
 | `tests/offscreen-progress.test.ts`   | `nextProgress`/`formatProgressText` clamped monotonic download-percent parser |
 | `tests/offscreen-diagnostic.test.ts` | `buildDiagnostic`/`errorInfo` copy-only diagnostic builder |
 | `tests/offscreen-busy-gate.test.ts`  | `BusyGate` concurrent-stream rejection       |
