@@ -34,6 +34,15 @@ const PLACEHOLDER_ASK = 'Ask about selection… (Esc to switch back to Edit)';
 const CHIP_MAX_CHARS = 60;
 
 /**
+ * Shared style for the small dark action buttons (Undo/Accept on a
+ * rewrite, Clear on the history-pressure bubble). Single-sourced so the
+ * palette stays consistent; buttons needing extra layout (e.g. the
+ * history-pressure Clear's `margin-top`) prepend their own declarations.
+ */
+const BUTTON_CSS =
+  'padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
+
+/**
  * Default heuristic threshold (in estimated tokens) for warning when
  * accumulated history risks GPU memory pressure. Used only as a
  * fallback — the actual threshold is normally derived per-session
@@ -229,8 +238,7 @@ export function initSession(deps: SessionDeps): void {
   function makeActionButton(label: string): HTMLButtonElement {
     const btn = window.document.createElement('button');
     btn.textContent = label;
-    btn.style.cssText =
-      'padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
+    btn.style.cssText = BUTTON_CSS;
     return btn;
   }
 
@@ -535,8 +543,7 @@ export function initSession(deps: SessionDeps): void {
     );
     const btn = window.document.createElement('button');
     btn.textContent = 'Clear conversation';
-    btn.style.cssText =
-      'margin-top: 6px; padding: 2px 8px; font: inherit; cursor: pointer; background: #444; color: #eee; border: 1px solid #666; border-radius: 4px;';
+    btn.style.cssText = `margin-top: 6px; ${BUTTON_CSS}`;
     btn.addEventListener('click', () => {
       bubble.remove();
       void clearConversation();
