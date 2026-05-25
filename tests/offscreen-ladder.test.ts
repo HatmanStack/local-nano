@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyTierToConfig,
   assembleLadder,
+  assembleLadderForModel,
   firstTierIndex,
   type LadderAction,
   nextAction,
@@ -215,6 +216,77 @@ describe('assembleLadder', () => {
 
   it('produces a ladder nextAction walks to exhausted across all rungs', () => {
     const ladder = assembleLadder({ capability: 'weak', smallerEnabled: true });
+    let attemptedIndex: number | null = null;
+    let outcome: 'success' | 'load-failure' | null = null;
+    const loaded: Tier[] = [];
+    for (let guard = 0; guard < 50; guard++) {
+      const action: LadderAction = nextAction({
+        ladder,
+        attemptedIndex,
+        outcome,
+        knownBadKeys: EMPTY,
+      });
+      if (action.kind === 'exhausted') break;
+      if (action.kind === 'done') throw new Error('unexpected done in all-fail walk');
+      loaded.push(action.tier);
+      attemptedIndex = ladder.indexOf(action.tier);
+      outcome = 'load-failure';
+    }
+    expect(loaded).toEqual(ladder);
+  });
+});
+
+describe('assembleLadderForModel', () => {
+  // The non-default chosen model used across these cases: Qwen2.5-0.5B at the
+  // single wasm/q8 cell the catalog vets (a non-default entry's tier shape).
+  const CHOSEN: Tier[] = [
+    { modelName: 'onnx-community/Qwen2.5-0.5B-Instruct', device: 'wasm', dtype: 'q8' },
+  ];
+
+  it('a null entry returns exactly assembleLadder (no preference, ADR-P4)', () => {
+    expect(assembleLadderForModel({ entry: null, capability: 'capable' })).toEqual(
+      assembleLadder({ capability: 'capable' }),
+    );
+    expect(assembleLadderForModel({ entry: null, capability: 'weak' })).toEqual(
+      assembleLadder({ capability: 'weak' }),
+    );
+  });
+
+  it('a null entry honors smallerEnabled exactly like assembleLadder', () => {
+    expect(
+      assembleLadderForModel({ entry: null, capability: 'weak', smallerEnabled: true }),
+    ).toEqual(assembleLadder({ capability: 'weak', smallerEnabled: true }));
+  });
+
+  it('the default entry produces the same ladder as the no-preference path', () => {
+    const defaultEntry = { tiers: PRIMARY_LADDER };
+    expect(assembleLadderForModel({ entry: defaultEntry, capability: 'capable' })).toEqual(
+      assembleLadder({ capability: 'capable' }),
+    );
+  });
+
+  it('a non-default entry heads the ladder with its first tier', () => {
+    const ladder = assembleLadderForModel({ entry: { tiers: CHOSEN }, capability: 'capable' });
+    expect(ladder[0]).toEqual(CHOSEN[0]);
+  });
+
+  it('appends the existing assembled ladder after the chosen tiers (last-resort fallback)', () => {
+    const ladder = assembleLadderForModel({ entry: { tiers: CHOSEN }, capability: 'capable' });
+    expect(ladder).toEqual([...CHOSEN, ...PRIMARY_LADDER]);
+  });
+
+  it('dedupes by tierKey so an overlapping default tier is not listed twice', () => {
+    // A chosen entry whose first tier equals PRIMARY_LADDER[0]: the appended
+    // primary ladder must not re-list that tier.
+    const overlap: Tier[] = [PRIMARY_LADDER[0]];
+    const ladder = assembleLadderForModel({ entry: { tiers: overlap }, capability: 'capable' });
+    const keys = ladder.map(tierKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(ladder).toEqual(PRIMARY_LADDER);
+  });
+
+  it('produces a ladder nextAction walks to exhausted across every rung', () => {
+    const ladder = assembleLadderForModel({ entry: { tiers: CHOSEN }, capability: 'capable' });
     let attemptedIndex: number | null = null;
     let outcome: 'success' | 'load-failure' | null = null;
     const loaded: Tier[] = [];

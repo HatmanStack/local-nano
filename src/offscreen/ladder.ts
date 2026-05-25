@@ -116,6 +116,53 @@ export function assembleLadder(opts: {
   return [...PRIMARY_LADDER, ...SMALLER_MODEL_CANDIDATE];
 }
 
+/**
+ * Assemble the tier ladder for a CHOSEN catalog model (ADR-P1, P4, P5). The
+ * picked model heads the walk so the existing reducer steps its dtypes/devices
+ * first; the existing assembled ladder is appended as a last-resort fallback so
+ * a chosen model that fails entirely still drops back to the working default.
+ *
+ * `entry` is the resolved catalog entry, passed structurally as `{ tiers }` so
+ * this module needs no `catalog.ts` import and the two modules stay decoupled
+ * (the caller in `session.ts` resolves the entry via `findCatalogEntry`).
+ *
+ * - `entry === null` (no preference / unknown id): returns exactly
+ *   `assembleLadder({ capability, smallerEnabled })`, today's behavior (ADR-P4).
+ * - `entry` whose tiers ARE the default ladder: the dedupe below collapses the
+ *   appended duplicate, so the result equals the no-preference path. The
+ *   explicit default and the no-preference path therefore produce the same
+ *   ladder.
+ * - a non-default `entry`: the chosen tiers come FIRST, then the assembled
+ *   ladder, deduped by `tierKey` so no tier is listed twice.
+ *
+ * Pure: it only composes arrays. `nextAction`/`firstTierIndex` walk whatever
+ * `Tier[]` they are handed, so the reducer is unchanged.
+ */
+export function assembleLadderForModel(opts: {
+  entry: { tiers: Tier[] } | null;
+  capability: DeviceCapability;
+  smallerEnabled?: boolean;
+}): Tier[] {
+  const base = assembleLadder({
+    capability: opts.capability,
+    smallerEnabled: opts.smallerEnabled,
+  });
+  if (opts.entry === null) return base;
+
+  // Chosen tiers head the walk; the assembled ladder follows as a last resort.
+  // Dedupe by tierKey so the default model is not listed twice when the chosen
+  // model overlaps the default ladder (the chosen-first ordering is preserved).
+  const seen = new Set<string>();
+  const ladder: Tier[] = [];
+  for (const tier of [...opts.entry.tiers, ...base]) {
+    const key = tierKey(tier);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    ladder.push(tier);
+  }
+  return ladder;
+}
+
 /** The outcome of a single tier load attempt (reducer input). */
 export type LadderOutcome = 'success' | 'load-failure';
 
