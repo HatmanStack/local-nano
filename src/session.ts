@@ -1028,6 +1028,84 @@ export function initSession(deps: SessionDeps): SessionController {
   }
 
   /**
+   * Shared muted-header-control style (the gear button mirrors the
+   * Copy-diagnostic affordance: transparent background, muted color, small font,
+   * `flex-shrink: 0` so it never crowds the close button).
+   */
+  const HEADER_CONTROL_CSS =
+    'flex-shrink: 0; padding: 1px 6px; font: inherit; font-size: 11px; cursor: pointer; background: transparent; color: #999; border: 1px solid #555; border-radius: 4px;';
+
+  /**
+   * The gear/settings affordance (ADR-P6, P7, P11, P12). A muted header button
+   * toggles an absolutely-positioned popover anchored under the header. The
+   * popover stays inside the panel root so it inherits the panel's fixed
+   * positioning and stacking context (the root is `z-index: 2147483647`) and is
+   * removed with the panel. Hidden by default; the gear toggles it, and a
+   * mousedown outside the popover or the gear closes it.
+   *
+   * Returns the gear button, the popover element, a `content` container later
+   * tasks populate (model list, idle-timeout group, Load button), and an
+   * `isOpen` probe. The outside-click listener is registered on `root` so it
+   * only fires for presses inside the panel; a press elsewhere on the page does
+   * not re-open or churn it, and the listener is naturally torn down with the
+   * panel.
+   */
+  function makeSettingsAffordance(): {
+    gearBtn: HTMLButtonElement;
+    popover: HTMLElement;
+    content: HTMLElement;
+    isOpen: () => boolean;
+    close: () => void;
+  } {
+    const gearBtn = window.document.createElement('button');
+    gearBtn.textContent = '⚙'; // gear glyph (U+2699)
+    gearBtn.setAttribute('aria-label', 'Open model and idle settings');
+    gearBtn.style.cssText = HEADER_CONTROL_CSS;
+
+    const popover = window.document.createElement('div');
+    popover.setAttribute('data-local-nano-popover', '');
+    // Anchored under the header, inside the panel root's fixed/stacking context.
+    // Hidden until the gear toggles it.
+    popover.style.cssText =
+      'display: none; position: absolute; top: 36px; right: 8px; width: 280px; max-height: 70%; overflow-y: auto; background: #2a2a2a; color: #eee; border: 1px solid #555; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); padding: 10px; z-index: 1; font-size: 12px;';
+
+    // The body later tasks fill (model rows, idle-timeout radios, Load button).
+    const content = window.document.createElement('div');
+    popover.appendChild(content);
+
+    const isOpen = () => popover.style.display !== 'none';
+    const open = () => {
+      popover.style.display = 'block';
+    };
+    const close = () => {
+      popover.style.display = 'none';
+    };
+
+    gearBtn.addEventListener('click', (e) => {
+      // Stop the bubbling so the outside-click listener below does not see this
+      // same press and immediately re-close the popover it just opened.
+      e.stopPropagation();
+      if (isOpen()) close();
+      else open();
+    });
+
+    // A press anywhere outside the popover and the gear closes it. Registered on
+    // the document so a click elsewhere on the page (not just inside the panel)
+    // dismisses it, matching the "click outside closes" affordance. The handler
+    // is inert while the popover is closed (early-return), so it never interferes
+    // with normal page interaction; it lives for the content-script lifetime
+    // like the panel itself.
+    window.document.addEventListener('mousedown', (e) => {
+      if (!isOpen()) return;
+      const target = e.target as Node;
+      if (popover.contains(target) || gearBtn.contains(target)) return;
+      close();
+    });
+
+    return { gearBtn, popover, content, isOpen, close };
+  }
+
+  /**
    * Attempt a single tier: warm the offscreen session with that
    * model/device/dtype. Resolves on a live session; throws the offscreen error
    * on a catchable load failure (a hard crash drops the channel, which surfaces
@@ -1317,6 +1395,18 @@ export function initSession(deps: SessionDeps): SessionController {
     if (header) header.insertBefore(copyBtn, header.lastElementChild);
     else root.appendChild(copyBtn);
   }
+
+  // ---- Gear settings popover (Phase 3, ADR-P6/P7/P11/P12) ----
+  // The gear button mounts in the header next to the Copy-diagnostic control
+  // (left of the close button), mirroring that affordance's header-mount with a
+  // root fallback for the no-header test path. The popover lives inside the
+  // panel root so it inherits the panel's fixed positioning and is removed with
+  // the panel. Later tasks populate the popover content (model list,
+  // idle-timeout group, Load button).
+  const settings = makeSettingsAffordance();
+  if (header) header.insertBefore(settings.gearBtn, header.lastElementChild);
+  else root.appendChild(settings.gearBtn);
+  root.appendChild(settings.popover);
 
   // ---- Toggle listener ----
   let convertedAnchor = false;

@@ -2301,3 +2301,96 @@ describe('preflightWarning', () => {
     expect(preflightWarning(base)).toBeNull(); // maxBufferSize null → no warning
   });
 });
+
+// ---------------------------------------------------------------------------
+// Gear settings popover (Phase 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * A header-bearing dep set: builds a header bar (a title plus a trailing close
+ * button, mirroring content.ts) so the gear/Copy controls mount into the header
+ * exactly as they do in production. The base makeDeps() omits header to cover
+ * the root-fallback path.
+ */
+function makeDepsWithHeader(): ReturnType<typeof makeDeps> & { _header: HTMLDivElement } {
+  const base = makeDeps();
+  const _header = document.createElement('div');
+  const title = document.createElement('span');
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '×';
+  _header.append(title, closeBtn);
+  base._root.insertBefore(_header, base._root.firstChild);
+  return { ...base, header: _header, _header };
+}
+
+function findGearButton(root: HTMLElement): HTMLButtonElement {
+  const btn = Array.from(root.querySelectorAll('button')).find(
+    (b) => b.getAttribute('aria-label') === 'Open model and idle settings',
+  );
+  if (!btn) throw new Error('gear settings button not found');
+  return btn as HTMLButtonElement;
+}
+
+function findPopover(root: HTMLElement): HTMLElement {
+  const el = root.querySelector('[data-local-nano-popover]');
+  if (!el) throw new Error('settings popover not found');
+  return el as HTMLElement;
+}
+
+describe('initSession — gear settings popover scaffold', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+  });
+
+  it('mounts a gear button in the header when a header dep is supplied', () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    const gear = findGearButton(deps._header);
+    expect(gear).toBeTruthy();
+    // The gear is a button, so content.ts's drag-suppression (which ignores
+    // presses landing on a button) already excludes it from starting a drag.
+    expect(gear.tagName).toBe('BUTTON');
+  });
+
+  it('falls back to the panel root for the gear button when no header is supplied', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const gear = findGearButton(deps._root);
+    expect(gear).toBeTruthy();
+  });
+
+  it('the popover is hidden by default and a gear click toggles it', () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    const gear = findGearButton(deps._header);
+    const popover = findPopover(deps._root);
+    expect(popover.style.display).toBe('none');
+    gear.click();
+    expect(popover.style.display).not.toBe('none');
+    gear.click();
+    expect(popover.style.display).toBe('none');
+  });
+
+  it('a click outside the popover closes it', () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    const gear = findGearButton(deps._header);
+    const popover = findPopover(deps._root);
+    gear.click();
+    expect(popover.style.display).not.toBe('none');
+    // A click anywhere outside the popover and the gear closes it.
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    expect(popover.style.display).toBe('none');
+  });
+
+  it('a click inside the popover does not close it', () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    const gear = findGearButton(deps._header);
+    const popover = findPopover(deps._root);
+    gear.click();
+    popover.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    expect(popover.style.display).not.toBe('none');
+  });
+});
