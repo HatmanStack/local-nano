@@ -33,7 +33,7 @@
   "commands": {
     "toggle_ai_palette": {
       "suggested_key": { "default": "Ctrl+Shift+K", "mac": "Command+Shift+K" },
-      "description": "Toggle AI Palette"
+      "description": "Toggle Local Nano"
     }
   }
 }
