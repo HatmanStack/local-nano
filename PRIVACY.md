@@ -74,4 +74,4 @@ do not use it to determine creditworthiness or for lending.
 
 Questions about this policy: open an issue at
 <https://github.com/HatmanStack/local-nano/issues>, or contact Gemenie Labs LLC
-via the Contact Us page at <https://hatstack.fun>.
+via the Contact Us page at <https://gemenielabs.hatstack.fun>.
