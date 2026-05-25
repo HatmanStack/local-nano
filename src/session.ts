@@ -16,7 +16,14 @@ import {
   recordKnownBad,
   recordKnownGood,
 } from './offscreen/capability-store.js';
-import { findCatalogEntry, isLargerModelEnabled, isQwen3_08bEnabled } from './offscreen/catalog.js';
+import {
+  type CatalogEntry,
+  DEFAULT_MODEL_ID,
+  findCatalogEntry,
+  isLargerModelEnabled,
+  isQwen3_08bEnabled,
+  listCatalog,
+} from './offscreen/catalog.js';
 import {
   countTokens,
   getGpuInfo,
@@ -1044,13 +1051,14 @@ export function initSession(deps: SessionDeps): SessionController {
    * mousedown outside the popover or the gear closes it.
    *
    * Returns the gear button, the popover element, a `content` container later
-   * tasks populate (model list, idle-timeout group, Load button), and an
-   * `isOpen` probe. The outside-click listener is registered on `root` so it
-   * only fires for presses inside the panel; a press elsewhere on the page does
-   * not re-open or churn it, and the listener is naturally torn down with the
-   * panel.
+   * tasks populate (model list, idle-timeout group, Load button), and `isOpen`/
+   * `close` controls. `onOpen` runs each time the popover opens so the content
+   * re-reads the latest preference (the current selection re-reads on next open,
+   * Task 3.4). The outside-click listener is registered on the document so a
+   * press anywhere off the popover dismisses it; it is inert while closed and
+   * lives for the content-script lifetime like the panel.
    */
-  function makeSettingsAffordance(): {
+  function makeSettingsAffordance(onOpen: () => void): {
     gearBtn: HTMLButtonElement;
     popover: HTMLElement;
     content: HTMLElement;
@@ -1075,6 +1083,9 @@ export function initSession(deps: SessionDeps): SessionController {
 
     const isOpen = () => popover.style.display !== 'none';
     const open = () => {
+      // Re-render the content from the latest stored preference each open so a
+      // prior Load's new selection is reflected (Task 3.4).
+      onOpen();
       popover.style.display = 'block';
     };
     const close = () => {
@@ -1401,9 +1412,94 @@ export function initSession(deps: SessionDeps): SessionController {
   // (left of the close button), mirroring that affordance's header-mount with a
   // root fallback for the no-header test path. The popover lives inside the
   // panel root so it inherits the panel's fixed positioning and is removed with
-  // the panel. Later tasks populate the popover content (model list,
-  // idle-timeout group, Load button).
-  const settings = makeSettingsAffordance();
+  // the panel.
+  //
+  // Popover model-picker state (ADR-P12, select-then-Load). `pendingModelId` is
+  // the user's not-yet-applied selection (initialized to the resolved
+  // preference, or the default when none is stored); selecting a row only
+  // updates it (no persist, no reload). The Load control (Task 3.4) commits it.
+  // Re-read from storage on each popover open so a prior Load's new selection
+  // shows next time.
+  let pendingModelId = DEFAULT_MODEL_ID;
+
+  /**
+   * Build one selectable model row (ADR-P12): displayName, download size, and
+   * the docs/models.md note, marked when it is the pending selection. The
+   * default entry is labeled "(default)" (ADR-P4). Clicking the row sets the
+   * pending selection only (no persist, no reload) and re-renders so the marker
+   * (and the Load button, Task 3.4) reflect the change.
+   */
+  function buildModelRow(entry: CatalogEntry): HTMLElement {
+    const row = window.document.createElement('div');
+    row.setAttribute('data-model-id', entry.id);
+    row.setAttribute('role', 'radio');
+    const selected = entry.id === pendingModelId;
+    row.setAttribute('aria-checked', selected ? 'true' : 'false');
+    row.style.cssText = `padding: 6px 8px; margin-bottom: 4px; border-radius: 4px; cursor: pointer; border: 1px solid ${selected ? '#0a5fa3' : '#444'}; background: ${selected ? '#143a52' : 'transparent'};`;
+
+    const name = window.document.createElement('div');
+    name.style.cssText = 'font-weight: 600;';
+    name.textContent =
+      entry.id === DEFAULT_MODEL_ID ? `${entry.displayName} (default)` : entry.displayName;
+
+    const meta = window.document.createElement('div');
+    meta.style.cssText = 'color: #aaa; font-size: 11px; margin-top: 2px;';
+    meta.textContent = `${entry.downloadSize} — ${entry.note}`;
+
+    row.append(name, meta);
+    row.addEventListener('click', () => {
+      pendingModelId = entry.id;
+      renderPopoverContent();
+    });
+    return row;
+  }
+
+  /**
+   * Render the popover body from the current state: the visible catalog (gated
+   * entries appear only when their gate flag is on, both off in production) as
+   * selectable rows. Called on each open (after the preference is read) and
+   * whenever the pending selection changes. Tasks 3.3/3.4 extend this with the
+   * idle-timeout group and the Load control.
+   */
+  function renderPopoverContent(): void {
+    const content = settings.content;
+    content.replaceChildren();
+
+    const modelHeading = window.document.createElement('div');
+    modelHeading.style.cssText = 'font-weight: 600; margin-bottom: 6px;';
+    modelHeading.textContent = 'Model';
+    content.appendChild(modelHeading);
+
+    for (const entry of listCatalog()) content.appendChild(buildModelRow(entry));
+  }
+
+  /**
+   * Re-read the persisted preference and reset the pending selection to match,
+   * so each open reflects a Load committed since the last open. An unknown/stale
+   * stored id resolves to the default (ADR-P4) via the catalog gate seams.
+   */
+  async function syncCurrentModelFromPref(): Promise<void> {
+    const pref = await loadModelPref();
+    const storedId = resolveModelId(pref);
+    const resolved =
+      storedId !== null &&
+      findCatalogEntry(storedId, {
+        qwen3Enabled: isQwen3_08bEnabled(),
+        largerEnabled: isLargerModelEnabled(),
+      }) !== null
+        ? storedId
+        : DEFAULT_MODEL_ID;
+    pendingModelId = resolved;
+    renderPopoverContent();
+  }
+
+  const settings = makeSettingsAffordance(() => {
+    // Fire-and-forget: render synchronously from the prior state first (so the
+    // popover is never empty), then refresh once the async preference read
+    // resolves. The read is fast (one storage.local.get).
+    renderPopoverContent();
+    void syncCurrentModelFromPref();
+  });
   if (header) header.insertBefore(settings.gearBtn, header.lastElementChild);
   else root.appendChild(settings.gearBtn);
   root.appendChild(settings.popover);

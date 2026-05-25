@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TOGGLE_MESSAGE } from '../src/background/handler.js';
 import { MAX_HISTORY } from '../src/history.js';
+import * as catalogModule from '../src/offscreen/catalog.js';
+import { DEFAULT_MODEL_ID } from '../src/offscreen/catalog.js';
 import * as ladderModule from '../src/offscreen/ladder.js';
 import { SMALLER_MODEL_CANDIDATE } from '../src/offscreen/ladder.js';
+import { MODEL_PREF_KEY } from '../src/offscreen/model-pref.js';
 import type { SelectionSnapshot } from '../src/selection-rewrite.js';
 import {
   deriveHistoryThreshold,
@@ -2392,5 +2395,130 @@ describe('initSession — gear settings popover scaffold', () => {
     gear.click();
     popover.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     expect(popover.style.display).not.toBe('none');
+  });
+});
+
+function modelRows(popover: HTMLElement): HTMLElement[] {
+  return Array.from(popover.querySelectorAll<HTMLElement>('[data-model-id]'));
+}
+
+function rowFor(popover: HTMLElement, id: string): HTMLElement {
+  const row = popover.querySelector<HTMLElement>(`[data-model-id="${id}"]`);
+  if (!row) throw new Error(`model row not found for ${id}`);
+  return row;
+}
+
+describe('initSession — popover model list', () => {
+  const QWEN25_05B = 'onnx-community/Qwen2.5-0.5B-Instruct';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+  });
+
+  it('renders one row per visible catalog entry with name, size, and note', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const rows = modelRows(popover);
+    // Production (all gates off): two rows, gemma default + Qwen2.5-0.5B.
+    expect(rows.length).toBe(2);
+    const ids = rows.map((r) => r.getAttribute('data-model-id'));
+    expect(ids).toContain(DEFAULT_MODEL_ID);
+    expect(ids).toContain(QWEN25_05B);
+    // The Qwen row carries its displayName, size, and note text.
+    const qwen = rowFor(popover, QWEN25_05B);
+    expect(qwen.textContent).toContain('Qwen2.5 0.5B Instruct');
+    expect(qwen.textContent).toContain('~0.5 GB');
+    expect(qwen.textContent).toContain('smallest that answers');
+  });
+
+  it('in production only the two non-gated models render', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const ids = modelRows(findPopover(deps._root)).map((r) => r.getAttribute('data-model-id'));
+    expect(ids.sort()).toEqual([DEFAULT_MODEL_ID, QWEN25_05B].sort());
+  });
+
+  it('marks the default model as the current selection when no preference is stored', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const defaultRow = rowFor(popover, DEFAULT_MODEL_ID);
+    expect(defaultRow.getAttribute('aria-checked')).toBe('true');
+    // The default row is labeled as the default (ADR-P4).
+    expect(defaultRow.textContent).toContain('default');
+    // The other row is not marked.
+    expect(rowFor(popover, QWEN25_05B).getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('marks the stored preference as the current selection', async () => {
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: QWEN25_05B,
+      idleTimeoutMinutes: 15,
+    };
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    expect(rowFor(popover, QWEN25_05B).getAttribute('aria-checked')).toBe('true');
+    expect(rowFor(popover, DEFAULT_MODEL_ID).getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('shows a gated entry when its gate flag is on (spy isQwen3_08bEnabled)', async () => {
+    const spy = vi.spyOn(catalogModule, 'isQwen3_08bEnabled').mockReturnValue(true);
+    try {
+      const deps = makeDepsWithHeader();
+      initSession(deps);
+      findGearButton(deps._header).click();
+      await flushMicrotasks();
+      const ids = modelRows(findPopover(deps._root)).map((r) => r.getAttribute('data-model-id'));
+      expect(ids).toContain('onnx-community/Qwen3.5-0.8B-ONNX');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('shows the larger gated entry when isLargerModelEnabled is on', async () => {
+    const spy = vi.spyOn(catalogModule, 'isLargerModelEnabled').mockReturnValue(true);
+    try {
+      const deps = makeDepsWithHeader();
+      initSession(deps);
+      findGearButton(deps._header).click();
+      await flushMicrotasks();
+      const ids = modelRows(findPopover(deps._root)).map((r) => r.getAttribute('data-model-id'));
+      expect(ids).toContain('onnx-community/LARGER-MODEL-PLACEHOLDER');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('selecting a different row sets a pending choice only: no persist, no reload', async () => {
+    const deps = makeDepsWithHeader();
+    const controller = initSession(deps);
+    const reloadSpy = vi.spyOn(controller, 'reloadModel');
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const setBefore = chromeMock.storage.local.set.mock.calls.length;
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // Click the non-current Qwen row.
+    rowFor(popover, QWEN25_05B).click();
+    await flushMicrotasks();
+    // No preference was persisted (select-then-Load), and no reload fired.
+    expect(chromeMock.storage.local.set.mock.calls.length).toBe(setBefore);
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    expect(reloadSpy).not.toHaveBeenCalled();
+    // The pending row is visibly marked as the pending choice.
+    expect(rowFor(popover, QWEN25_05B).getAttribute('aria-checked')).toBe('true');
+    expect(rowFor(popover, DEFAULT_MODEL_ID).getAttribute('aria-checked')).toBe('false');
+    reloadSpy.mockRestore();
   });
 });

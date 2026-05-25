@@ -134,12 +134,12 @@ Estimated tokens: ~35,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] Each visible catalog entry renders a row with displayName, size, note.
-> - [ ] In production (all gates off) only gemma-4-E2B and Qwen2.5-0.5B render.
-> - [ ] The current model (preference or default) is marked.
-> - [ ] Gated entries do not appear with their flag off; they do with it on
+> - [x] Each visible catalog entry renders a row with displayName, size, note.
+> - [x] In production (all gates off) only gemma-4-E2B and Qwen2.5-0.5B render.
+> - [x] The current model (preference or default) is marked.
+> - [x] Gated entries do not appear with their flag off; they do with it on
 >       (`vi.spyOn` on `isQwen3_08bEnabled` / `isLargerModelEnabled`).
-> - [ ] Selecting a row changes `pendingModelId` but does NOT persist or reload.
+> - [x] Selecting a row changes `pendingModelId` but does NOT persist or reload.
 >
 > **Testing Instructions:**
 >
