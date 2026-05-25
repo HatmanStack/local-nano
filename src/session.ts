@@ -49,6 +49,7 @@ import {
   loadModelPref,
   resolveModelId,
   setIdleTimeoutMinutes,
+  setModelId,
 } from './offscreen/model-pref.js';
 import {
   formatProgressText,
@@ -383,6 +384,12 @@ export function initSession(deps: SessionDeps): SessionController {
   let isFirstTurn = true;
   let activeAbort: AbortController | null = null;
 
+  // Hook the settings popover's Load-button gating into the stream lifecycle so
+  // a switch the user queued while a stream was in flight re-enables once the
+  // stream settles (ADR-P7). Assigned by the gear-popover block below; a no-op
+  // default keeps `runStreamTurn` working before the popover is built.
+  let refreshPopoverControls: () => void = () => undefined;
+
   function makeActionButton(label: string): HTMLButtonElement {
     const btn = window.document.createElement('button');
     btn.textContent = label;
@@ -539,6 +546,8 @@ export function initSession(deps: SessionDeps): SessionController {
       }
       setIdleState(actionBtn, i);
       activeAbort = null;
+      // Re-enable a Load the user queued while this stream was in flight (ADR-P7).
+      refreshPopoverControls();
       try {
         onFinally?.();
       } catch (e) {
@@ -1425,7 +1434,11 @@ export function initSession(deps: SessionDeps): SessionController {
   // preference, or the default when none is stored); selecting a row only
   // updates it (no persist, no reload). The Load control (Task 3.4) commits it.
   // Re-read from storage on each popover open so a prior Load's new selection
-  // shows next time.
+  // shows next time. `currentModelId` is the persisted/resolved current model
+  // (the marked row and the Load-enable baseline); `pendingModelId` is the
+  // not-yet-applied selection. They are equal on open and after a successful
+  // Load; a row click moves `pendingModelId` only.
+  let currentModelId = DEFAULT_MODEL_ID;
   let pendingModelId = DEFAULT_MODEL_ID;
 
   // The currently-selected idle timeout (minutes, or null for "Never"). Unlike
@@ -1517,12 +1530,77 @@ export function initSession(deps: SessionDeps): SessionController {
     }
   }
 
+  // The Load control (ADR-P6/P7): a single button reused across re-renders, plus
+  // an unobtrusive note shown while a stream blocks the switch. Built once so the
+  // refresh logic mutates one element rather than rebuilding it each render.
+  const loadBtn = window.document.createElement('button');
+  loadBtn.textContent = 'Load';
+  loadBtn.setAttribute('data-load-model', '');
+  loadBtn.style.cssText = `margin-top: 10px; ${BUTTON_CSS}`;
+  const loadNote = window.document.createElement('div');
+  loadNote.style.cssText = 'color: #aaa; font-size: 11px; margin-top: 4px; display: none;';
+  loadNote.textContent = 'finishing current response…';
+  loadBtn.addEventListener('click', () => {
+    void applyPendingModel();
+  });
+
+  /**
+   * Recompute the Load button's enabled state and the in-flight-stream note
+   * (ADR-P6/P7). Enabled only when the pending selection differs from the
+   * current one AND no stream is in flight (`activeAbort`) AND no re-warm is in
+   * flight (`reWarmInFlight`). While a stream blocks the switch, the note
+   * explains the wait rather than showing a hard error.
+   */
+  function refreshLoadControl(): void {
+    const differs = pendingModelId !== currentModelId;
+    const streaming = activeAbort !== null;
+    const reloading = reWarmInFlight !== null;
+    loadBtn.disabled = !differs || streaming || reloading;
+    loadNote.style.display = differs && streaming ? 'block' : 'none';
+  }
+
+  /**
+   * Persist the pending model id then run the serialized re-warm primitive
+   * (ADR-P6, Phase 2): force-recreate the document and re-walk the ladder, now
+   * resolving the new preference in `ensureWarm`. No-op while a stream is in
+   * flight (the button is disabled, but guard defensively, ADR-P7) or while a
+   * re-warm is already running (coalesced by `reWarmInFlight`). Closes the
+   * popover on a successful switch; the standard `ensureWarm` failure UI
+   * (terminal/network bubble, progress) covers a failed switch unchanged.
+   */
+  async function applyPendingModel(): Promise<void> {
+    if (pendingModelId === currentModelId) return;
+    if (activeAbort) return; // never tear down a live stream (ADR-P7)
+    if (reWarmInFlight) return; // a switch is already running
+    const target = pendingModelId;
+    setLoadingState(actionBtn, i);
+    refreshLoadControl();
+    try {
+      await setModelId(target);
+      await reloadModel();
+      // The switch landed: the new id is the current selection, and the popover
+      // re-reads it on next open. Close it now.
+      currentModelId = target;
+      settings.close();
+    } catch (err) {
+      // ensureWarm renders its own failure UI; log for the console trail.
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[local-nano] model switch failed:', message);
+    } finally {
+      refreshLoadControl();
+    }
+  }
+
+  // Expose the refresh to the stream lifecycle (ADR-P7): when a stream settles,
+  // `runStreamTurn` calls this so a queued switch re-enables.
+  refreshPopoverControls = refreshLoadControl;
+
   /**
    * Render the popover body from the current state: the visible catalog (gated
    * entries appear only when their gate flag is on, both off in production) as
-   * selectable rows, then the idle-timeout group. Called on each open (after the
-   * preference is read) and whenever the pending selection changes. Task 3.4
-   * extends this with the Load control.
+   * selectable rows, then the idle-timeout group and the Load control. Called on
+   * each open (after the preference is read) and whenever the pending selection
+   * changes.
    */
   function renderPopoverContent(): void {
     const content = settings.content;
@@ -1536,6 +1614,8 @@ export function initSession(deps: SessionDeps): SessionController {
     for (const entry of listCatalog()) content.appendChild(buildModelRow(entry));
 
     renderIdleTimeoutGroup(content);
+    content.append(loadBtn, loadNote);
+    refreshLoadControl();
   }
 
   /**
@@ -1556,6 +1636,7 @@ export function initSession(deps: SessionDeps): SessionController {
       }) !== null
         ? storedId
         : DEFAULT_MODEL_ID;
+    currentModelId = resolved;
     pendingModelId = resolved;
     // Use the loaded value directly: `loadModelPref` already returns the default
     // (15) for a missing/invalid record, so a `null` here is a deliberate

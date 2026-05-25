@@ -23,7 +23,7 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 | `tests/debug.test.ts`                | `debugLog` gating behind the DEBUG flag      |
 | `tests/background-handler.test.ts`   | Command handler (toggle, ignore unknown, no-id) |
 | `tests/background-offscreen.test.ts` | `ensureOffscreen` document lifecycle         |
-| `tests/session.test.ts`              | `initSession` — lifecycle, streaming, abort, toggle, restore re-seed, quota advisory |
+| `tests/session.test.ts`              | `initSession` — lifecycle, streaming, abort, toggle, restore re-seed, quota advisory, gear settings popover (model list, idle-timeout, Load control) |
 | `tests/stream-client.test.ts`        | `streamOverPort` port wiring and chunk accumulation |
 | `tests/offscreen-client.test.ts`     | `streamPrompt` content-script client over the SW |
 | `tests/offscreen-protocol.test.ts`   | Wire-message discriminators and finiteness guards (incl. `isProgressFrame`) |

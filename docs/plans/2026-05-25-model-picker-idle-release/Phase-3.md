@@ -255,14 +255,14 @@ Estimated tokens: ~35,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] Load is disabled when the pending selection equals the current one.
-> - [ ] Load is disabled while `activeAbort` is set (a stream is in flight) and
+> - [x] Load is disabled when the pending selection equals the current one.
+> - [x] Load is disabled while `activeAbort` is set (a stream is in flight) and
 >       re-enables when the stream finishes.
-> - [ ] Clicking Load persists the model id then calls `reloadModel` exactly
+> - [x] Clicking Load persists the model id then calls `reloadModel` exactly
 >       once.
-> - [ ] A second rapid Load click does not start a second concurrent reload
+> - [x] A second rapid Load click does not start a second concurrent reload
 >       (coalesced by `reWarmInFlight` from Phase 2).
-> - [ ] A failed reload surfaces the existing terminal/network failure UI.
+> - [x] A failed reload surfaces the existing terminal/network failure UI.
 >
 > **Testing Instructions:**
 >

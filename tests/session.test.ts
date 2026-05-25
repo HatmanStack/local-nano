@@ -2621,3 +2621,208 @@ describe('initSession — popover idle-timeout selector', () => {
     expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
   });
 });
+
+function findLoadButton(popover: HTMLElement): HTMLButtonElement {
+  const btn = popover.querySelector<HTMLButtonElement>('button[data-load-model]');
+  if (!btn) throw new Error('Load button not found');
+  return btn;
+}
+
+describe('initSession — popover Load control', () => {
+  const QWEN25_05B = 'onnx-community/Qwen2.5-0.5B-Instruct';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    warmupSessionMock.mockResolvedValue(undefined);
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  it('Load is disabled when the pending selection equals the current one', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    // No selection change: pending equals current (the default).
+    expect(findLoadButton(popover).disabled).toBe(true);
+  });
+
+  it('Load enables once a different model is selected', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    expect(findLoadButton(popover).disabled).toBe(false);
+  });
+
+  it('clicking Load persists the model id then runs reloadModel (recreate + walk) in order', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    await flushMicrotasks();
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    const warmupBefore = warmupSessionMock.mock.calls.length;
+    findLoadButton(popover).click();
+    await flushMicrotasks();
+    // The model preference was persisted with the pending id.
+    const stored = chromeMock.storage.local.store[MODEL_PREF_KEY] as { modelId: string | null };
+    expect(stored.modelId).toBe(QWEN25_05B);
+    // reloadModel ran: force-recreate then the ladder walk (one warmup).
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    expect(warmupSessionMock.mock.calls.length).toBe(warmupBefore + 1);
+    // The first re-walked tier is the chosen model (Qwen2.5-0.5B, wasm/q8).
+    const firstTier = warmupSessionMock.mock.calls.at(-1)?.[0] as { modelName: string };
+    expect(firstTier.modelName).toBe(QWEN25_05B);
+  });
+
+  it('persists the model id before recreating the document (order)', async () => {
+    const order: string[] = [];
+    const origSet = chromeMock.storage.local.set.getMockImplementation();
+    chromeMock.storage.local.set.mockImplementation(async (items: Record<string, unknown>) => {
+      if (MODEL_PREF_KEY in items) order.push('setModelPref');
+      return origSet?.(items);
+    });
+    recreateOffscreenMock.mockImplementation(async () => {
+      order.push('recreate');
+    });
+    try {
+      const deps = makeDepsWithHeader();
+      initSession(deps);
+      await flushMicrotasks();
+      findGearButton(deps._header).click();
+      await flushMicrotasks();
+      const popover = findPopover(deps._root);
+      rowFor(popover, QWEN25_05B).click();
+      findLoadButton(popover).click();
+      await flushMicrotasks();
+      // setModelId persisted before the document was recreated.
+      expect(order.indexOf('setModelPref')).toBeLessThan(order.indexOf('recreate'));
+    } finally {
+      chromeMock.storage.local.set.mockImplementation(origSet ?? (async () => undefined));
+    }
+  });
+
+  it('Load closes the popover on a successful switch', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    await flushMicrotasks();
+    const gear = findGearButton(deps._header);
+    gear.click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    findLoadButton(popover).click();
+    await flushMicrotasks();
+    expect(popover.style.display).toBe('none');
+  });
+
+  it('Load is disabled while a stream is in flight and re-enables when it finishes', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    await flushMicrotasks();
+    // Start a stream so activeAbort is set.
+    deps._input.value = 'a question';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    // Open the popover and select a different model.
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    // Even with a pending change, Load is blocked while the stream is live.
+    expect(findLoadButton(popover).disabled).toBe(true);
+    // A note explains the wait (ADR-P7), not a hard error.
+    expect(popover.textContent).toContain('finishing current response');
+    // Finish the stream; the Load button re-enables.
+    call.resolve('an answer');
+    await flushMicrotasks();
+    expect(findLoadButton(popover).disabled).toBe(false);
+  });
+
+  it('does not abort the in-flight stream when Load is attempted mid-stream', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'a question';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // The button is disabled, but force a click to prove the handler no-ops.
+    findLoadButton(popover).click();
+    await flushMicrotasks();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    expect(call.opts.signal?.aborted).toBe(false);
+    call.resolve('an answer');
+    await flushMicrotasks();
+  });
+
+  it('a second rapid Load click does not start a second concurrent reload', async () => {
+    // Hold recreate pending so both clicks see the same in-flight re-warm.
+    let resolveRecreate: (() => void) | undefined;
+    recreateOffscreenMock.mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolveRecreate = r;
+        }),
+    );
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    await flushMicrotasks();
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    const loadBtn = findLoadButton(popover);
+    loadBtn.click();
+    loadBtn.click();
+    await flushMicrotasks();
+    // Only one recreate ran for the two rapid clicks (coalesced by reWarmInFlight).
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    resolveRecreate?.();
+    await flushMicrotasks();
+  });
+
+  it('a failed reload surfaces the existing terminal failure UI', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const deps = makeDepsWithHeader();
+      initSession(deps);
+      await flushMicrotasks();
+      findGearButton(deps._header).click();
+      await flushMicrotasks();
+      const popover = findPopover(deps._root);
+      rowFor(popover, QWEN25_05B).click();
+      // The reload's ladder walk fails on every tier -> the terminal bubble.
+      warmupSessionMock.mockReset();
+      warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
+      findLoadButton(popover).click();
+      await flushMicrotasks(15);
+      const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(texts.some((t) => t.includes("Couldn't load the model on this device."))).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
