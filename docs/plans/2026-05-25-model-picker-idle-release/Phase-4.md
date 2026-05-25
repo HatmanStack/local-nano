@@ -459,16 +459,16 @@ Estimated tokens: ~45,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] A send while `modelReady` is false triggers `ensureWarm` before the
+> - [x] A send while `modelReady` is false triggers `ensureWarm` before the
 >       stream (proactive path), without overlapping loads.
-> - [ ] A `streamPrompt` rejection classified terminal triggers exactly one
+> - [x] A `streamPrompt` rejection classified terminal triggers exactly one
 >       re-warm + one retry of the same prompt.
-> - [ ] A second consecutive failure surfaces the normal error UI and does NOT
+> - [x] A second consecutive failure surfaces the normal error UI and does NOT
 >       retry again (bounded).
-> - [ ] A non-terminal stream error (e.g. busy, ordinary generation error) does
+> - [x] A non-terminal stream error (e.g. busy, ordinary generation error) does
 >       NOT trigger a re-warm (preserves the "no churny auto-rebuild" rule from
 >       the ROADMAP and the prior plan).
-> - [ ] The re-warm goes through the serialized primitive (no two concurrent
+> - [x] The re-warm goes through the serialized primitive (no two concurrent
 >       loads).
 >
 > **Testing Instructions:**

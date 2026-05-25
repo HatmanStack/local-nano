@@ -1489,6 +1489,104 @@ describe('initSession — streaming', () => {
   });
 });
 
+describe('initSession — send-path re-warm recovery (idle release)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    warmupSessionMock.mockResolvedValue(undefined);
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  it('re-warms and retries the same prompt once on a terminal/closed-document stream failure', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // A closed-document terminal failure (the SW released the doc on idle).
+    first.reject(new Error('Could not establish connection. Receiving end does not exist.'));
+    // The reactive path re-warms via the serialized primitive (recreate) then
+    // retries the SAME prompt exactly once.
+    const retry = await awaitPending();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    expect(retry.prompt).toBe(first.prompt);
+    retry.opts.onChunk?.('recovered answer');
+    retry.resolve('recovered answer');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('recovered answer');
+  });
+
+  it('does NOT re-warm on a non-terminal stream error (no churny auto-rebuild)', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // An ordinary generation error (transient): the device/doc is fine.
+    first.reject(new Error('some ordinary generation error'));
+    await flushMicrotasks();
+    // No recreate, no retry queued.
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    expect(pending.length).toBe(0);
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('some ordinary generation error');
+  });
+
+  it('bounds recovery to a single retry: a second terminal failure surfaces the error UI', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    first.reject(new Error('port disconnected'));
+    const retry = await awaitPending();
+    // Exactly one re-warm happened for the single bounded retry.
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    // The retry also fails terminally; no further retry must be queued.
+    retry.reject(new Error('receiving end does not exist'));
+    await flushMicrotasks();
+    expect(pending.length).toBe(0);
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toContain('receiving end does not exist');
+  });
+
+  it('proactively re-warms before streaming when the model is not ready', async () => {
+    // modelReady is false until a warmup completes; the panel was never opened
+    // here, so the first send must warm before streaming (post-release case).
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    const warmupBefore = warmupSessionMock.mock.calls.length;
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    // ensureWarm runs (one warmup) before the stream request is issued.
+    const call = await awaitPending();
+    expect(warmupSessionMock.mock.calls.length).toBe(warmupBefore + 1);
+    call.opts.onChunk?.('answer');
+    call.resolve('answer');
+    await flushMicrotasks();
+  });
+});
+
 describe('initSession — serialized reloadModel primitive', () => {
   const CAPABILITY_KEY = 'local-nano:capability:v1';
 

@@ -518,13 +518,67 @@ export function initSession(deps: SessionDeps): SessionController {
       responseEl.textContent = modelText;
       messages.scrollTop = messages.scrollHeight;
     };
+    // Proactive re-warm (ADR-P10): if the model is not ready and no re-warm is
+    // already running, warm before streaming. After an idle hard release the
+    // document is gone, so a send would otherwise error into a closed document.
+    // `ensureWarm` is a no-op when a panel-open warmup is already in flight
+    // (`warmStarted` true), so this never double-loads; it only re-walks when the
+    // doc was actually released (`warmStarted` reset). Routed so no two loads
+    // overlap (ADR-P6): `ensureWarm` is the same single walk the panel-open path
+    // and the serialized primitive use.
+    if (!modelReady && !reWarmInFlight) {
+      try {
+        await ensureWarm();
+      } catch {
+        // ensureWarm renders its own failure UI (terminal/network bubble); the
+        // stream attempt below will surface a closed-doc error if it is still
+        // down, which the reactive path then classifies.
+      }
+    }
+
     let succeeded = false;
+    // Bound the post-release recovery to a SINGLE retry so a genuinely dead
+    // device cannot spin. The reactive path re-warms once on a terminal/closed-
+    // document stream failure, then retries the same prompt exactly once; a
+    // second failure surfaces the normal error UI (ADR-P10).
+    let alreadyRetried = false;
     try {
       await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
       succeeded = true;
     } catch (err: unknown) {
       const name = (err as { name?: unknown })?.name;
-      if (name === 'AbortError') {
+      // Reactive re-warm + single retry (ADR-P10, decision 12). Only a
+      // terminal/closed-document failure recovers; an abort or an ordinary
+      // (non-terminal) generation error falls straight through to the normal
+      // error rendering below, preserving the "no churny auto-rebuild" rule.
+      if (name !== 'AbortError' && !alreadyRetried && classifyFailure(err) === 'terminal') {
+        alreadyRetried = true;
+        try {
+          // The failed stream is dead; clear the active-stream guard so the
+          // serialized re-warm primitive (ADR-P6) is not blocked by the ADR-P7
+          // "never tear down a live stream" early-return. Then re-establish a
+          // fresh abort controller for the retried send.
+          activeAbort = null;
+          await reloadModel();
+          activeAbort = new AbortController();
+          // Reset the per-attempt accumulator so the retry renders fresh from
+          // its first chunk (firstChunk clears the bubble on the next token).
+          modelText = '';
+          firstChunk = true;
+          await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+          succeeded = true;
+        } catch (retryErr: unknown) {
+          // The single retry also failed: surface it as the normal error UI.
+          // No further retry (bounded), preventing a loop on a dead device.
+          const retryName = (retryErr as { name?: unknown })?.name;
+          if (retryName === 'AbortError') {
+            modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
+          } else {
+            modelText = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          }
+          responseEl.textContent = modelText;
+        }
+      } else if (name === 'AbortError') {
         modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
         responseEl.textContent = modelText;
       } else {
