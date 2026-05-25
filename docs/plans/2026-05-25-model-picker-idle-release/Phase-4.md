@@ -317,16 +317,16 @@ Estimated tokens: ~45,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] A touch-idle request with a 15-min preference calls
+> - [x] A touch-idle request with a 15-min preference calls
 >       `chrome.alarms.create(IDLE_ALARM_NAME, { when: now + 900000 })`.
-> - [ ] A touch-idle with a "Never" (null) preference calls
+> - [x] A touch-idle with a "Never" (null) preference calls
 >       `chrome.alarms.clear(IDLE_ALARM_NAME)` and does not create.
-> - [ ] Firing the alarm while the busy probe returns false calls
+> - [x] Firing the alarm while the busy probe returns false calls
 >       `closeOffscreen()` exactly once and does not reschedule.
-> - [ ] Firing the alarm while busy reschedules and does NOT close.
-> - [ ] A malformed/absent busy reply is treated as not-busy (safe to close).
-> - [ ] `touchIdle()` resolves (never throws) on a lastError/malformed reply.
-> - [ ] Repeated touch-idle calls keep replacing the single named alarm (reset
+> - [x] Firing the alarm while busy reschedules and does NOT close.
+> - [x] A malformed/absent busy reply is treated as not-busy (safe to close).
+> - [x] `touchIdle()` resolves (never throws) on a lastError/malformed reply.
+> - [x] Repeated touch-idle calls keep replacing the single named alarm (reset
 >       semantics), asserted by repeated `create` with the same name.
 >
 > **Testing Instructions:**

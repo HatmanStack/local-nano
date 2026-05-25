@@ -13,12 +13,25 @@
  */
 
 import {
+  alarmWhen,
+  decideIdleAction,
+  IDLE_ALARM_NAME,
+  shouldScheduleOnTouch,
+} from '../offscreen/idle-policy.js';
+import { loadModelPref } from '../offscreen/model-pref.js';
+import {
   ENSURE_OFFSCREEN_RESPONSE,
   type EnsureOffscreenResponse,
+  IS_BUSY_REQUEST,
+  type IsBusyRequest,
   isEnsureOffscreenRequest,
+  isIsBusyResponse,
   isRecreateOffscreenRequest,
+  isTouchIdleRequest,
   RECREATE_OFFSCREEN_RESPONSE,
   type RecreateOffscreenResponse,
+  TOUCH_IDLE_RESPONSE,
+  type TouchIdleResponse,
 } from '../offscreen/protocol.js';
 import { type StreamPromptOptions, streamOverPort } from '../offscreen/stream-client.js';
 
@@ -98,11 +111,87 @@ export async function recreateOffscreen(): Promise<void> {
 }
 
 /**
+ * Idle-release scheduler (ADR-P8). Reads the configured idle timeout from the
+ * model preference and (re)schedules the single named idle alarm to
+ * `now + timeout`. Creating an alarm with the same name REPLACES the existing
+ * one, which is the reset-on-each-generation behavior (the idle window measures
+ * from the last generation). When the user chose "Never" (null timeout) this
+ * clears any prior alarm so a stale alarm cannot fire after the opt-out.
+ *
+ * The shortest offered option (5 min) sits comfortably above the
+ * `chrome.alarms` ~1 min minimum (ADR-P11).
+ */
+export async function scheduleIdleAlarm(): Promise<void> {
+  const pref = await loadModelPref();
+  const timeout = pref.idleTimeoutMinutes;
+  if (!shouldScheduleOnTouch(timeout)) {
+    // "Never": cancel any prior alarm so a release cannot fire after opt-out.
+    await chrome.alarms.clear(IDLE_ALARM_NAME);
+    return;
+  }
+  // timeout is non-null here (shouldScheduleOnTouch returned true).
+  chrome.alarms.create(IDLE_ALARM_NAME, {
+    when: alarmWhen(Date.now(), timeout as number),
+  });
+}
+
+/**
+ * Probe the offscreen document for its busy state over the `IS_BUSY_REQUEST`
+ * round-trip (ADR-P9). Returns `reply.busy` when the document answers; defaults
+ * to `false` on a malformed/absent reply or a `chrome.runtime.lastError`, so a
+ * gone document is treated as idle-and-closable safely (closing an
+ * already-gone document is a harmless no-op via `closeOffscreen`).
+ */
+export async function queryOffscreenBusy(): Promise<boolean> {
+  try {
+    const request: IsBusyRequest = { type: IS_BUSY_REQUEST };
+    const reply = (await chrome.runtime.sendMessage(request)) as unknown;
+    if (chrome.runtime.lastError) return false;
+    if (!isIsBusyResponse(reply) || !reply.ok) return false;
+    return reply.busy;
+  } catch {
+    // No offscreen document listening (gone) — treat as idle.
+    return false;
+  }
+}
+
+/**
+ * Idle-alarm listener body (ADR-P8, P9). Ignores any alarm that is not the idle
+ * alarm. On the idle alarm: read the current timeout, probe the offscreen busy
+ * state, then act per the pure `decideIdleAction`:
+ *
+ * - `close`: `closeOffscreen()` (resets the sticky `documentReady`). The next
+ *   generation re-arms the window via touch-idle, so we do NOT reschedule here.
+ * - `reschedule`: re-create the alarm for another full window (a generation is
+ *   in flight, do not drop it).
+ * - `noop`: the user switched to "Never"; clear the alarm.
+ */
+export async function handleAlarm(alarm: { name: string }): Promise<void> {
+  if (alarm.name !== IDLE_ALARM_NAME) return;
+  const pref = await loadModelPref();
+  const timeoutMinutes = pref.idleTimeoutMinutes;
+  const busy = await queryOffscreenBusy();
+  const action = decideIdleAction({ busy, timeoutMinutes });
+  if (action.kind === 'close') {
+    await closeOffscreen();
+    return;
+  }
+  if (action.kind === 'reschedule') {
+    chrome.alarms.create(IDLE_ALARM_NAME, {
+      when: alarmWhen(Date.now(), action.delayMinutes),
+    });
+    return;
+  }
+  // noop: release disabled ("Never"); clear any lingering alarm.
+  await chrome.alarms.clear(IDLE_ALARM_NAME);
+}
+
+/**
  * Register a `chrome.runtime.onMessage` listener that fields
- * `ENSURE_OFFSCREEN_REQUEST` and `RECREATE_OFFSCREEN_REQUEST` messages from
- * content scripts. Call this once from `background.ts` at top level. Idempotent
- * across SW restarts — Chrome dedupes addListener calls keyed by the function
- * reference.
+ * `ENSURE_OFFSCREEN_REQUEST`, `RECREATE_OFFSCREEN_REQUEST`, and
+ * `TOUCH_IDLE_REQUEST` messages from content scripts. Call this once from
+ * `background.ts` at top level. Idempotent across SW restarts — Chrome dedupes
+ * addListener calls keyed by the function reference.
  *
  * Returns `true` only for owned messages (to keep the reply channel open for
  * the async response) and `false` otherwise, preserving the MV3
@@ -141,6 +230,22 @@ export function installEnsureListener(): void {
             ok: false,
             error: message,
           };
+          sendResponse(fail);
+        },
+      );
+      return true; // keep the channel open for the async reply
+    }
+    if (isTouchIdleRequest(msg)) {
+      // Reset the single idle alarm to now + the configured timeout (ADR-P8).
+      // Reading the timeout from storage here keeps a freshly-woken SW correct.
+      scheduleIdleAlarm().then(
+        () => {
+          const ok: TouchIdleResponse = { type: TOUCH_IDLE_RESPONSE, ok: true };
+          sendResponse(ok);
+        },
+        (err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          const fail: TouchIdleResponse = { type: TOUCH_IDLE_RESPONSE, ok: false, error: message };
           sendResponse(fail);
         },
       );

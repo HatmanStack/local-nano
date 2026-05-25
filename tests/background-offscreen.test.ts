@@ -3,16 +3,29 @@ import {
   _resetForTests,
   closeOffscreen,
   ensureOffscreen,
+  handleAlarm,
   installEnsureListener,
   recreateOffscreen,
+  scheduleIdleAlarm,
 } from '../src/background/offscreen.js';
+import { IDLE_ALARM_NAME } from '../src/offscreen/idle-policy.js';
+import { MODEL_PREF_KEY, type ModelPref } from '../src/offscreen/model-pref.js';
 import {
   ENSURE_OFFSCREEN_REQUEST,
   ENSURE_OFFSCREEN_RESPONSE,
+  IS_BUSY_RESPONSE,
   RECREATE_OFFSCREEN_REQUEST,
   RECREATE_OFFSCREEN_RESPONSE,
+  TOUCH_IDLE_REQUEST,
+  TOUCH_IDLE_RESPONSE,
 } from '../src/offscreen/protocol.js';
 import { chromeMock } from './setup.js';
+
+/** Seed the model preference so the scheduler/handler read a known timeout. */
+function seedIdleTimeout(minutes: number | null): void {
+  const pref: ModelPref = { modelId: null, idleTimeoutMinutes: minutes };
+  chromeMock.storage.local.store[MODEL_PREF_KEY] = pref;
+}
 
 describe('ensureOffscreen', () => {
   beforeEach(() => {
@@ -211,5 +224,144 @@ describe('installEnsureListener', () => {
     const reply = sendResponse.mock.calls[0]?.[0] as { ok: boolean; error: string };
     expect(reply.ok).toBe(false);
     expect(reply.error).toBe('recreate blocked');
+  });
+
+  it('schedules the idle alarm and replies ok:true to a TOUCH_IDLE_REQUEST', async () => {
+    seedIdleTimeout(15);
+    installEnsureListener();
+    const listener = captureListener();
+    const sendResponse = vi.fn();
+    const kept = listener({ type: TOUCH_IDLE_REQUEST }, {}, sendResponse);
+    expect(kept).toBe(true);
+    for (let i = 0; i < 10 && sendResponse.mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect(sendResponse).toHaveBeenCalledWith({ type: TOUCH_IDLE_RESPONSE, ok: true });
+    expect(chromeMock.alarms.create).toHaveBeenCalledTimes(1);
+    const [name] = chromeMock.alarms.create.mock.calls[0] as [string, { when: number }];
+    expect(name).toBe(IDLE_ALARM_NAME);
+  });
+});
+
+describe('scheduleIdleAlarm', () => {
+  beforeEach(() => {
+    _resetForTests();
+  });
+
+  it('creates the single named alarm at now + timeout for a 15-min preference', async () => {
+    seedIdleTimeout(15);
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    try {
+      await scheduleIdleAlarm();
+      expect(chromeMock.alarms.create).toHaveBeenCalledTimes(1);
+      expect(chromeMock.alarms.create).toHaveBeenCalledWith(IDLE_ALARM_NAME, {
+        when: 1_000 + 900_000,
+      });
+      expect(chromeMock.alarms.clear).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('uses now + 300000 for a 5-min preference (clears the alarms ~1 min minimum)', async () => {
+    seedIdleTimeout(5);
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(0);
+    try {
+      await scheduleIdleAlarm();
+      expect(chromeMock.alarms.create).toHaveBeenCalledWith(IDLE_ALARM_NAME, { when: 300_000 });
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('clears the alarm and does not create when the preference is "Never" (null)', async () => {
+    seedIdleTimeout(null);
+    await scheduleIdleAlarm();
+    expect(chromeMock.alarms.clear).toHaveBeenCalledWith(IDLE_ALARM_NAME);
+    expect(chromeMock.alarms.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps replacing the single named alarm on repeated calls (reset semantics)', async () => {
+    seedIdleTimeout(60);
+    await scheduleIdleAlarm();
+    await scheduleIdleAlarm();
+    await scheduleIdleAlarm();
+    expect(chromeMock.alarms.create).toHaveBeenCalledTimes(3);
+    for (const call of chromeMock.alarms.create.mock.calls) {
+      expect(call[0]).toBe(IDLE_ALARM_NAME);
+    }
+  });
+});
+
+describe('handleAlarm (verify-idle close)', () => {
+  beforeEach(() => {
+    _resetForTests();
+  });
+
+  it('ignores an alarm whose name is not the idle alarm', async () => {
+    seedIdleTimeout(15);
+    await handleAlarm({ name: 'some-other-alarm' });
+    expect(chromeMock.runtime.sendMessage).not.toHaveBeenCalled();
+    expect(chromeMock.offscreen.closeDocument).not.toHaveBeenCalled();
+    expect(chromeMock.alarms.create).not.toHaveBeenCalled();
+  });
+
+  it('closes the document exactly once when the busy probe reports idle', async () => {
+    seedIdleTimeout(15);
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: IS_BUSY_RESPONSE,
+      ok: true,
+      busy: false,
+    }));
+    await handleAlarm({ name: IDLE_ALARM_NAME });
+    expect(chromeMock.offscreen.closeDocument).toHaveBeenCalledTimes(1);
+    expect(chromeMock.alarms.create).not.toHaveBeenCalled();
+  });
+
+  it('reschedules and does NOT close when the busy probe reports busy', async () => {
+    seedIdleTimeout(15);
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: IS_BUSY_RESPONSE,
+      ok: true,
+      busy: true,
+    }));
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(5_000);
+    try {
+      await handleAlarm({ name: IDLE_ALARM_NAME });
+      expect(chromeMock.offscreen.closeDocument).not.toHaveBeenCalled();
+      expect(chromeMock.alarms.create).toHaveBeenCalledWith(IDLE_ALARM_NAME, {
+        when: 5_000 + 900_000,
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('treats a malformed/absent busy reply as not-busy (safe to close)', async () => {
+    seedIdleTimeout(15);
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({ type: 'something-else' }));
+    await handleAlarm({ name: IDLE_ALARM_NAME });
+    expect(chromeMock.offscreen.closeDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a thrown busy probe (gone document) as not-busy (safe to close)', async () => {
+    seedIdleTimeout(15);
+    chromeMock.runtime.sendMessage.mockImplementation(async () => {
+      throw new Error('receiving end does not exist');
+    });
+    await handleAlarm({ name: IDLE_ALARM_NAME });
+    expect(chromeMock.offscreen.closeDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the alarm and does not close when the timeout is now "Never"', async () => {
+    seedIdleTimeout(null);
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: IS_BUSY_RESPONSE,
+      ok: true,
+      busy: false,
+    }));
+    await handleAlarm({ name: IDLE_ALARM_NAME });
+    expect(chromeMock.offscreen.closeDocument).not.toHaveBeenCalled();
+    expect(chromeMock.alarms.clear).toHaveBeenCalledWith(IDLE_ALARM_NAME);
   });
 });

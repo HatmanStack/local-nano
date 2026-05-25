@@ -23,12 +23,15 @@ import {
   isProgressFrame,
   isRebuildSessionResponse,
   isRecreateOffscreenResponse,
+  isTouchIdleResponse,
   isWarmupResponse,
   REBUILD_SESSION_REQUEST,
   RECREATE_OFFSCREEN_REQUEST,
   type RebuildSessionRequest,
   type RecreateOffscreenRequest,
   STREAM_PROGRESS_PORT,
+  TOUCH_IDLE_REQUEST,
+  type TouchIdleRequest,
   WARMUP_REQUEST,
   type WarmupRequest,
 } from './protocol.js';
@@ -277,6 +280,38 @@ export function subscribeProgress(onFrame: (loaded: number, total: number) => vo
   })();
 
   return disconnect;
+}
+
+/**
+ * Signal the service worker to (re)schedule the idle-release alarm (ADR-P8).
+ * Sent from the panel on each generation so the inactivity window measures from
+ * the last generation. The SW reads the configured timeout from storage itself
+ * (it may be freshly woken), so this request carries no payload.
+ *
+ * NEVER throws into the generation path: failing to schedule a release must not
+ * break a send. On any error (a `chrome.runtime.lastError`, a transport throw, a
+ * malformed reply, or `ok:false`) it logs at warn and resolves quietly. Callers
+ * fire it as `void touchIdle()`.
+ */
+export async function touchIdle(): Promise<void> {
+  try {
+    const request: TouchIdleRequest = { type: TOUCH_IDLE_REQUEST };
+    const reply = (await chrome.runtime.sendMessage(request)) as unknown;
+    const lastError = chrome.runtime.lastError;
+    if (lastError) {
+      console.warn(`[local-nano] touchIdle: ${lastError.message ?? 'lastError set'}`);
+      return;
+    }
+    if (!isTouchIdleResponse(reply)) {
+      console.warn('[local-nano] touchIdle: malformed reply from service worker');
+      return;
+    }
+    if (!reply.ok) {
+      console.warn(`[local-nano] touchIdle: ${reply.error}`);
+    }
+  } catch (err) {
+    console.warn('[local-nano] touchIdle failed; idle alarm not rescheduled:', err);
+  }
 }
 
 /**
