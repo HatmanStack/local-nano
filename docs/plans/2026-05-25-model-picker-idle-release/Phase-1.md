@@ -220,15 +220,15 @@ Estimated tokens: ~30,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] `loadModelPref()` on an empty store returns
+> - [x] `loadModelPref()` on an empty store returns
 >       `{ modelId: null, idleTimeoutMinutes: 15 }`.
-> - [ ] A stored valid record round-trips through save/load unchanged.
-> - [ ] A stored record with a bumped extension version is still returned (NOT
+> - [x] A stored valid record round-trips through save/load unchanged.
+> - [x] A stored record with a bumped extension version is still returned (NOT
 >       invalidated), unlike `CapabilityRecord`.
-> - [ ] A corrupt/drifted stored blob is ignored and the default returned.
-> - [ ] `setModelId` preserves `idleTimeoutMinutes` and vice versa.
-> - [ ] `idleTimeoutMinutes: null` ("Never") validates and round-trips.
-> - [ ] An out-of-range timeout (e.g. `7`) fails the guard.
+> - [x] A corrupt/drifted stored blob is ignored and the default returned.
+> - [x] `setModelId` preserves `idleTimeoutMinutes` and vice versa.
+> - [x] `idleTimeoutMinutes: null` ("Never") validates and round-trips.
+> - [x] An out-of-range timeout (e.g. `7`) fails the guard.
 >
 > **Testing Instructions:**
 >
