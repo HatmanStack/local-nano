@@ -1442,6 +1442,121 @@ describe('initSession — streaming', () => {
   });
 });
 
+describe('initSession — serialized reloadModel primitive', () => {
+  const CAPABILITY_KEY = 'local-nano:capability:v1';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    warmupSessionMock.mockResolvedValue(undefined);
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  it('exposes reloadModel on the returned controller', () => {
+    const deps = makeDeps();
+    const controller = initSession(deps);
+    expect(typeof controller.reloadModel).toBe('function');
+  });
+
+  it('coalesces two concurrent reloadModel calls onto one recreate + one walk', async () => {
+    // Hold recreateOffscreen pending so both reloads see the same in-flight
+    // promise before either completes.
+    let resolveRecreate: (() => void) | undefined;
+    recreateOffscreenMock.mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolveRecreate = r;
+        }),
+    );
+    const deps = makeDeps();
+    const controller = initSession(deps);
+    await flushMicrotasks();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    const warmupBefore = warmupSessionMock.mock.calls.length;
+    const a = controller.reloadModel();
+    const b = controller.reloadModel();
+    // Both callers share one in-flight promise.
+    expect(a).toBe(b);
+    await flushMicrotasks();
+    // Exactly one recreate ran for the two coalesced reloads.
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    resolveRecreate?.();
+    await Promise.all([a, b]);
+    await flushMicrotasks();
+    // Exactly one ladder walk ran (one warmup, tier 0 resolves).
+    expect(warmupSessionMock.mock.calls.length).toBe(warmupBefore + 1);
+  });
+
+  it('a later reloadModel runs a fresh operation after the prior one resolves', async () => {
+    const deps = makeDeps();
+    const controller = initSession(deps);
+    await flushMicrotasks();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    await controller.reloadModel();
+    const afterFirst = recreateOffscreenMock.mock.calls.length;
+    expect(afterFirst).toBe(recreateBefore + 1);
+    // The lock cleared in the finally, so a second call is a fresh operation.
+    await controller.reloadModel();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(afterFirst + 1);
+  });
+
+  it('reloadModel({ resetCapability: true }) clears the capability record before recreating', async () => {
+    // Seed a record so the reset has something to clear.
+    chromeMock.storage.local.store[CAPABILITY_KEY] = {
+      schemaVersion: 1,
+      extensionVersion: '0.2.4',
+      knownGood: {
+        modelName: 'onnx-community/gemma-4-E2B-it-ONNX',
+        device: 'webgpu',
+        dtype: 'q4f16',
+      },
+      knownBad: [],
+      capability: { device: 'webgpu', isFallback: false, maxBufferSize: null },
+    };
+    const deps = makeDeps();
+    const controller = initSession(deps);
+    await flushMicrotasks();
+    const removeBefore = chromeMock.storage.local.remove.mock.calls.length;
+    await controller.reloadModel({ resetCapability: true });
+    await flushMicrotasks();
+    // The capability record was removed (clearCapabilityRecord) before the
+    // re-walk repopulated it from tier 0.
+    const removeCalls = chromeMock.storage.local.remove.mock.calls
+      .slice(removeBefore)
+      .map((c) => c[0]);
+    expect(removeCalls).toContain(CAPABILITY_KEY);
+  });
+
+  it('does not start a recreate while a stream is in flight (activeAbort set)', async () => {
+    const deps = makeDeps();
+    const controller = initSession(deps);
+    await flushMicrotasks();
+    // Start a stream so activeAbort is set.
+    deps._input.value = 'a question';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // A reload requested while the stream is live must not tear down the doc.
+    await controller.reloadModel();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    // The active stream is untouched (not aborted).
+    expect(call.opts.signal?.aborted).toBe(false);
+    call.resolve('an answer');
+    await flushMicrotasks();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Selection mode — placeholder swap, Esc toggle, rewrite, ask, undo, chip
 // ---------------------------------------------------------------------------

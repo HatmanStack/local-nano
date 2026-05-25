@@ -206,7 +206,25 @@ function safeManifestVersion(): string {
   }
 }
 
-export function initSession(deps: SessionDeps): void {
+/**
+ * The handle `initSession` returns so a caller (Phase 3's gear-popover Load
+ * control) can drive the serialized teardown + re-warm primitive. Exposed as a
+ * controller rather than a free function so each panel instance owns its own
+ * in-flight lock and `ensureWarm` closure.
+ */
+export interface SessionController {
+  /**
+   * Serialized teardown + re-warm (ADR-P6). Force-recreates the offscreen
+   * document and walks the ladder for the resolved model/tier under ONE
+   * in-flight lock, so a model switch and any other re-warm trigger can never
+   * overlap two loads (constraint 1). Concurrent callers coalesce onto the same
+   * in-flight promise. Caller precondition (ADR-P7): do not invoke while a
+   * generation is streaming; this primitive will not abort an active stream.
+   */
+  reloadModel: (opts?: { resetCapability?: boolean }) => Promise<void>;
+}
+
+export function initSession(deps: SessionDeps): SessionController {
   const {
     root,
     header,
@@ -865,28 +883,23 @@ export function initSession(deps: SessionDeps): void {
       ].join('\n'),
     );
 
-    // Shared re-walk driver for both controls. Force-recreates the document
-    // (ADR-R4) then re-runs the ladder. `resetFirst` clears the persisted record
-    // so the walk starts from tier 0 again (Reset and re-detect).
+    // Shared re-walk driver for both controls. Routes through the single
+    // serialized teardown + re-warm primitive (ADR-P6) so the terminal Retry,
+    // the Reset, the future model switch, and the future idle re-warm all share
+    // one path and can never overlap two loads. `resetFirst` clears the
+    // persisted record so the walk starts from tier 0 again (Reset and
+    // re-detect). `reloadModel` resets the warm flags, force-recreates the
+    // document (ADR-R4), then re-runs the ladder via `ensureWarm`.
     const rewalk = (button: HTMLButtonElement, resetFirst: boolean) => {
       button.disabled = true;
       bubble.remove();
-      // Reset so ensureWarm runs again; both flags clear so a true retry (not a
-      // no-op) happens and the model is treated as not-yet-ready.
-      warmStarted = false;
-      modelReady = false;
-      void (async () => {
-        try {
-          if (resetFirst) await clearCapabilityRecord();
-          await recreateOffscreen();
-        } catch (recreateErr) {
-          // A failed recreate/clear leaves the panel without a dead button:
-          // re-render the terminal message so the user can act again.
-          renderTerminalFailure(recreateErr);
-          return;
-        }
-        await ensureWarm();
-      })();
+      void reloadModel({ resetCapability: resetFirst }).catch((recreateErr) => {
+        // A failed recreate/clear (before the walk could start) leaves the panel
+        // without a dead button: re-render the terminal message so the user can
+        // act again. A failure inside the walk itself is already surfaced by
+        // ensureWarm's own terminal rendering.
+        renderTerminalFailure(recreateErr);
+      });
     };
 
     const controls = window.document.createElement('div');
@@ -1248,6 +1261,52 @@ export function initSession(deps: SessionDeps): void {
     }
   }
 
+  // ---- Serialized teardown + re-warm primitive (ADR-P6, constraint 1) ----
+  // A model switch and an idle re-warm are the same operation: tear down the
+  // offscreen document (force-recreate) and re-warm against the resolved
+  // model/tier. This is the ONE primitive both share, guarded by a single
+  // in-flight lock so a user Load and any other re-warm trigger can never run
+  // concurrently. The v0.2.0 OOM came from overlapping loads, so serialization
+  // is a hard safety property. A re-warm already in flight short-circuits a
+  // second request onto the same promise.
+  let reWarmInFlight: Promise<void> | null = null;
+
+  /**
+   * Tear down and re-warm under one lock (ADR-P6). If a re-warm is already in
+   * flight, returns that same promise so concurrent callers coalesce onto one
+   * operation (exactly one recreate + one ladder walk run). Otherwise resets the
+   * warm flags, optionally clears the persisted capability record (so a Reset
+   * re-walks from tier 0), force-recreates the document, and walks the ladder.
+   *
+   * Caller precondition (ADR-P7): a model switch waits for an in-flight
+   * generation rather than aborting it, so the caller (the Phase 3 Load button)
+   * must not invoke this while a stream is in flight. This primitive enforces
+   * the precondition defensively (early-return while `activeAbort` is set) and
+   * NEVER aborts the active stream. It never starts a second `LanguageModel`
+   * load: the recreate tears the whole document down first (constraint 1,
+   * ADR-R3), and the offscreen side destroys the prior session before creating.
+   */
+  function reloadModel(opts?: { resetCapability?: boolean }): Promise<void> {
+    if (reWarmInFlight) return reWarmInFlight;
+    // Never overlap a live generation (ADR-P7): the caller is responsible for
+    // waiting, but guard here so a stray call can never tear the document out
+    // from under a streaming answer. Resolve as a no-op without aborting.
+    if (activeAbort) return Promise.resolve();
+    const resetCapability = opts?.resetCapability ?? false;
+    reWarmInFlight = (async () => {
+      // Reset so ensureWarm runs a true re-walk (not a no-op) and the model is
+      // treated as not-yet-ready until the walk succeeds.
+      warmStarted = false;
+      modelReady = false;
+      if (resetCapability) await clearCapabilityRecord();
+      await recreateOffscreen();
+      await ensureWarm();
+    })().finally(() => {
+      reWarmInFlight = null;
+    });
+    return reWarmInFlight;
+  }
+
   // ---- Always-available copy-diagnostic affordance (ADR-R11, Task 5.3) ----
   // Present whenever the panel is open, regardless of load state. Copy-only:
   // nothing leaves the device. Inserted into the header (left of the close
@@ -1280,4 +1339,8 @@ export function initSession(deps: SessionDeps): void {
 
   // ---- Initial restore ----
   void restore();
+
+  // The controller seam: Phase 3's gear-popover Load control drives the
+  // serialized re-warm primitive through this handle. No UI calls it yet.
+  return { reloadModel };
 }

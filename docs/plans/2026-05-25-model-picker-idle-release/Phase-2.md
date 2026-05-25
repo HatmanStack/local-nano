@@ -216,15 +216,15 @@ Estimated tokens: ~35,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] Two concurrent `reloadModel()` calls share one promise: exactly one
+> - [x] Two concurrent `reloadModel()` calls share one promise: exactly one
 >       `recreateOffscreen` and one ladder walk run (assert call counts).
-> - [ ] `reloadModel({ resetCapability: true })` clears the capability record
+> - [x] `reloadModel({ resetCapability: true })` clears the capability record
 >       before recreating.
-> - [ ] After `reloadModel` resolves, `reWarmInFlight` is null (a later call
+> - [x] After `reloadModel` resolves, `reWarmInFlight` is null (a later call
 >       runs a fresh operation).
-> - [ ] The terminal-failure Retry and Reset still work (existing tests pass)
+> - [x] The terminal-failure Retry and Reset still work (existing tests pass)
 >       and now route through `reloadModel`.
-> - [ ] No path starts a recreate while `activeAbort` is set.
+> - [x] No path starts a recreate while `activeAbort` is set.
 >
 > **Testing Instructions:**
 >
