@@ -1,6 +1,6 @@
 # Local Nano — Privacy Policy
 
-_Last updated: 2026-05-24_
+Last updated: 2026-05-24
 
 Local Nano is a browser extension that runs an AI language model **entirely on
 your own device**, inside your browser. It is built so your data never leaves
