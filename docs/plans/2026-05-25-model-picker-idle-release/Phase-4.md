@@ -168,9 +168,9 @@ Estimated tokens: ~45,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] All four constants and their guards exist and follow the existing shape.
-> - [ ] `isIsBusyResponse` requires `busy` to be a boolean on the ok branch.
-> - [ ] Guards reject mismatched/foreign messages.
+> - [x] All four constants and their guards exist and follow the existing shape.
+> - [x] `isIsBusyResponse` requires `busy` to be a boolean on the ok branch.
+> - [x] Guards reject mismatched/foreign messages.
 >
 > **Testing Instructions:**
 >

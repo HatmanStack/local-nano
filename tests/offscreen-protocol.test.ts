@@ -6,12 +6,16 @@ import {
   ENSURE_OFFSCREEN_RESPONSE,
   GPU_INFO_REQUEST,
   GPU_INFO_RESPONSE,
+  IS_BUSY_REQUEST,
+  IS_BUSY_RESPONSE,
   isCountTokensRequest,
   isCountTokensResponse,
   isEnsureOffscreenRequest,
   isEnsureOffscreenResponse,
   isGpuInfoRequest,
   isGpuInfoResponse,
+  isIsBusyRequest,
+  isIsBusyResponse,
   isProgressFrame,
   isRebuildSessionRequest,
   isRebuildSessionResponse,
@@ -21,6 +25,8 @@ import {
   isStreamChunk,
   isStreamDone,
   isStreamRequest,
+  isTouchIdleRequest,
+  isTouchIdleResponse,
   isWarmupRequest,
   isWarmupResponse,
   REBUILD_SESSION_REQUEST,
@@ -34,6 +40,8 @@ import {
   STREAM_PROGRESS,
   STREAM_PROGRESS_PORT,
   STREAM_REQUEST,
+  TOUCH_IDLE_REQUEST,
+  TOUCH_IDLE_RESPONSE,
   WARMUP_REQUEST,
   WARMUP_RESPONSE,
 } from '../src/offscreen/protocol.js';
@@ -80,6 +88,86 @@ describe('protocol discriminators', () => {
   it('keeps warmup constants stable', () => {
     expect(WARMUP_REQUEST).toBe('offscreen/warmup-request');
     expect(WARMUP_RESPONSE).toBe('offscreen/warmup-response');
+  });
+
+  it('keeps touch-idle constants stable', () => {
+    expect(TOUCH_IDLE_REQUEST).toBe('idle/touch-request');
+    expect(TOUCH_IDLE_RESPONSE).toBe('idle/touch-response');
+  });
+
+  it('keeps is-busy constants stable', () => {
+    expect(IS_BUSY_REQUEST).toBe('idle/is-busy-request');
+    expect(IS_BUSY_RESPONSE).toBe('idle/is-busy-response');
+  });
+});
+
+describe('isTouchIdleRequest', () => {
+  it('accepts a well-formed request (no payload)', () => {
+    expect(isTouchIdleRequest({ type: TOUCH_IDLE_REQUEST })).toBe(true);
+  });
+
+  it('rejects null, primitives, and the wrong discriminator', () => {
+    expect(isTouchIdleRequest(null)).toBe(false);
+    expect(isTouchIdleRequest(undefined)).toBe(false);
+    expect(isTouchIdleRequest('foo')).toBe(false);
+    expect(isTouchIdleRequest({ type: 'other' })).toBe(false);
+  });
+});
+
+describe('isTouchIdleResponse', () => {
+  it('accepts ok:true and ok:false with error string', () => {
+    expect(isTouchIdleResponse({ type: TOUCH_IDLE_RESPONSE, ok: true })).toBe(true);
+    expect(isTouchIdleResponse({ type: TOUCH_IDLE_RESPONSE, ok: false, error: 'boom' })).toBe(true);
+  });
+
+  it('rejects ok:false without an error string', () => {
+    expect(isTouchIdleResponse({ type: TOUCH_IDLE_RESPONSE, ok: false })).toBe(false);
+    expect(isTouchIdleResponse({ type: TOUCH_IDLE_RESPONSE, ok: false, error: 42 })).toBe(false);
+  });
+
+  it('rejects wrong discriminator and primitives', () => {
+    expect(isTouchIdleResponse(null)).toBe(false);
+    expect(isTouchIdleResponse({ type: 'other', ok: true })).toBe(false);
+  });
+});
+
+describe('isIsBusyRequest', () => {
+  it('accepts a well-formed request (no payload)', () => {
+    expect(isIsBusyRequest({ type: IS_BUSY_REQUEST })).toBe(true);
+  });
+
+  it('rejects null, primitives, and the wrong discriminator', () => {
+    expect(isIsBusyRequest(null)).toBe(false);
+    expect(isIsBusyRequest(undefined)).toBe(false);
+    expect(isIsBusyRequest('foo')).toBe(false);
+    expect(isIsBusyRequest({ type: 'other' })).toBe(false);
+  });
+});
+
+describe('isIsBusyResponse', () => {
+  it('accepts ok:true with a boolean busy', () => {
+    expect(isIsBusyResponse({ type: IS_BUSY_RESPONSE, ok: true, busy: true })).toBe(true);
+    expect(isIsBusyResponse({ type: IS_BUSY_RESPONSE, ok: true, busy: false })).toBe(true);
+  });
+
+  it('rejects ok:true with a missing or non-boolean busy', () => {
+    expect(isIsBusyResponse({ type: IS_BUSY_RESPONSE, ok: true })).toBe(false);
+    expect(isIsBusyResponse({ type: IS_BUSY_RESPONSE, ok: true, busy: 'yes' })).toBe(false);
+    expect(isIsBusyResponse({ type: IS_BUSY_RESPONSE, ok: true, busy: 1 })).toBe(false);
+  });
+
+  it('accepts ok:false with an error string', () => {
+    expect(isIsBusyResponse({ type: IS_BUSY_RESPONSE, ok: false, error: 'boom' })).toBe(true);
+  });
+
+  it('rejects ok:false without an error string', () => {
+    expect(isIsBusyResponse({ type: IS_BUSY_RESPONSE, ok: false })).toBe(false);
+    expect(isIsBusyResponse({ type: IS_BUSY_RESPONSE, ok: false, error: 42 })).toBe(false);
+  });
+
+  it('rejects wrong discriminator and primitives', () => {
+    expect(isIsBusyResponse(null)).toBe(false);
+    expect(isIsBusyResponse({ type: 'other', ok: true, busy: true })).toBe(false);
   });
 });
 

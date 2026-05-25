@@ -172,6 +172,72 @@ export function isGpuInfoResponse(value: unknown): value is GpuInfoResponse {
   return false;
 }
 
+export const TOUCH_IDLE_REQUEST = 'idle/touch-request' as const;
+export const TOUCH_IDLE_RESPONSE = 'idle/touch-response' as const;
+
+/**
+ * Idle-release touch (ADR-P8). Sent content-script-to-SW on each generation so
+ * the SW (re)schedules the single named idle alarm to `now + timeout`. Carries
+ * no payload: the SW reads the configured timeout from `chrome.storage.local`
+ * itself, since a freshly woken SW (post-eviction) has no in-memory state. The
+ * client never throws on this round-trip, so a failed schedule cannot break a
+ * send.
+ */
+export interface TouchIdleRequest {
+  type: typeof TOUCH_IDLE_REQUEST;
+}
+
+export type TouchIdleResponse =
+  | { type: typeof TOUCH_IDLE_RESPONSE; ok: true }
+  | { type: typeof TOUCH_IDLE_RESPONSE; ok: false; error: string };
+
+export function isTouchIdleRequest(value: unknown): value is TouchIdleRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  return (value as Record<string, unknown>).type === TOUCH_IDLE_REQUEST;
+}
+
+export function isTouchIdleResponse(value: unknown): value is TouchIdleResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== TOUCH_IDLE_RESPONSE) return false;
+  if (v.ok === true) return true;
+  if (v.ok === false) return typeof v.error === 'string';
+  return false;
+}
+
+export const IS_BUSY_REQUEST = 'idle/is-busy-request' as const;
+export const IS_BUSY_RESPONSE = 'idle/is-busy-response' as const;
+
+/**
+ * Verify-idle probe (ADR-P9). Sent SW-to-offscreen when the idle alarm fires:
+ * the offscreen document owns the live generation state, so the SW asks whether
+ * a generation is in flight before closing. The offscreen document only REPORTS
+ * its `generationGate.busy` state and never closes itself (constraint 3). A
+ * malformed/absent reply is treated as not-busy by the SW (a gone document is
+ * idle-and-closable).
+ */
+export interface IsBusyRequest {
+  type: typeof IS_BUSY_REQUEST;
+}
+
+export type IsBusyResponse =
+  | { type: typeof IS_BUSY_RESPONSE; ok: true; busy: boolean }
+  | { type: typeof IS_BUSY_RESPONSE; ok: false; error: string };
+
+export function isIsBusyRequest(value: unknown): value is IsBusyRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  return (value as Record<string, unknown>).type === IS_BUSY_REQUEST;
+}
+
+export function isIsBusyResponse(value: unknown): value is IsBusyResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== IS_BUSY_RESPONSE) return false;
+  if (v.ok === true) return typeof v.busy === 'boolean';
+  if (v.ok === false) return typeof v.error === 'string';
+  return false;
+}
+
 export const COUNT_TOKENS_REQUEST = 'offscreen/count-tokens-request' as const;
 export const COUNT_TOKENS_RESPONSE = 'offscreen/count-tokens-response' as const;
 
