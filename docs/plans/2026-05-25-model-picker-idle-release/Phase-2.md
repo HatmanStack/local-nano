@@ -137,13 +137,13 @@ Estimated tokens: ~35,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] With an empty preference store, `ensureWarm` walks the same ladder as
+> - [x] With an empty preference store, `ensureWarm` walks the same ladder as
 >       before (existing session tests still pass).
-> - [ ] With a stored non-default model id matching a catalog entry, the first
+> - [x] With a stored non-default model id matching a catalog entry, the first
 >       attempted tier is the chosen model's first tier.
-> - [ ] With a stored unknown model id, the walk falls back to the no-preference
+> - [x] With a stored unknown model id, the walk falls back to the no-preference
 >       ladder (no crash, no empty ladder).
-> - [ ] `chosenModel` in the diagnostic reflects the resolved model.
+> - [x] `chosenModel` in the diagnostic reflects the resolved model.
 >
 > **Testing Instructions:**
 >

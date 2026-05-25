@@ -904,6 +904,104 @@ describe('initSession — fallback ladder', () => {
   });
 });
 
+describe('initSession — model preference resolves the chosen-model ladder', () => {
+  const MODEL_PREF_KEY = 'local-nano:model-pref:v1';
+  const QWEN25_05B = 'onnx-community/Qwen2.5-0.5B-Instruct';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  it('with an empty preference store walks the same primary ladder as before', async () => {
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    // No preference: tier 0 is the primary model at q4f16 (today's behavior).
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
+    expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
+    expect(firstTier.dtype).toBe('q4f16');
+  });
+
+  it('with a stored non-default model id heads the walk with that model first tier', async () => {
+    // Seed a preference for the non-gated Qwen2.5-0.5B catalog entry, whose only
+    // tier is wasm/q8. The first attempted tier must be that model, not gemma.
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: QWEN25_05B,
+      idleTimeoutMinutes: 15,
+    };
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
+    expect(firstTier.modelName).toBe(QWEN25_05B);
+    expect(firstTier.dtype).toBe('q8');
+  });
+
+  it('with a stored unknown model id falls back to the no-preference ladder (no crash)', async () => {
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: 'org/not-in-the-catalog',
+      idleTimeoutMinutes: 15,
+    };
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    // Unknown id resolves to null -> no-preference path -> primary tier 0.
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
+    expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
+    expect(firstTier.dtype).toBe('q4f16');
+  });
+
+  it('reflects the resolved chosen model in the diagnostic chosenModel field', async () => {
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: QWEN25_05B,
+      idleTimeoutMinutes: 15,
+    };
+    const writeText = vi.fn((_t: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      warmupSessionMock.mockResolvedValue(undefined);
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      const copyBtn = Array.from(deps._root.querySelectorAll('button')).find(
+        (b) => b.textContent === 'Copy diagnostic',
+      ) as HTMLButtonElement;
+      copyBtn.click();
+      await flushMicrotasks();
+      const copied = writeText.mock.calls[0][0] as string;
+      expect(copied).toContain(`chosenModel: ${QWEN25_05B}`);
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+});
+
 describe('initSession — network/download failure', () => {
   const CAPABILITY_KEY = 'local-nano:capability:v1';
 

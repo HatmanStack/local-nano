@@ -16,6 +16,7 @@ import {
   recordKnownBad,
   recordKnownGood,
 } from './offscreen/capability-store.js';
+import { findCatalogEntry, isLargerModelEnabled, isQwen3_08bEnabled } from './offscreen/catalog.js';
 import {
   countTokens,
   getGpuInfo,
@@ -28,13 +29,14 @@ import {
 import { buildDiagnostic, errorInfo, type LadderPathEntry } from './offscreen/diagnostic.js';
 import { classifyFailure, classifyLoadFailure } from './offscreen/failure.js';
 import {
-  assembleLadder,
+  assembleLadderForModel,
   firstTierIndex,
   isSmallerModelEnabled,
   nextAction,
   type Tier,
   tierKey,
 } from './offscreen/ladder.js';
+import { loadModelPref, resolveModelId } from './offscreen/model-pref.js';
 import {
   formatProgressText,
   GPU_LOADING_TEXT,
@@ -1102,12 +1104,30 @@ export function initSession(deps: SessionDeps): void {
       }
 
       // Classify device capability from the (possibly conservative) snapshot
-      // and assemble the ladder accordingly (ADR-R8/R9). With the smaller-model
-      // flag off, `assembleLadder` returns the primary ladder unchanged, so the
-      // loop below is behaviorally identical to the primary-only path; the
-      // capability verdict only feeds the diagnostic until the flag is enabled.
+      // and assemble the ladder accordingly (ADR-R8/R9). The chosen model heads
+      // the walk when a preference is stored; otherwise this is identical to the
+      // primary-only path (ADR-P4). With the smaller-model flag off and no
+      // preference, `assembleLadderForModel` returns the primary ladder
+      // unchanged, so the loop below is behaviorally identical to today; the
+      // capability verdict only feeds the diagnostic until a flag is enabled.
       const capability = classifyCapability(lastGpuInfo);
-      const ladder = assembleLadder({
+      // Resolve the stored model preference into a catalog entry. An empty
+      // preference or an unknown/stale stored id resolves to null, which
+      // `assembleLadderForModel` treats as "no preference" (today's auto-pick,
+      // ADR-P4). The gate seams are read so a future enabled gate surfaces its
+      // entry; production gates are off, so only the two non-gated entries
+      // resolve.
+      const pref = await loadModelPref();
+      const prefId = resolveModelId(pref);
+      const entry =
+        prefId === null
+          ? null
+          : findCatalogEntry(prefId, {
+              qwen3Enabled: isQwen3_08bEnabled(),
+              largerEnabled: isLargerModelEnabled(),
+            });
+      const ladder = assembleLadderForModel({
+        entry,
         capability,
         smallerEnabled: isSmallerModelEnabled(),
       });
