@@ -221,11 +221,11 @@ Estimated tokens: ~45,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] `classifyOffscreenMessage` returns `'is-busy'` for an is-busy request and
+> - [x] `classifyOffscreenMessage` returns `'is-busy'` for an is-busy request and
 >       null for foreign messages.
-> - [ ] The offscreen handler replies `busy: true` while the gate is held and
+> - [x] The offscreen handler replies `busy: true` while the gate is held and
 >       `busy: false` otherwise.
-> - [ ] No `closeDocument`/`window.close`/self-teardown is added to
+> - [x] No `closeDocument`/`window.close`/self-teardown is added to
 >       `offscreen.ts`.
 >
 > **Testing Instructions:**
