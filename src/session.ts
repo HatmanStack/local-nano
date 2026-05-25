@@ -31,6 +31,7 @@ import {
   recreateOffscreen,
   streamPrompt,
   subscribeProgress,
+  touchIdle,
   warmupSession,
 } from './offscreen/client.js';
 import { buildDiagnostic, errorInfo, type LadderPathEntry } from './offscreen/diagnostic.js';
@@ -497,6 +498,12 @@ export function initSession(deps: SessionDeps): SessionController {
 
     activeAbort = new AbortController();
     setGeneratingState(actionBtn, i);
+    // Reset the idle-release window on generation START (decision 9). The SW
+    // measures the inactivity timeout from the last generation; firing here
+    // re-arms it as soon as a turn begins. Fire-and-forget: never awaited in the
+    // hot path, and `touchIdle` already swallows its own errors so a failed
+    // schedule cannot break the send.
+    void touchIdle();
 
     let modelText = '';
     let firstChunk = true;
@@ -546,6 +553,12 @@ export function initSession(deps: SessionDeps): SessionController {
       }
       setIdleState(actionBtn, i);
       activeAbort = null;
+      // Re-arm the idle-release window after the LAST token (decision 9): the
+      // inactivity countdown starts from the END of generation, not the start.
+      // The SW verify-idle reschedules if a stream is still in flight when the
+      // alarm fires, so this post-completion touch is what opens the real
+      // window. Fire-and-forget; self-swallowing.
+      void touchIdle();
       // Re-enable a Load the user queued while this stream was in flight (ADR-P7).
       refreshPopoverControls();
       try {

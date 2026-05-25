@@ -388,10 +388,10 @@ Estimated tokens: ~45,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] A completed generation results in at least one `touchIdle` (TOUCH_IDLE
+> - [x] A completed generation results in at least one `touchIdle` (TOUCH_IDLE
 >       sendMessage) call.
-> - [ ] Panel-open alone (toggle) does NOT fire touch-idle.
-> - [ ] `touchIdle` failures do not affect the stream outcome (it is voided and
+> - [x] Panel-open alone (toggle) does NOT fire touch-idle.
+> - [x] `touchIdle` failures do not affect the stream outcome (it is voided and
 >       self-swallowing).
 >
 > **Testing Instructions:**

@@ -46,6 +46,7 @@ vi.mock('../src/offscreen/client.js', () => ({
   recreateOffscreen: vi.fn(() => Promise.resolve()),
   countTokens: vi.fn(async (text: string) => Math.ceil(text.length / 3)),
   warmupSession: vi.fn(() => Promise.resolve()),
+  touchIdle: vi.fn(() => Promise.resolve()),
   subscribeProgress: vi.fn((_onFrame: (loaded: number, total: number) => void) => () => undefined),
   getGpuInfo: vi.fn(async () => ({
     device: 'webgpu' as const,
@@ -62,6 +63,7 @@ import {
   recreateOffscreen as mockedRecreateOffscreen,
   streamPrompt as mockedStreamPrompt,
   subscribeProgress as mockedSubscribeProgress,
+  touchIdle as mockedTouchIdle,
   warmupSession as mockedWarmupSession,
 } from '../src/offscreen/client.js';
 
@@ -70,6 +72,7 @@ const rebuildSessionMock = mockedRebuildSession as unknown as ReturnType<typeof 
 const recreateOffscreenMock = mockedRecreateOffscreen as unknown as ReturnType<typeof vi.fn>;
 const countTokensMock = mockedCountTokens as unknown as ReturnType<typeof vi.fn>;
 const warmupSessionMock = mockedWarmupSession as unknown as ReturnType<typeof vi.fn>;
+const touchIdleMock = mockedTouchIdle as unknown as ReturnType<typeof vi.fn>;
 const subscribeProgressMock = mockedSubscribeProgress as unknown as ReturnType<typeof vi.fn>;
 const getGpuInfoMock = mockedGetGpuInfo as unknown as ReturnType<typeof vi.fn>;
 
@@ -1442,6 +1445,47 @@ describe('initSession — streaming', () => {
     // Resolve the first
     first.resolve('done');
     await flushMicrotasks();
+  });
+
+  it('fires touchIdle at least once for a completed generation (idle window from last gen)', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    expect(touchIdleMock).not.toHaveBeenCalled();
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    // Touch on START (the SW reschedules the alarm as soon as a turn begins).
+    expect(touchIdleMock.mock.calls.length).toBeGreaterThanOrEqual(1);
+    call.resolve('done');
+    await flushMicrotasks();
+    // And again on completion, so the window re-arms from the last token.
+    expect(touchIdleMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('does not fire touchIdle on a bare panel-open toggle (measured from generation, not open)', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE); // open -> warmup, no generation
+    await flushMicrotasks();
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    expect(touchIdleMock).not.toHaveBeenCalled();
+  });
+
+  it('a touchIdle rejection does not affect the stream outcome (voided, self-swallowing)', async () => {
+    // touchIdle is fire-and-forget and self-swallowing; even if it rejected the
+    // send must still complete and render normally.
+    touchIdleMock.mockRejectedValue(new Error('schedule failed'));
+    const deps = makeDeps();
+    initSession(deps);
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('the answer');
+    call.resolve('the answer');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('the answer');
   });
 });
 
