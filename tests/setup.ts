@@ -96,8 +96,31 @@ export class FakePort {
 
 const local = new FakeStorageArea();
 
+/**
+ * Minimal `chrome.alarms` stand-in for tests (Task 4.1). The SW registers one
+ * `onAlarm` listener; `_fireAlarm(name)` invokes the captured listener with a
+ * named-alarm payload so a test can drive the idle-release path without a real
+ * Chrome alarm. `create` and `clear` are spies the scheduler tests assert.
+ */
+const alarmListeners: Array<(alarm: { name: string }) => void> = [];
+
+const alarms = {
+  create: vi.fn((_name: string, _info: unknown) => undefined),
+  clear: vi.fn(async (_name?: string) => true),
+  onAlarm: {
+    addListener: vi.fn((l: (alarm: { name: string }) => void) => {
+      alarmListeners.push(l);
+    }),
+  },
+  /** Test helper: fire every registered onAlarm listener with a named alarm. */
+  _fireAlarm(name: string) {
+    for (const l of alarmListeners) l({ name });
+  },
+};
+
 const chromeMock = {
   storage: { local },
+  alarms,
   runtime: {
     getURL: vi.fn((p: string) => `chrome-extension://test/${p}`),
     getManifest: vi.fn(() => ({ version: '0.2.4' })),
@@ -146,6 +169,11 @@ beforeEach(() => {
   chromeMock.offscreen.closeDocument.mockImplementation(async () => undefined);
   chromeMock.offscreen.hasDocument.mockClear();
   chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+  chromeMock.alarms.create.mockClear();
+  chromeMock.alarms.clear.mockClear();
+  chromeMock.alarms.clear.mockImplementation(async (_name?: string) => true);
+  chromeMock.alarms.onAlarm.addListener.mockClear();
+  alarmListeners.length = 0;
   // Default tabs.query implementation — overridable per-test.
   chromeMock.tabs.query.mockImplementation(
     (_q: unknown, cb: (tabs: Array<{ id?: number }>) => void) => cb([{ id: 1 }]),
