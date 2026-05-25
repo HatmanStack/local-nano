@@ -109,12 +109,12 @@ Estimated tokens: ~45,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] `alarmWhen(1000, 5)` equals `1000 + 300000`.
-> - [ ] `decideIdleAction({ busy: true, timeoutMinutes: 15 })` is reschedule(15).
-> - [ ] `decideIdleAction({ busy: false, timeoutMinutes: 15 })` is close.
-> - [ ] `decideIdleAction({ busy: false, timeoutMinutes: null })` is noop.
-> - [ ] `shouldScheduleOnTouch(null)` is false; `shouldScheduleOnTouch(5)` true.
-> - [ ] No Chrome/polyfill/timer import.
+> - [x] `alarmWhen(1000, 5)` equals `1000 + 300000`.
+> - [x] `decideIdleAction({ busy: true, timeoutMinutes: 15 })` is reschedule(15).
+> - [x] `decideIdleAction({ busy: false, timeoutMinutes: 15 })` is close.
+> - [x] `decideIdleAction({ busy: false, timeoutMinutes: null })` is noop.
+> - [x] `shouldScheduleOnTouch(null)` is false; `shouldScheduleOnTouch(5)` true.
+> - [x] No Chrome/polyfill/timer import.
 >
 > **Testing Instructions:**
 >

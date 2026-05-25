@@ -31,6 +31,7 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 | `tests/offscreen-ladder.test.ts`     | `nextAction`/`firstTierIndex`/`tierKey`/`applyTierToConfig` fallback-ladder reducer |
 | `tests/offscreen-catalog.test.ts`    | `listCatalog`/`findCatalogEntry` curated model catalog, gate flags, vetted-cell discipline |
 | `tests/offscreen-model-pref.test.ts` | `loadModelPref`/`saveModelPref`/`setModelId`/`setIdleTimeoutMinutes`/`isModelPref` version-surviving preference store |
+| `tests/offscreen-idle-policy.test.ts` | `IDLE_ALARM_NAME`/`alarmWhen`/`decideIdleAction`/`shouldScheduleOnTouch` pure idle-release decision and alarm-time math |
 | `tests/capability.test.ts`           | `classifyCapability`/`CAPABLE_MIN_BUFFER_BYTES` pure device-capability classifier |
 | `tests/capability-store.test.ts`     | `loadCapabilityRecord`/`recordKnownGood`/`recordKnownBad`/`clearCapabilityRecord` per-device tier persistence |
 | `tests/offscreen-failure.test.ts`    | `classifyFailure`/`classifyLoadFailure`/`isTerminalFailure` terminal/transient/network seam |
