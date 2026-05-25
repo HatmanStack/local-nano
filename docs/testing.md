@@ -29,6 +29,7 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 | `tests/offscreen-protocol.test.ts`   | Wire-message discriminators and finiteness guards (incl. `isProgressFrame`) |
 | `tests/offscreen-dispatch.test.ts`   | `classifyOffscreenMessage` listener routing  |
 | `tests/offscreen-ladder.test.ts`     | `nextAction`/`firstTierIndex`/`tierKey`/`applyTierToConfig` fallback-ladder reducer |
+| `tests/offscreen-catalog.test.ts`    | `listCatalog`/`findCatalogEntry` curated model catalog, gate flags, vetted-cell discipline |
 | `tests/capability.test.ts`           | `classifyCapability`/`CAPABLE_MIN_BUFFER_BYTES` pure device-capability classifier |
 | `tests/capability-store.test.ts`     | `loadCapabilityRecord`/`recordKnownGood`/`recordKnownBad`/`clearCapabilityRecord` per-device tier persistence |
 | `tests/offscreen-failure.test.ts`    | `classifyFailure`/`classifyLoadFailure`/`isTerminalFailure` terminal/transient/network seam |
