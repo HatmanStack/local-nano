@@ -1072,6 +1072,32 @@ describe('initSession — copy-diagnostic affordance', () => {
     }
   });
 
+  it('does not throw on copy when the extension context is invalidated', async () => {
+    const writeText = vi.fn((_t: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    // Orphaned content script: the extension was reloaded/updated, so
+    // chrome.runtime.getManifest() now throws synchronously. The copy click
+    // handler must not surface that as an uncaught error.
+    chromeMock.runtime.getManifest.mockImplementation(() => {
+      throw new Error('Extension context invalidated.');
+    });
+    try {
+      const deps = makeDeps();
+      initSession(deps);
+      const btn = findCopyButton(deps._root);
+      expect(() => btn.click()).not.toThrow();
+      await flushMicrotasks();
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText.mock.calls[0][0] as string).toContain('extensionVersion: unknown');
+      expect(btn.textContent).toBe('Copied');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
   it('falls back to execCommand when clipboard.writeText rejects', async () => {
     const writeText = vi.fn(() => Promise.reject(new Error('denied')));
     Object.defineProperty(navigator, 'clipboard', {

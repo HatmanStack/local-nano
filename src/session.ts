@@ -162,6 +162,13 @@ export function isQuotaError(err: unknown): boolean {
  */
 export interface SessionDeps {
   root: HTMLElement;
+  /**
+   * The draggable panel header bar (content.ts). When provided, the
+   * always-available Copy-diagnostic control is inserted here, left of the
+   * close button, so it never overlays the close button. Optional: when
+   * omitted (e.g. in tests) the control falls back to the panel root.
+   */
+  header?: HTMLElement;
   messages: HTMLElement;
   input: HTMLInputElement;
   actionBtn: HTMLButtonElement;
@@ -182,9 +189,25 @@ export interface SessionDeps {
   document: Pick<Document, 'title'> & { body: { innerText: string } };
 }
 
+/**
+ * The extension version, or `'unknown'` if the extension context has been
+ * invalidated (the extension was reloaded or auto-updated while this content
+ * script's tab stayed open). `chrome.runtime.getManifest()` throws synchronously
+ * once the context is gone, which — called from a click handler like the
+ * Copy-diagnostic button — would otherwise surface as an uncaught error.
+ */
+function safeManifestVersion(): string {
+  try {
+    return chrome.runtime.getManifest().version;
+  } catch {
+    return 'unknown';
+  }
+}
+
 export function initSession(deps: SessionDeps): void {
   const {
     root,
+    header,
     messages,
     input: i,
     actionBtn,
@@ -802,7 +825,7 @@ export function initSession(deps: SessionDeps): void {
       ladderPath: ladderPath.slice(),
       errorClass,
       errorMessage,
-      extensionVersion: chrome.runtime.getManifest().version,
+      extensionVersion: safeManifestVersion(),
       userAgent: navigator.userAgent,
     };
   }
@@ -968,11 +991,12 @@ export function initSession(deps: SessionDeps): void {
     const btn = window.document.createElement('button');
     btn.textContent = 'Copy diagnostic';
     btn.setAttribute('aria-label', 'Copy diagnostic to clipboard');
-    // Muted, unobtrusive, top-right of the panel root, consistent with BUTTON_CSS
-    // but quieter so it never competes with the chat. Absolute within the
-    // position: fixed panel root so it does not disturb the chat flex layout.
+    // Muted, unobtrusive header control (inserted into the panel header, left of
+    // the close button), consistent with BUTTON_CSS but quieter so it never
+    // competes with the chat. No absolute positioning: it lives in the header
+    // flow, so it never overlays the close button.
     btn.style.cssText =
-      'position: absolute; top: 4px; right: 4px; z-index: 1; padding: 1px 6px; font: inherit; font-size: 11px; cursor: pointer; background: transparent; color: #999; border: 1px solid #555; border-radius: 4px;';
+      'flex-shrink: 0; padding: 1px 6px; font: inherit; font-size: 11px; cursor: pointer; background: transparent; color: #999; border: 1px solid #555; border-radius: 4px;';
     let restoreTimer: ReturnType<typeof setTimeout> | null = null;
     btn.addEventListener('click', () => {
       const text = buildDiagnostic(buildDiagnosticInput(lastWarmError));
@@ -1099,7 +1123,7 @@ export function initSession(deps: SessionDeps): void {
       // (ADR-R3/R4: never overlap; the prior generator's GPU memory is only freed
       // by recreating the document), then attempt the next rung. On exhaustion,
       // fall through to the terminal bubble.
-      const extensionVersion = chrome.runtime.getManifest().version;
+      const extensionVersion = safeManifestVersion();
       const record = await loadCapabilityRecord(extensionVersion);
       const knownBadKeys = new Set((record?.knownBad ?? []).map(tierKey));
       const knownGoodKey = record?.knownGood ? tierKey(record.knownGood) : null;
@@ -1205,9 +1229,15 @@ export function initSession(deps: SessionDeps): void {
   }
 
   // ---- Always-available copy-diagnostic affordance (ADR-R11, Task 5.3) ----
-  // Mounted on the panel root once, so it is present whenever the panel is open
-  // regardless of load state. Copy-only: nothing leaves the device.
-  root.appendChild(makeCopyDiagnosticAffordance());
+  // Present whenever the panel is open, regardless of load state. Copy-only:
+  // nothing leaves the device. Inserted into the header (left of the close
+  // button) when content.ts supplies it, so it never overlays the close button;
+  // falls back to the panel root otherwise (e.g. in tests).
+  {
+    const copyBtn = makeCopyDiagnosticAffordance();
+    if (header) header.insertBefore(copyBtn, header.lastElementChild);
+    else root.appendChild(copyBtn);
+  }
 
   // ---- Toggle listener ----
   let convertedAnchor = false;

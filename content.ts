@@ -38,12 +38,15 @@ const header = document.createElement('div');
 header.style.cssText = `
   padding: 6px 10px; background: #333;
   cursor: move; user-select: none;
-  display: flex; justify-content: space-between; align-items: center;
+  display: flex; justify-content: space-between; align-items: center; gap: 6px;
   border-radius: 7px 7px 0 0; flex-shrink: 0;
 `;
 const title = document.createElement('span');
 title.textContent = 'Local AI';
 title.style.fontWeight = '600';
+// Hug the left edge so any header controls (close button, and the session's
+// Copy-diagnostic button inserted into the header) group on the right.
+title.style.marginRight = 'auto';
 const closeBtn = document.createElement('button');
 closeBtn.textContent = '×';
 closeBtn.style.cssText = `
@@ -101,7 +104,9 @@ document.body.appendChild(root);
 // Attach mousemove/mouseup only while actively dragging so we don't fire on
 // every page mouse movement when the panel is idle.
 header.addEventListener('mousedown', (e) => {
-  if (e.target === closeBtn) return;
+  // Don't start a panel drag when the press lands on a header control — the
+  // close button or the session's Copy-diagnostic button inserted into the header.
+  if ((e.target as HTMLElement).closest('button')) return;
   const rect = root.getBoundingClientRect();
   const offX = e.clientX - rect.left;
   const offY = e.clientY - rect.top;
@@ -144,6 +149,7 @@ document.addEventListener('selectionchange', () => {
 
 initSession({
   root,
+  header,
   messages,
   input,
   actionBtn,
