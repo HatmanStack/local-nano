@@ -43,7 +43,13 @@ import {
   type Tier,
   tierKey,
 } from './offscreen/ladder.js';
-import { loadModelPref, resolveModelId } from './offscreen/model-pref.js';
+import {
+  DEFAULT_IDLE_TIMEOUT_MINUTES,
+  IDLE_TIMEOUT_OPTIONS,
+  loadModelPref,
+  resolveModelId,
+  setIdleTimeoutMinutes,
+} from './offscreen/model-pref.js';
 import {
   formatProgressText,
   GPU_LOADING_TEXT,
@@ -1422,6 +1428,13 @@ export function initSession(deps: SessionDeps): SessionController {
   // shows next time.
   let pendingModelId = DEFAULT_MODEL_ID;
 
+  // The currently-selected idle timeout (minutes, or null for "Never"). Unlike
+  // the model, the timeout is not a multi-GB action, so it persists immediately
+  // on change (ADR-P11); it does not wait for an explicit Load. Initialized from
+  // the stored preference on each open. Phase 4 reads the stored value when
+  // scheduling the alarm; this phase only persists it (no alarm wired here).
+  let selectedIdleMinutes: number | null = DEFAULT_IDLE_TIMEOUT_MINUTES;
+
   /**
    * Build one selectable model row (ADR-P12): displayName, download size, and
    * the docs/models.md note, marked when it is the pending selection. The
@@ -1455,11 +1468,61 @@ export function initSession(deps: SessionDeps): SessionController {
   }
 
   /**
+   * Map an idle-timeout option to a stable attribute token: the minute count, or
+   * `never` for the null ("release disabled") option. Used as the radio's
+   * `data-idle-minutes` value and to derive a unique input id.
+   */
+  function idleOptionToken(minutes: number | null): string {
+    return minutes === null ? 'never' : String(minutes);
+  }
+
+  /**
+   * Render the idle-timeout radio group (ADR-P11): 5/15/60 min and Never, with
+   * the stored/default option preselected. The timeout is not a multi-GB action,
+   * so a change persists immediately via `setIdleTimeoutMinutes` (null for
+   * Never) and triggers no reload or alarm. Phase 4 re-reads the persisted value
+   * on the next `touchIdle`; no live alarm reschedule is required here.
+   */
+  function renderIdleTimeoutGroup(parent: HTMLElement): void {
+    const heading = window.document.createElement('div');
+    heading.style.cssText = 'font-weight: 600; margin: 10px 0 6px;';
+    heading.textContent = 'Release model after';
+    parent.appendChild(heading);
+
+    const groupName = 'local-nano-idle-timeout';
+    for (const option of IDLE_TIMEOUT_OPTIONS) {
+      const token = idleOptionToken(option.minutes);
+      const label = window.document.createElement('label');
+      label.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 2px 0;';
+
+      const radio = window.document.createElement('input');
+      radio.type = 'radio';
+      radio.name = groupName;
+      radio.setAttribute('data-idle-minutes', token);
+      radio.checked = option.minutes === selectedIdleMinutes;
+      radio.addEventListener('change', () => {
+        if (!radio.checked) return;
+        selectedIdleMinutes = option.minutes;
+        // Persist immediately (ADR-P11). Fire-and-forget; a write failure logs
+        // but does not block the UI (the choice is non-critical).
+        void setIdleTimeoutMinutes(option.minutes).catch((err: unknown) => {
+          console.warn('[local-nano] idle-timeout persist failed:', err);
+        });
+      });
+
+      const text = window.document.createElement('span');
+      text.textContent = option.label;
+      label.append(radio, text);
+      parent.appendChild(label);
+    }
+  }
+
+  /**
    * Render the popover body from the current state: the visible catalog (gated
    * entries appear only when their gate flag is on, both off in production) as
-   * selectable rows. Called on each open (after the preference is read) and
-   * whenever the pending selection changes. Tasks 3.3/3.4 extend this with the
-   * idle-timeout group and the Load control.
+   * selectable rows, then the idle-timeout group. Called on each open (after the
+   * preference is read) and whenever the pending selection changes. Task 3.4
+   * extends this with the Load control.
    */
   function renderPopoverContent(): void {
     const content = settings.content;
@@ -1471,14 +1534,18 @@ export function initSession(deps: SessionDeps): SessionController {
     content.appendChild(modelHeading);
 
     for (const entry of listCatalog()) content.appendChild(buildModelRow(entry));
+
+    renderIdleTimeoutGroup(content);
   }
 
   /**
-   * Re-read the persisted preference and reset the pending selection to match,
-   * so each open reflects a Load committed since the last open. An unknown/stale
-   * stored id resolves to the default (ADR-P4) via the catalog gate seams.
+   * Re-read the persisted preference and reset the popover's pending model and
+   * selected idle timeout to match, so each open reflects a Load (or timeout
+   * change) committed since the last open. An unknown/stale stored model id
+   * resolves to the default (ADR-P4) via the catalog gate seams; the idle
+   * timeout falls back to the default when unset.
    */
-  async function syncCurrentModelFromPref(): Promise<void> {
+  async function syncPopoverFromPref(): Promise<void> {
     const pref = await loadModelPref();
     const storedId = resolveModelId(pref);
     const resolved =
@@ -1490,6 +1557,10 @@ export function initSession(deps: SessionDeps): SessionController {
         ? storedId
         : DEFAULT_MODEL_ID;
     pendingModelId = resolved;
+    // Use the loaded value directly: `loadModelPref` already returns the default
+    // (15) for a missing/invalid record, so a `null` here is a deliberate
+    // "Never" choice, not an unset field, and must not be coerced to the default.
+    selectedIdleMinutes = pref.idleTimeoutMinutes;
     renderPopoverContent();
   }
 
@@ -1498,7 +1569,7 @@ export function initSession(deps: SessionDeps): SessionController {
     // popover is never empty), then refresh once the async preference read
     // resolves. The read is fast (one storage.local.get).
     renderPopoverContent();
-    void syncCurrentModelFromPref();
+    void syncPopoverFromPref();
   });
   if (header) header.insertBefore(settings.gearBtn, header.lastElementChild);
   else root.appendChild(settings.gearBtn);

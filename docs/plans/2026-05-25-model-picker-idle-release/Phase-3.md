@@ -193,10 +193,10 @@ Estimated tokens: ~35,000.
 >
 > **Verification Checklist:**
 >
-> - [ ] The four options render; the stored/default option is preselected.
-> - [ ] Changing the option calls `setIdleTimeoutMinutes` with the right value
+> - [x] The four options render; the stored/default option is preselected.
+> - [x] Changing the option calls `setIdleTimeoutMinutes` with the right value
 >       (including `null` for "Never").
-> - [ ] No alarm or reload is triggered by changing the timeout.
+> - [x] No alarm or reload is triggered by changing the timeout.
 >
 > **Testing Instructions:**
 >

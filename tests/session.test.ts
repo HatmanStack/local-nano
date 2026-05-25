@@ -2522,3 +2522,102 @@ describe('initSession — popover model list', () => {
     reloadSpy.mockRestore();
   });
 });
+
+function idleRadios(popover: HTMLElement): HTMLInputElement[] {
+  return Array.from(popover.querySelectorAll<HTMLInputElement>('input[data-idle-minutes]'));
+}
+
+function idleRadio(popover: HTMLElement, value: string): HTMLInputElement {
+  const el = popover.querySelector<HTMLInputElement>(`input[data-idle-minutes="${value}"]`);
+  if (!el) throw new Error(`idle radio not found for ${value}`);
+  return el;
+}
+
+describe('initSession — popover idle-timeout selector', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+  });
+
+  it('renders the four idle-timeout options', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const values = idleRadios(popover).map((r) => r.getAttribute('data-idle-minutes'));
+    expect(values).toEqual(['5', '15', '60', 'never']);
+  });
+
+  it('preselects 15 min by default when no preference is stored', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    expect(idleRadio(popover, '15').checked).toBe(true);
+    expect(idleRadio(popover, '5').checked).toBe(false);
+  });
+
+  it('preselects the stored option (including Never)', async () => {
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: null,
+      idleTimeoutMinutes: null,
+    };
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    expect(idleRadio(popover, 'never').checked).toBe(true);
+    expect(idleRadio(popover, '15').checked).toBe(false);
+  });
+
+  it('persists the chosen minute value immediately on change', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const fiveMin = idleRadio(popover, '5');
+    fiveMin.checked = true;
+    fiveMin.dispatchEvent(new Event('change', { bubbles: true }));
+    await flushMicrotasks();
+    const stored = chromeMock.storage.local.store[MODEL_PREF_KEY] as {
+      idleTimeoutMinutes: number | null;
+    };
+    expect(stored.idleTimeoutMinutes).toBe(5);
+  });
+
+  it('stores null when "Never" is chosen', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const never = idleRadio(popover, 'never');
+    never.checked = true;
+    never.dispatchEvent(new Event('change', { bubbles: true }));
+    await flushMicrotasks();
+    const stored = chromeMock.storage.local.store[MODEL_PREF_KEY] as {
+      idleTimeoutMinutes: number | null;
+    };
+    expect(stored.idleTimeoutMinutes).toBeNull();
+  });
+
+  it('changing the timeout triggers no reload or recreate', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    const sixtyMin = idleRadio(popover, '60');
+    sixtyMin.checked = true;
+    sixtyMin.dispatchEvent(new Event('change', { bubbles: true }));
+    await flushMicrotasks();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+  });
+});
