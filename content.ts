@@ -42,7 +42,7 @@ header.style.cssText = `
   border-radius: 7px 7px 0 0; flex-shrink: 0;
 `;
 const title = document.createElement('span');
-title.textContent = 'Local AI';
+title.textContent = 'Local Nano';
 title.style.fontWeight = '600';
 // Hug the left edge so any header controls (close button, and the session's
 // Copy-diagnostic button inserted into the header) group on the right.

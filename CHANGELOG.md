@@ -5,6 +5,32 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-24
+
+Hardens the model-load path for a wide Chrome Web Store audience. When the model can't load on a device, it now self-heals through a dtype/device fallback ladder, picks a model by device capability, shows real download progress, and — when nothing works — fails with a clear, actionable message and a copyable diagnostic instead of a silent dead panel. Also renames the extension to **Local Nano** to match its branding.
+
+### Added
+
+- **Automatic dtype/device fallback ladder.** On a model-LOAD failure the panel walks `q4f16 → q8 → fp16` on WebGPU, then `q8` on WASM, recreating the offscreen document between rungs so a crashed or GPU-poisoned document never blocks the next attempt and two loads never overlap. The resolved tier is persisted per device (`chrome.storage.local`, key `local-nano:capability:v1`) so a later cold start skips straight to a known-good tier and avoids a deterministically crashing one. Auto-fallback applies only at load time; a mid-stream/runtime error never auto-rebuilds.
+- **Capability-based model selection.** The WebGPU adapter (max buffer size / software-fallback) is classified at first load so a smaller model can be chosen for weak devices. The smaller-model rung ships gated off (`SMALLER_MODEL_ENABLED = false`) pending manual WebGPU vetting; the live default remains `onnx-community/gemma-4-E2B-it-ONNX`.
+- **Phased first-run download progress.** "Downloading model NN%" driven by the polyfill's real `downloadprogress`, then an indeterminate "Loading into GPU…" phase, relayed from the offscreen document to the panel.
+- **Graceful terminal failure + manual recovery.** A model-load crash (the offscreen document can hard-crash, not just throw) is detected client-side and surfaced as an actionable in-panel message with a manual Retry that force-recreates the offscreen document — never the old churny auto-rebuild. A weights-download/network failure gets a distinct, retryable "check your connection" message.
+- **Copy-only diagnostic.** An always-available, copyable diagnostic (device, adapter limits, chosen model + active dtype tier, the ladder path taken, error class, extension/Chrome version). Nothing leaves the device — copy-to-clipboard only.
+
+### Changed
+
+- **Renamed to "Local Nano"** in the manifest and the in-panel window header, matching the repo and hero-art branding.
+
+### Fixed
+
+- 4xx HTTP statuses from the weights fetch (e.g. 403 gated, 404 bad id) are permanent for the tier and now advance the ladder rather than looping on a misleading "check your connection"; 5xx remains a retryable network condition.
+- The Copy-diagnostic control lives in the panel header instead of overlaying the close button, and clicking it after the extension context is invalidated (reload or auto-update) no longer throws — `chrome.runtime.getManifest()` is read defensively.
+
+### Notes
+
+- **`onnxruntime-web` stays pinned to the dev build `1.26.0-dev.20260416-b7804b056c`** — the exact build `@huggingface/transformers@4.2.0` depends on, so they dedupe to one copy. Stable `1.26.0` was evaluated and rejected for this release: it did not fix the q4 SIGILL, and pinning it would de-duplicate the runtime (transformers keeps its dev pin) and mismatch the bundled `dist/ort/` wasm against the ORT JS transformers actually loads. The pin is intentional; revisit only alongside a transformers upgrade plus a full WebGPU smoke pass.
+- All inference still runs on-device; the only network access is the one-time model-weights download from Hugging Face.
+
 ## [0.2.4] - 2026-05-23
 
 Polishes the selection-rewrite UX and prepares the first Chrome Web Store submission. An earlier automatic GPU-OOM "guard" (zero-chunk-as-failure + session teardown + rebuild-and-retry) was removed: on a memory-constrained adapter the session churn tended to make out-of-memory worse, not better. The session now loads once and is never auto-destroyed; GPU errors surface plainly instead.

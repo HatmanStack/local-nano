@@ -4,7 +4,7 @@ Working notes and copy for publishing this extension. Build the upload with `npm
 
 ## Listing fields
 
-- **Name:** `Local AI Cmd` (manifest `name`). The repo and hero art brand it "local-nano" / "LOCAL NANO" — decide whether the store name should match the brand before first publish; renaming after launch is allowed but churns the listing URL slug only if the ID changes (it won't).
+- **Name:** `Local Nano` (manifest `name` and the in-panel window header), matching the repo and hero-art branding.
 - **Summary (≤132 chars):** On-device AI assistant. Ask about any page or rewrite highlighted text in place — runs a local LLM in your browser, nothing leaves your device.
 - **Category:** Productivity (alt: Developer Tools).
 - **Language:** English.
@@ -12,7 +12,7 @@ Working notes and copy for publishing this extension. Build the upload with `npm
 
 ### Detailed description (draft)
 
-> Local AI Cmd puts a private AI assistant one keypress away on every page — and it runs the model entirely in your browser. No account, no API key, no data sent to a server.
+> Local Nano puts a private AI assistant one keypress away on every page — and it runs the model entirely in your browser. No account, no API key, no data sent to a server.
 >
 > Press Ctrl+Shift+K (Cmd+Shift+K on Mac) to open the panel. Ask a question about the page you're on, or highlight a sentence and tell it how to rewrite it — the rewrite streams directly back into the page.
 >
@@ -46,7 +46,7 @@ Note: `activeTab` and `scripting` were removed — the declarative `<all_urls>` 
 - [x] Icon — `icons/icon{16,32,48,128}.png`, generated from `icons/icon-source.png` via ffmpeg in `scripts/make-icons.mjs` (`npm run icons`). There is no `icons/icon.svg`. Wired into `manifest.json`.
 - [ ] **Screenshots** — 1280×800 (or 640×400) PNG/JPG, at least one. Capture the panel open on a real page: (1) asking a question about the page, (2) a highlighted-text rewrite mid-stream with the Undo/Accept bar. Requires running the unpacked extension in Chrome.
 - [ ] **Small promo tile** (optional, 440×280) — only needed for featuring.
-- [ ] Store name decision (keep "Local AI Cmd" vs. rebrand to "Local Nano").
+- [x] Store name decision — **Local Nano** (manifest `name`, in-panel window header, and listing all aligned).
 
 ## Pre-submit smoke test
 
