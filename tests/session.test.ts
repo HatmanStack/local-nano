@@ -1475,7 +1475,7 @@ describe('initSession — streaming', () => {
   it('a touchIdle rejection does not affect the stream outcome (voided, self-swallowing)', async () => {
     // touchIdle is fire-and-forget and self-swallowing; even if it rejected the
     // send must still complete and render normally.
-    touchIdleMock.mockRejectedValue(new Error('schedule failed'));
+    touchIdleMock.mockRejectedValueOnce(new Error('schedule failed'));
     const deps = makeDeps();
     initSession(deps);
     deps._input.value = 'hi';
@@ -1486,6 +1486,27 @@ describe('initSession — streaming', () => {
     await flushMicrotasks();
     const modelBubble = deps._messages.children[1];
     expect(modelBubble?.textContent).toBe('the answer');
+  });
+
+  it('keeps Stop available during a cold-start send (proactive re-warm)', async () => {
+    // Cold start: no panel-open warm, so modelReady is false and the send path
+    // runs the proactive ensureWarm. runWarm leaves the button "Loading"
+    // (disabled) and its activeAbort-guarded finally skips the idle-restore, so
+    // without re-asserting the generating state Stop would be hidden for the
+    // ENTIRE stream. Verify Stop is interactive before the stream resolves.
+    const deps = makeDeps();
+    initSession(deps);
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    // The cold-start re-warm actually ran (distinguishes it from a warm-already
+    // path, where the proactive block is skipped entirely).
+    expect(warmupSessionMock).toHaveBeenCalled();
+    // Stop is interactive while the stream is in flight.
+    expect(deps._actionBtn.textContent).toBe('Stop');
+    expect(deps._actionBtn.disabled).toBe(false);
+    call.resolve('answer');
+    await flushMicrotasks();
   });
 });
 

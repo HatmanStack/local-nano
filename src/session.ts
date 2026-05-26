@@ -529,6 +529,13 @@ export function initSession(deps: SessionDeps): SessionController {
     if (!modelReady && !reWarmInFlight) {
       try {
         await ensureWarm();
+        // runWarm leaves the button in the disabled "Loading" state, and its
+        // finally skips the idle-restore while activeAbort is set — so without
+        // re-asserting here the Stop affordance would be gone for the ENTIRE
+        // stream that follows. Re-apply the generating state, but only when the
+        // model actually came up; a failed warm leaves its own terminal/network
+        // UI and the stream attempt below drives the reactive recovery.
+        if (modelReady) setGeneratingState(actionBtn, i);
       } catch {
         // ensureWarm renders its own failure UI (terminal/network bubble); the
         // stream attempt below will surface a closed-doc error if it is still
@@ -1704,6 +1711,14 @@ export function initSession(deps: SessionDeps): SessionController {
     try {
       await setModelId(target);
       await reloadModel();
+      // reloadModel resolves even when the ladder failed to load: ensureWarm
+      // renders its own terminal/network bubble and resolves rather than
+      // throwing, so promise resolution is NOT proof the model came up. Verify
+      // modelReady before committing; on failure, throw so the catch reverts the
+      // stored preference and the popover stays open for another choice.
+      if (!modelReady) {
+        throw new Error('model did not become ready after switch');
+      }
       // The switch landed: the new id is the current selection, and the popover
       // re-reads it on next open. Close it now.
       currentModelId = target;

@@ -100,6 +100,14 @@ describe('loadModelPref', () => {
     await saveModelPref(pref);
     await expect(loadModelPref()).resolves.toEqual(pref);
   });
+
+  it('rejects a malformed payload instead of persisting it', async () => {
+    await expect(
+      saveModelPref({ modelId: 7, idleTimeoutMinutes: 'soon' } as unknown as ModelPref),
+    ).rejects.toThrow(TypeError);
+    // The write-boundary guard means nothing was persisted under the key.
+    expect(chromeMock.storage.local.store[MODEL_PREF_KEY]).toBeUndefined();
+  });
 });
 
 describe('mutators', () => {

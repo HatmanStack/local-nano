@@ -92,6 +92,10 @@ export async function loadModelPref(): Promise<ModelPref> {
 
 /** Validate then write the full record under the key. */
 export async function saveModelPref(pref: ModelPref): Promise<void> {
+  // Guard the write boundary so a runtime/JS caller bypassing the TS type cannot
+  // persist a malformed preference. The matching read guard (`isModelPref` in
+  // `loadModelPref`) self-heals on read; this keeps the stored blob clean too.
+  if (!isModelPref(pref)) throw new TypeError('Invalid model preference payload');
   await chrome.storage.local.set({ [MODEL_PREF_KEY]: pref });
 }
 
