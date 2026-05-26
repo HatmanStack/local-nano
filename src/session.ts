@@ -851,6 +851,12 @@ export function initSession(deps: SessionDeps): SessionController {
   // offscreen `ensureSession` singleton handles cross-tab dedupe.
   let warmStarted = false;
   let modelReady = false;
+  // The in-flight warm walk, or null when none is running. Lets concurrent
+  // callers (panel-open, the proactive send-path, and the serialized
+  // `reloadModel`) coalesce onto ONE walk, and lets `reloadModel` wait for an
+  // in-flight panel-open warm before tearing the document down, so two loads
+  // never overlap (constraint 1 / ADR-P6).
+  let warmInFlight: Promise<void> | null = null;
   // Captured during the ensureWarm preflight so the failure path can feed the
   // diagnostic the same adapter snapshot the load saw. Conservative default
   // (ADR-R11 / Task 1.4) until the preflight resolves.
@@ -1208,8 +1214,20 @@ export function initSession(deps: SessionDeps): SessionController {
     await warmupSession(tier);
   }
 
-  async function ensureWarm(): Promise<void> {
-    if (warmStarted) return;
+  function ensureWarm(): Promise<void> {
+    // Coalesce onto an in-flight walk so panel-open, the proactive send-path,
+    // and the serialized `reloadModel` never start a second concurrent load
+    // (constraint 1 / ADR-P6). A finished warm (warmStarted true, none in
+    // flight) stays a no-op, exactly as before.
+    if (warmInFlight) return warmInFlight;
+    if (warmStarted) return Promise.resolve();
+    warmInFlight = runWarm().finally(() => {
+      warmInFlight = null;
+    });
+    return warmInFlight;
+  }
+
+  async function runWarm(): Promise<void> {
     warmStarted = true;
     setLoadingState(actionBtn, i);
     // A live elapsed counter while the model loads. We deliberately do
@@ -1331,8 +1349,21 @@ export function initSession(deps: SessionDeps): SessionController {
       const record = await loadCapabilityRecord(extensionVersion);
       const knownBadKeys = new Set((record?.knownBad ?? []).map(tierKey));
       const knownGoodKey = record?.knownGood ? tierKey(record.knownGood) : null;
+      // When the user explicitly chose a model (entry !== null), only honor a
+      // persisted known-good tier that belongs to THAT model. The assembled
+      // ladder appends other models' tiers after the chosen model's, so a
+      // known-good key from a previously-used model would otherwise make
+      // firstTierIndex jump past the user's selection and load the old model
+      // (ADR-P4: the selection heads the ladder). With no preference
+      // (entry === null) the prior behavior is unchanged.
+      const effectiveKnownGoodKey =
+        entry !== null &&
+        knownGoodKey !== null &&
+        !entry.tiers.some((t) => tierKey(t) === knownGoodKey)
+          ? null
+          : knownGoodKey;
 
-      let attemptedIndex = firstTierIndex(ladder, knownGoodKey, knownBadKeys);
+      let attemptedIndex = firstTierIndex(ladder, effectiveKnownGoodKey, knownBadKeys);
       let lastError: unknown = null;
       let loaded = false;
       // Set when a tier's failure was a weights-download/network error
@@ -1465,6 +1496,17 @@ export function initSession(deps: SessionDeps): SessionController {
     if (activeAbort) return Promise.resolve();
     const resetCapability = opts?.resetCapability ?? false;
     reWarmInFlight = (async () => {
+      // Serialize against an in-flight panel-open/proactive warm: wait for it to
+      // settle before tearing the document down, or the recreate below would
+      // overlap a walk in progress (two concurrent loads, the v0.2.0 OOM). The
+      // in-flight warm renders its own failure UI, so swallow its rejection here.
+      if (warmInFlight) {
+        try {
+          await warmInFlight;
+        } catch {
+          // In-flight warm failed and surfaced its own UI; proceed to re-warm.
+        }
+      }
       // Reset so ensureWarm runs a true re-walk (not a no-op) and the model is
       // treated as not-yet-ready until the walk succeeds.
       warmStarted = false;
@@ -1526,6 +1568,9 @@ export function initSession(deps: SessionDeps): SessionController {
     const row = window.document.createElement('div');
     row.setAttribute('data-model-id', entry.id);
     row.setAttribute('role', 'radio');
+    // Focusable + key-activatable so keyboard users can select a model, not just
+    // mouse users (the row is a div, not a native radio input).
+    row.setAttribute('tabindex', '0');
     const selected = entry.id === pendingModelId;
     row.setAttribute('aria-checked', selected ? 'true' : 'false');
     row.style.cssText = `padding: 6px 8px; margin-bottom: 4px; border-radius: 4px; cursor: pointer; border: 1px solid ${selected ? '#0a5fa3' : '#444'}; background: ${selected ? '#143a52' : 'transparent'};`;
@@ -1540,9 +1585,18 @@ export function initSession(deps: SessionDeps): SessionController {
     meta.textContent = `${entry.downloadSize} — ${entry.note}`;
 
     row.append(name, meta);
-    row.addEventListener('click', () => {
+    const selectRow = () => {
       pendingModelId = entry.id;
       renderPopoverContent();
+    };
+    row.addEventListener('click', selectRow);
+    row.addEventListener('keydown', (e: KeyboardEvent) => {
+      // Enter or Space activates the row like a click (radio semantics);
+      // preventDefault stops Space from scrolling the popover.
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        selectRow();
+      }
     });
     return row;
   }
@@ -1640,6 +1694,11 @@ export function initSession(deps: SessionDeps): SessionController {
     if (activeAbort) return; // never tear down a live stream (ADR-P7)
     if (reWarmInFlight) return; // a switch is already running
     const target = pendingModelId;
+    // Capture the prior stored preference so a failed switch can revert it.
+    // setModelId must run BEFORE reloadModel (ensureWarm resolves the model from
+    // storage), so we cannot defer the write; instead we undo it on failure so a
+    // model that never loaded is not left as the persisted preference.
+    const previousStoredId = resolveModelId(await loadModelPref());
     setLoadingState(actionBtn, i);
     refreshLoadControl();
     try {
@@ -1653,7 +1712,19 @@ export function initSession(deps: SessionDeps): SessionController {
       // ensureWarm renders its own failure UI; log for the console trail.
       const message = err instanceof Error ? err.message : String(err);
       console.warn('[local-nano] model switch failed:', message);
+      // Revert the persisted preference so the next session does not boot into a
+      // model that never loaded (storage would otherwise diverge from the
+      // unchanged in-memory currentModelId). Fire-and-forget; a revert failure
+      // only logs.
+      void setModelId(previousStoredId).catch((revertErr: unknown) => {
+        console.warn('[local-nano] model preference revert failed:', revertErr);
+      });
     } finally {
+      // Restore the action button if the re-warm never reached ensureWarm's own
+      // idle-restore (e.g. recreateOffscreen threw before the walk ran). Guard on
+      // activeAbort exactly like ensureWarm so a stream that started meanwhile is
+      // never stomped. refreshLoadControl re-enables the Load button.
+      if (!activeAbort) setIdleState(actionBtn, i);
       refreshLoadControl();
     }
   }
