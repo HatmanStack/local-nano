@@ -23,12 +23,15 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 | `tests/debug.test.ts`                | `debugLog` gating behind the DEBUG flag      |
 | `tests/background-handler.test.ts`   | Command handler (toggle, ignore unknown, no-id) |
 | `tests/background-offscreen.test.ts` | `ensureOffscreen` document lifecycle         |
-| `tests/session.test.ts`              | `initSession` — lifecycle, streaming, abort, toggle, restore re-seed, quota advisory |
+| `tests/session.test.ts`              | `initSession` — lifecycle, streaming, abort, toggle, restore re-seed, quota advisory, gear settings popover (model list, idle-timeout, Load control) |
 | `tests/stream-client.test.ts`        | `streamOverPort` port wiring and chunk accumulation |
 | `tests/offscreen-client.test.ts`     | `streamPrompt` content-script client over the SW |
 | `tests/offscreen-protocol.test.ts`   | Wire-message discriminators and finiteness guards (incl. `isProgressFrame`) |
 | `tests/offscreen-dispatch.test.ts`   | `classifyOffscreenMessage` listener routing  |
 | `tests/offscreen-ladder.test.ts`     | `nextAction`/`firstTierIndex`/`tierKey`/`applyTierToConfig` fallback-ladder reducer |
+| `tests/offscreen-catalog.test.ts`    | `listCatalog`/`findCatalogEntry` curated model catalog, gate flags, vetted-cell discipline |
+| `tests/offscreen-model-pref.test.ts` | `loadModelPref`/`saveModelPref`/`setModelId`/`setIdleTimeoutMinutes`/`isModelPref` version-surviving preference store |
+| `tests/offscreen-idle-policy.test.ts` | `IDLE_ALARM_NAME`/`alarmWhen`/`decideIdleAction`/`shouldScheduleOnTouch` pure idle-release decision and alarm-time math |
 | `tests/capability.test.ts`           | `classifyCapability`/`CAPABLE_MIN_BUFFER_BYTES` pure device-capability classifier |
 | `tests/capability-store.test.ts`     | `loadCapabilityRecord`/`recordKnownGood`/`recordKnownBad`/`clearCapabilityRecord` per-device tier persistence |
 | `tests/offscreen-failure.test.ts`    | `classifyFailure`/`classifyLoadFailure`/`isTerminalFailure` terminal/transient/network seam |

@@ -7,10 +7,13 @@ import {
   type EnsureOffscreenRequest,
   GPU_INFO_REQUEST,
   type GpuInfoRequest,
+  IS_BUSY_REQUEST,
+  type IsBusyRequest,
   REBUILD_SESSION_REQUEST,
   type RebuildSessionRequest,
   STREAM_REQUEST,
   type StreamRequest,
+  TOUCH_IDLE_REQUEST,
   WARMUP_REQUEST,
   type WarmupRequest,
 } from '../src/offscreen/protocol.js';
@@ -45,6 +48,15 @@ describe('classifyOffscreenMessage', () => {
   it('classifies a warmup request without a tier (base tier)', () => {
     const msg: WarmupRequest = { type: WARMUP_REQUEST };
     expect(classifyOffscreenMessage(msg)).toBe('warmup');
+  });
+
+  it('classifies an is-busy request (verify-idle probe, SW->offscreen)', () => {
+    const msg: IsBusyRequest = { type: IS_BUSY_REQUEST };
+    expect(classifyOffscreenMessage(msg)).toBe('is-busy');
+  });
+
+  it('returns null for a touch-idle request (owned by the SW, not the offscreen doc)', () => {
+    expect(classifyOffscreenMessage({ type: TOUCH_IDLE_REQUEST })).toBeNull();
   });
 
   it('returns null for a malformed warmup request (bad tier device)', () => {

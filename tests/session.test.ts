@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TOGGLE_MESSAGE } from '../src/background/handler.js';
 import { MAX_HISTORY } from '../src/history.js';
+import * as catalogModule from '../src/offscreen/catalog.js';
+import { DEFAULT_MODEL_ID } from '../src/offscreen/catalog.js';
 import * as ladderModule from '../src/offscreen/ladder.js';
 import { SMALLER_MODEL_CANDIDATE } from '../src/offscreen/ladder.js';
+import { MODEL_PREF_KEY } from '../src/offscreen/model-pref.js';
 import type { SelectionSnapshot } from '../src/selection-rewrite.js';
 import {
   deriveHistoryThreshold,
@@ -43,6 +46,7 @@ vi.mock('../src/offscreen/client.js', () => ({
   recreateOffscreen: vi.fn(() => Promise.resolve()),
   countTokens: vi.fn(async (text: string) => Math.ceil(text.length / 3)),
   warmupSession: vi.fn(() => Promise.resolve()),
+  touchIdle: vi.fn(() => Promise.resolve()),
   subscribeProgress: vi.fn((_onFrame: (loaded: number, total: number) => void) => () => undefined),
   getGpuInfo: vi.fn(async () => ({
     device: 'webgpu' as const,
@@ -59,6 +63,7 @@ import {
   recreateOffscreen as mockedRecreateOffscreen,
   streamPrompt as mockedStreamPrompt,
   subscribeProgress as mockedSubscribeProgress,
+  touchIdle as mockedTouchIdle,
   warmupSession as mockedWarmupSession,
 } from '../src/offscreen/client.js';
 
@@ -67,6 +72,7 @@ const rebuildSessionMock = mockedRebuildSession as unknown as ReturnType<typeof 
 const recreateOffscreenMock = mockedRecreateOffscreen as unknown as ReturnType<typeof vi.fn>;
 const countTokensMock = mockedCountTokens as unknown as ReturnType<typeof vi.fn>;
 const warmupSessionMock = mockedWarmupSession as unknown as ReturnType<typeof vi.fn>;
+const touchIdleMock = mockedTouchIdle as unknown as ReturnType<typeof vi.fn>;
 const subscribeProgressMock = mockedSubscribeProgress as unknown as ReturnType<typeof vi.fn>;
 const getGpuInfoMock = mockedGetGpuInfo as unknown as ReturnType<typeof vi.fn>;
 
@@ -904,6 +910,104 @@ describe('initSession — fallback ladder', () => {
   });
 });
 
+describe('initSession — model preference resolves the chosen-model ladder', () => {
+  const MODEL_PREF_KEY = 'local-nano:model-pref:v1';
+  const QWEN25_05B = 'onnx-community/Qwen2.5-0.5B-Instruct';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  it('with an empty preference store walks the same primary ladder as before', async () => {
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    // No preference: tier 0 is the primary model at q4f16 (today's behavior).
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
+    expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
+    expect(firstTier.dtype).toBe('q4f16');
+  });
+
+  it('with a stored non-default model id heads the walk with that model first tier', async () => {
+    // Seed a preference for the non-gated Qwen2.5-0.5B catalog entry, whose only
+    // tier is wasm/q8. The first attempted tier must be that model, not gemma.
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: QWEN25_05B,
+      idleTimeoutMinutes: 15,
+    };
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
+    expect(firstTier.modelName).toBe(QWEN25_05B);
+    expect(firstTier.dtype).toBe('q8');
+  });
+
+  it('with a stored unknown model id falls back to the no-preference ladder (no crash)', async () => {
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: 'org/not-in-the-catalog',
+      idleTimeoutMinutes: 15,
+    };
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    // Unknown id resolves to null -> no-preference path -> primary tier 0.
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
+    expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
+    expect(firstTier.dtype).toBe('q4f16');
+  });
+
+  it('reflects the resolved chosen model in the diagnostic chosenModel field', async () => {
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: QWEN25_05B,
+      idleTimeoutMinutes: 15,
+    };
+    const writeText = vi.fn((_t: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      warmupSessionMock.mockResolvedValue(undefined);
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      const copyBtn = Array.from(deps._root.querySelectorAll('button')).find(
+        (b) => b.textContent === 'Copy diagnostic',
+      ) as HTMLButtonElement;
+      copyBtn.click();
+      await flushMicrotasks();
+      const copied = writeText.mock.calls[0][0] as string;
+      expect(copied).toContain(`chosenModel: ${QWEN25_05B}`);
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+});
+
 describe('initSession — network/download failure', () => {
   const CAPABILITY_KEY = 'local-nano:capability:v1';
 
@@ -1340,6 +1444,281 @@ describe('initSession — streaming', () => {
     expect(pending.length).toBe(0);
     // Resolve the first
     first.resolve('done');
+    await flushMicrotasks();
+  });
+
+  it('fires touchIdle at least once for a completed generation (idle window from last gen)', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    expect(touchIdleMock).not.toHaveBeenCalled();
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    // Touch on START (the SW reschedules the alarm as soon as a turn begins).
+    expect(touchIdleMock.mock.calls.length).toBeGreaterThanOrEqual(1);
+    call.resolve('done');
+    await flushMicrotasks();
+    // And again on completion, so the window re-arms from the last token.
+    expect(touchIdleMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('does not fire touchIdle on a bare panel-open toggle (measured from generation, not open)', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    listener(TOGGLE_MESSAGE); // open -> warmup, no generation
+    await flushMicrotasks();
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    expect(touchIdleMock).not.toHaveBeenCalled();
+  });
+
+  it('a touchIdle rejection does not affect the stream outcome (voided, self-swallowing)', async () => {
+    // touchIdle is fire-and-forget and self-swallowing; even if it rejected the
+    // send must still complete and render normally.
+    touchIdleMock.mockRejectedValueOnce(new Error('schedule failed'));
+    const deps = makeDeps();
+    initSession(deps);
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    call.opts.onChunk?.('the answer');
+    call.resolve('the answer');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('the answer');
+  });
+
+  it('keeps Stop available during a cold-start send (proactive re-warm)', async () => {
+    // Cold start: no panel-open warm, so modelReady is false and the send path
+    // runs the proactive ensureWarm. runWarm leaves the button "Loading"
+    // (disabled) and its activeAbort-guarded finally skips the idle-restore, so
+    // without re-asserting the generating state Stop would be hidden for the
+    // ENTIRE stream. Verify Stop is interactive before the stream resolves.
+    const deps = makeDeps();
+    initSession(deps);
+    deps._input.value = 'hi';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    // The cold-start re-warm actually ran (distinguishes it from a warm-already
+    // path, where the proactive block is skipped entirely).
+    expect(warmupSessionMock).toHaveBeenCalled();
+    // Stop is interactive while the stream is in flight.
+    expect(deps._actionBtn.textContent).toBe('Stop');
+    expect(deps._actionBtn.disabled).toBe(false);
+    call.resolve('answer');
+    await flushMicrotasks();
+  });
+});
+
+describe('initSession — send-path re-warm recovery (idle release)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    warmupSessionMock.mockResolvedValue(undefined);
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  it('re-warms and retries the same prompt once on a terminal/closed-document stream failure', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // A closed-document terminal failure (the SW released the doc on idle).
+    first.reject(new Error('Could not establish connection. Receiving end does not exist.'));
+    // The reactive path re-warms via the serialized primitive (recreate) then
+    // retries the SAME prompt exactly once.
+    const retry = await awaitPending();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    expect(retry.prompt).toBe(first.prompt);
+    retry.opts.onChunk?.('recovered answer');
+    retry.resolve('recovered answer');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('recovered answer');
+  });
+
+  it('does NOT re-warm on a non-terminal stream error (no churny auto-rebuild)', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // An ordinary generation error (transient): the device/doc is fine.
+    first.reject(new Error('some ordinary generation error'));
+    await flushMicrotasks();
+    // No recreate, no retry queued.
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    expect(pending.length).toBe(0);
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('some ordinary generation error');
+  });
+
+  it('bounds recovery to a single retry: a second terminal failure surfaces the error UI', async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    first.reject(new Error('port disconnected'));
+    const retry = await awaitPending();
+    // Exactly one re-warm happened for the single bounded retry.
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    // The retry also fails terminally; no further retry must be queued.
+    retry.reject(new Error('receiving end does not exist'));
+    await flushMicrotasks();
+    expect(pending.length).toBe(0);
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toContain('receiving end does not exist');
+  });
+
+  it('proactively re-warms before streaming when the model is not ready', async () => {
+    // modelReady is false until a warmup completes; the panel was never opened
+    // here, so the first send must warm before streaming (post-release case).
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    const warmupBefore = warmupSessionMock.mock.calls.length;
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    // ensureWarm runs (one warmup) before the stream request is issued.
+    const call = await awaitPending();
+    expect(warmupSessionMock.mock.calls.length).toBe(warmupBefore + 1);
+    call.opts.onChunk?.('answer');
+    call.resolve('answer');
+    await flushMicrotasks();
+  });
+});
+
+describe('initSession — serialized reloadModel primitive', () => {
+  const CAPABILITY_KEY = 'local-nano:capability:v1';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    warmupSessionMock.mockResolvedValue(undefined);
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  it('exposes reloadModel on the returned controller', () => {
+    const deps = makeDeps();
+    const controller = initSession(deps);
+    expect(typeof controller.reloadModel).toBe('function');
+  });
+
+  it('coalesces two concurrent reloadModel calls onto one recreate + one walk', async () => {
+    // Hold recreateOffscreen pending so both reloads see the same in-flight
+    // promise before either completes.
+    let resolveRecreate: (() => void) | undefined;
+    recreateOffscreenMock.mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolveRecreate = r;
+        }),
+    );
+    const deps = makeDeps();
+    const controller = initSession(deps);
+    await flushMicrotasks();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    const warmupBefore = warmupSessionMock.mock.calls.length;
+    const a = controller.reloadModel();
+    const b = controller.reloadModel();
+    // Both callers share one in-flight promise.
+    expect(a).toBe(b);
+    await flushMicrotasks();
+    // Exactly one recreate ran for the two coalesced reloads.
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    resolveRecreate?.();
+    await Promise.all([a, b]);
+    await flushMicrotasks();
+    // Exactly one ladder walk ran (one warmup, tier 0 resolves).
+    expect(warmupSessionMock.mock.calls.length).toBe(warmupBefore + 1);
+  });
+
+  it('a later reloadModel runs a fresh operation after the prior one resolves', async () => {
+    const deps = makeDeps();
+    const controller = initSession(deps);
+    await flushMicrotasks();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    await controller.reloadModel();
+    const afterFirst = recreateOffscreenMock.mock.calls.length;
+    expect(afterFirst).toBe(recreateBefore + 1);
+    // The lock cleared in the finally, so a second call is a fresh operation.
+    await controller.reloadModel();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(afterFirst + 1);
+  });
+
+  it('reloadModel({ resetCapability: true }) clears the capability record before recreating', async () => {
+    // Seed a record so the reset has something to clear.
+    chromeMock.storage.local.store[CAPABILITY_KEY] = {
+      schemaVersion: 1,
+      extensionVersion: '0.2.4',
+      knownGood: {
+        modelName: 'onnx-community/gemma-4-E2B-it-ONNX',
+        device: 'webgpu',
+        dtype: 'q4f16',
+      },
+      knownBad: [],
+      capability: { device: 'webgpu', isFallback: false, maxBufferSize: null },
+    };
+    const deps = makeDeps();
+    const controller = initSession(deps);
+    await flushMicrotasks();
+    const removeBefore = chromeMock.storage.local.remove.mock.calls.length;
+    await controller.reloadModel({ resetCapability: true });
+    await flushMicrotasks();
+    // The capability record was removed (clearCapabilityRecord) before the
+    // re-walk repopulated it from tier 0.
+    const removeCalls = chromeMock.storage.local.remove.mock.calls
+      .slice(removeBefore)
+      .map((c) => c[0]);
+    expect(removeCalls).toContain(CAPABILITY_KEY);
+  });
+
+  it('does not start a recreate while a stream is in flight (activeAbort set)', async () => {
+    const deps = makeDeps();
+    const controller = initSession(deps);
+    await flushMicrotasks();
+    // Start a stream so activeAbort is set.
+    deps._input.value = 'a question';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // A reload requested while the stream is live must not tear down the doc.
+    await controller.reloadModel();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    // The active stream is untouched (not aborted).
+    expect(call.opts.signal?.aborted).toBe(false);
+    call.resolve('an answer');
     await flushMicrotasks();
   });
 });
@@ -2086,5 +2465,527 @@ describe('preflightWarning', () => {
   it('returns null for a capable webgpu adapter (>=1 GiB) or unknown buffer size', () => {
     expect(preflightWarning({ ...base, maxBufferSize: 4 * 1024 * 1024 * 1024 })).toBeNull();
     expect(preflightWarning(base)).toBeNull(); // maxBufferSize null → no warning
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gear settings popover (Phase 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * A header-bearing dep set: builds a header bar (a title plus a trailing close
+ * button, mirroring content.ts) so the gear/Copy controls mount into the header
+ * exactly as they do in production. The base makeDeps() omits header to cover
+ * the root-fallback path.
+ */
+function makeDepsWithHeader(): ReturnType<typeof makeDeps> & { _header: HTMLDivElement } {
+  const base = makeDeps();
+  const _header = document.createElement('div');
+  const title = document.createElement('span');
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '×';
+  _header.append(title, closeBtn);
+  base._root.insertBefore(_header, base._root.firstChild);
+  return { ...base, header: _header, _header };
+}
+
+function findGearButton(root: HTMLElement): HTMLButtonElement {
+  const btn = Array.from(root.querySelectorAll('button')).find(
+    (b) => b.getAttribute('aria-label') === 'Open model and idle settings',
+  );
+  if (!btn) throw new Error('gear settings button not found');
+  return btn as HTMLButtonElement;
+}
+
+function findPopover(root: HTMLElement): HTMLElement {
+  const el = root.querySelector('[data-local-nano-popover]');
+  if (!el) throw new Error('settings popover not found');
+  return el as HTMLElement;
+}
+
+describe('initSession — gear settings popover scaffold', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+  });
+
+  it('mounts a gear button in the header when a header dep is supplied', () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    const gear = findGearButton(deps._header);
+    expect(gear).toBeTruthy();
+    // The gear is a button, so content.ts's drag-suppression (which ignores
+    // presses landing on a button) already excludes it from starting a drag.
+    expect(gear.tagName).toBe('BUTTON');
+  });
+
+  it('falls back to the panel root for the gear button when no header is supplied', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const gear = findGearButton(deps._root);
+    expect(gear).toBeTruthy();
+  });
+
+  it('the popover is hidden by default and a gear click toggles it', () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    const gear = findGearButton(deps._header);
+    const popover = findPopover(deps._root);
+    expect(popover.style.display).toBe('none');
+    gear.click();
+    expect(popover.style.display).not.toBe('none');
+    gear.click();
+    expect(popover.style.display).toBe('none');
+  });
+
+  it('a click outside the popover closes it', () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    const gear = findGearButton(deps._header);
+    const popover = findPopover(deps._root);
+    gear.click();
+    expect(popover.style.display).not.toBe('none');
+    // A click anywhere outside the popover and the gear closes it.
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    expect(popover.style.display).toBe('none');
+  });
+
+  it('a click inside the popover does not close it', () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    const gear = findGearButton(deps._header);
+    const popover = findPopover(deps._root);
+    gear.click();
+    popover.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    expect(popover.style.display).not.toBe('none');
+  });
+});
+
+function modelRows(popover: HTMLElement): HTMLElement[] {
+  return Array.from(popover.querySelectorAll<HTMLElement>('[data-model-id]'));
+}
+
+function rowFor(popover: HTMLElement, id: string): HTMLElement {
+  const row = popover.querySelector<HTMLElement>(`[data-model-id="${id}"]`);
+  if (!row) throw new Error(`model row not found for ${id}`);
+  return row;
+}
+
+describe('initSession — popover model list', () => {
+  const QWEN25_05B = 'onnx-community/Qwen2.5-0.5B-Instruct';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+  });
+
+  it('renders one row per visible catalog entry with name, size, and note', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const rows = modelRows(popover);
+    // Production (all gates off): two rows, gemma default + Qwen2.5-0.5B.
+    expect(rows.length).toBe(2);
+    const ids = rows.map((r) => r.getAttribute('data-model-id'));
+    expect(ids).toContain(DEFAULT_MODEL_ID);
+    expect(ids).toContain(QWEN25_05B);
+    // The Qwen row carries its displayName, size, and note text.
+    const qwen = rowFor(popover, QWEN25_05B);
+    expect(qwen.textContent).toContain('Qwen2.5 0.5B Instruct');
+    expect(qwen.textContent).toContain('~0.5 GB');
+    expect(qwen.textContent).toContain('smallest that answers');
+  });
+
+  it('in production only the two non-gated models render', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const ids = modelRows(findPopover(deps._root)).map((r) => r.getAttribute('data-model-id'));
+    expect(ids.sort()).toEqual([DEFAULT_MODEL_ID, QWEN25_05B].sort());
+  });
+
+  it('marks the default model as the current selection when no preference is stored', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const defaultRow = rowFor(popover, DEFAULT_MODEL_ID);
+    expect(defaultRow.getAttribute('aria-checked')).toBe('true');
+    // The default row is labeled as the default (ADR-P4).
+    expect(defaultRow.textContent).toContain('default');
+    // The other row is not marked.
+    expect(rowFor(popover, QWEN25_05B).getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('marks the stored preference as the current selection', async () => {
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: QWEN25_05B,
+      idleTimeoutMinutes: 15,
+    };
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    expect(rowFor(popover, QWEN25_05B).getAttribute('aria-checked')).toBe('true');
+    expect(rowFor(popover, DEFAULT_MODEL_ID).getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('shows a gated entry when its gate flag is on (spy isQwen3_08bEnabled)', async () => {
+    const spy = vi.spyOn(catalogModule, 'isQwen3_08bEnabled').mockReturnValue(true);
+    try {
+      const deps = makeDepsWithHeader();
+      initSession(deps);
+      findGearButton(deps._header).click();
+      await flushMicrotasks();
+      const ids = modelRows(findPopover(deps._root)).map((r) => r.getAttribute('data-model-id'));
+      expect(ids).toContain('onnx-community/Qwen3.5-0.8B-ONNX');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('shows the larger gated entry when isLargerModelEnabled is on', async () => {
+    const spy = vi.spyOn(catalogModule, 'isLargerModelEnabled').mockReturnValue(true);
+    try {
+      const deps = makeDepsWithHeader();
+      initSession(deps);
+      findGearButton(deps._header).click();
+      await flushMicrotasks();
+      const ids = modelRows(findPopover(deps._root)).map((r) => r.getAttribute('data-model-id'));
+      expect(ids).toContain('onnx-community/LARGER-MODEL-PLACEHOLDER');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('selecting a different row sets a pending choice only: no persist, no reload', async () => {
+    const deps = makeDepsWithHeader();
+    const controller = initSession(deps);
+    const reloadSpy = vi.spyOn(controller, 'reloadModel');
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const setBefore = chromeMock.storage.local.set.mock.calls.length;
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // Click the non-current Qwen row.
+    rowFor(popover, QWEN25_05B).click();
+    await flushMicrotasks();
+    // No preference was persisted (select-then-Load), and no reload fired.
+    expect(chromeMock.storage.local.set.mock.calls.length).toBe(setBefore);
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    expect(reloadSpy).not.toHaveBeenCalled();
+    // The pending row is visibly marked as the pending choice.
+    expect(rowFor(popover, QWEN25_05B).getAttribute('aria-checked')).toBe('true');
+    expect(rowFor(popover, DEFAULT_MODEL_ID).getAttribute('aria-checked')).toBe('false');
+    reloadSpy.mockRestore();
+  });
+});
+
+function idleRadios(popover: HTMLElement): HTMLInputElement[] {
+  return Array.from(popover.querySelectorAll<HTMLInputElement>('input[data-idle-minutes]'));
+}
+
+function idleRadio(popover: HTMLElement, value: string): HTMLInputElement {
+  const el = popover.querySelector<HTMLInputElement>(`input[data-idle-minutes="${value}"]`);
+  if (!el) throw new Error(`idle radio not found for ${value}`);
+  return el;
+}
+
+describe('initSession — popover idle-timeout selector', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+  });
+
+  it('renders the four idle-timeout options', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const values = idleRadios(popover).map((r) => r.getAttribute('data-idle-minutes'));
+    expect(values).toEqual(['5', '15', '60', 'never']);
+  });
+
+  it('preselects 15 min by default when no preference is stored', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    expect(idleRadio(popover, '15').checked).toBe(true);
+    expect(idleRadio(popover, '5').checked).toBe(false);
+  });
+
+  it('preselects the stored option (including Never)', async () => {
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: null,
+      idleTimeoutMinutes: null,
+    };
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    expect(idleRadio(popover, 'never').checked).toBe(true);
+    expect(idleRadio(popover, '15').checked).toBe(false);
+  });
+
+  it('persists the chosen minute value immediately on change', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const fiveMin = idleRadio(popover, '5');
+    fiveMin.checked = true;
+    fiveMin.dispatchEvent(new Event('change', { bubbles: true }));
+    await flushMicrotasks();
+    const stored = chromeMock.storage.local.store[MODEL_PREF_KEY] as {
+      idleTimeoutMinutes: number | null;
+    };
+    expect(stored.idleTimeoutMinutes).toBe(5);
+  });
+
+  it('stores null when "Never" is chosen', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const never = idleRadio(popover, 'never');
+    never.checked = true;
+    never.dispatchEvent(new Event('change', { bubbles: true }));
+    await flushMicrotasks();
+    const stored = chromeMock.storage.local.store[MODEL_PREF_KEY] as {
+      idleTimeoutMinutes: number | null;
+    };
+    expect(stored.idleTimeoutMinutes).toBeNull();
+  });
+
+  it('changing the timeout triggers no reload or recreate', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    const sixtyMin = idleRadio(popover, '60');
+    sixtyMin.checked = true;
+    sixtyMin.dispatchEvent(new Event('change', { bubbles: true }));
+    await flushMicrotasks();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+  });
+});
+
+function findLoadButton(popover: HTMLElement): HTMLButtonElement {
+  const btn = popover.querySelector<HTMLButtonElement>('button[data-load-model]');
+  if (!btn) throw new Error('Load button not found');
+  return btn;
+}
+
+describe('initSession — popover Load control', () => {
+  const QWEN25_05B = 'onnx-community/Qwen2.5-0.5B-Instruct';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    pending.length = 0;
+    warmupSessionMock.mockReset();
+    warmupSessionMock.mockResolvedValue(undefined);
+    recreateOffscreenMock.mockReset();
+    recreateOffscreenMock.mockResolvedValue(undefined);
+    subscribeProgressMock.mockReset();
+    subscribeProgressMock.mockImplementation(() => () => undefined);
+    getGpuInfoMock.mockReset();
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: null,
+      configuredThreshold: null,
+    });
+  });
+
+  it('Load is disabled when the pending selection equals the current one', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    // No selection change: pending equals current (the default).
+    expect(findLoadButton(popover).disabled).toBe(true);
+  });
+
+  it('Load enables once a different model is selected', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    expect(findLoadButton(popover).disabled).toBe(false);
+  });
+
+  it('clicking Load persists the model id then runs reloadModel (recreate + walk) in order', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    await flushMicrotasks();
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    const warmupBefore = warmupSessionMock.mock.calls.length;
+    findLoadButton(popover).click();
+    await flushMicrotasks();
+    // The model preference was persisted with the pending id.
+    const stored = chromeMock.storage.local.store[MODEL_PREF_KEY] as { modelId: string | null };
+    expect(stored.modelId).toBe(QWEN25_05B);
+    // reloadModel ran: force-recreate then the ladder walk (one warmup).
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    expect(warmupSessionMock.mock.calls.length).toBe(warmupBefore + 1);
+    // The first re-walked tier is the chosen model (Qwen2.5-0.5B, wasm/q8).
+    const firstTier = warmupSessionMock.mock.calls.at(-1)?.[0] as { modelName: string };
+    expect(firstTier.modelName).toBe(QWEN25_05B);
+  });
+
+  it('persists the model id before recreating the document (order)', async () => {
+    const order: string[] = [];
+    const origSet = chromeMock.storage.local.set.getMockImplementation();
+    chromeMock.storage.local.set.mockImplementation(async (items: Record<string, unknown>) => {
+      if (MODEL_PREF_KEY in items) order.push('setModelPref');
+      return origSet?.(items);
+    });
+    recreateOffscreenMock.mockImplementation(async () => {
+      order.push('recreate');
+    });
+    try {
+      const deps = makeDepsWithHeader();
+      initSession(deps);
+      await flushMicrotasks();
+      findGearButton(deps._header).click();
+      await flushMicrotasks();
+      const popover = findPopover(deps._root);
+      rowFor(popover, QWEN25_05B).click();
+      findLoadButton(popover).click();
+      await flushMicrotasks();
+      // setModelId persisted before the document was recreated.
+      expect(order.indexOf('setModelPref')).toBeLessThan(order.indexOf('recreate'));
+    } finally {
+      chromeMock.storage.local.set.mockImplementation(origSet ?? (async () => undefined));
+    }
+  });
+
+  it('Load closes the popover on a successful switch', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    await flushMicrotasks();
+    const gear = findGearButton(deps._header);
+    gear.click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    findLoadButton(popover).click();
+    await flushMicrotasks();
+    expect(popover.style.display).toBe('none');
+  });
+
+  it('Load is disabled while a stream is in flight and re-enables when it finishes', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    await flushMicrotasks();
+    // Start a stream so activeAbort is set.
+    deps._input.value = 'a question';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    // Open the popover and select a different model.
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    // Even with a pending change, Load is blocked while the stream is live.
+    expect(findLoadButton(popover).disabled).toBe(true);
+    // A note explains the wait (ADR-P7), not a hard error.
+    expect(popover.textContent).toContain('finishing current response');
+    // Finish the stream; the Load button re-enables.
+    call.resolve('an answer');
+    await flushMicrotasks();
+    expect(findLoadButton(popover).disabled).toBe(false);
+  });
+
+  it('does not abort the in-flight stream when Load is attempted mid-stream', async () => {
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'a question';
+    deps._actionBtn.click();
+    const call = await awaitPending();
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // The button is disabled, but force a click to prove the handler no-ops.
+    findLoadButton(popover).click();
+    await flushMicrotasks();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    expect(call.opts.signal?.aborted).toBe(false);
+    call.resolve('an answer');
+    await flushMicrotasks();
+  });
+
+  it('a second rapid Load click does not start a second concurrent reload', async () => {
+    // Hold recreate pending so both clicks see the same in-flight re-warm.
+    let resolveRecreate: (() => void) | undefined;
+    recreateOffscreenMock.mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolveRecreate = r;
+        }),
+    );
+    const deps = makeDepsWithHeader();
+    initSession(deps);
+    await flushMicrotasks();
+    findGearButton(deps._header).click();
+    await flushMicrotasks();
+    const popover = findPopover(deps._root);
+    rowFor(popover, QWEN25_05B).click();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    const loadBtn = findLoadButton(popover);
+    loadBtn.click();
+    loadBtn.click();
+    await flushMicrotasks();
+    // Only one recreate ran for the two rapid clicks (coalesced by reWarmInFlight).
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    resolveRecreate?.();
+    await flushMicrotasks();
+  });
+
+  it('a failed reload surfaces the existing terminal failure UI', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const deps = makeDepsWithHeader();
+      initSession(deps);
+      await flushMicrotasks();
+      findGearButton(deps._header).click();
+      await flushMicrotasks();
+      const popover = findPopover(deps._root);
+      rowFor(popover, QWEN25_05B).click();
+      // The reload's ladder walk fails on every tier -> the terminal bubble.
+      warmupSessionMock.mockReset();
+      warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
+      findLoadButton(popover).click();
+      await flushMicrotasks(15);
+      const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(texts.some((t) => t.includes("Couldn't load the model on this device."))).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });

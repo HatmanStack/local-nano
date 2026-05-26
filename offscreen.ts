@@ -29,6 +29,8 @@ import {
   GPU_INFO_RESPONSE,
   type GpuInfoResponse,
   type HistoryTurn,
+  IS_BUSY_RESPONSE,
+  type IsBusyResponse,
   isStreamAbort,
   isStreamRequest,
   type ProgressFrame,
@@ -406,7 +408,17 @@ function handleWarmup(msg: WarmupRequest, sendResponse: SendResponse): void {
   })();
 }
 
-// Single dispatcher for the four request channels. Sibling
+// Verify-idle probe (ADR-P9). Report whether a generation is in flight so the
+// service worker can decide to close the document or reschedule the idle alarm.
+// The single shared `generationGate` is the authoritative one-at-a-time signal.
+// This handler ONLY reports state: the offscreen document never closes itself
+// (constraint 3); the SW owns `closeOffscreen()` and the sticky `documentReady`.
+function handleIsBusy(sendResponse: SendResponse): void {
+  const reply: IsBusyResponse = { type: IS_BUSY_RESPONSE, ok: true, busy: generationGate.busy };
+  sendResponse(reply);
+}
+
+// Single dispatcher for the five request channels. Sibling
 // listeners each returning false for non-owned messages risk the MV3
 // sendResponse race: a false-returning listener can close the channel
 // before the async owner replies. This listener returns true only when
@@ -433,6 +445,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return true;
     case 'warmup':
       handleWarmup(msg as WarmupRequest, sendResponse);
+      return true;
+    case 'is-busy':
+      handleIsBusy(sendResponse);
       return true;
   }
 });

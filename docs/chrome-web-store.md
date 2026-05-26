@@ -5,7 +5,7 @@ Working notes and copy for publishing this extension. Build the upload with `npm
 ## Listing fields
 
 - **Name:** `Local Nano` (manifest `name` and the in-panel window header), matching the repo and hero-art branding.
-- **Summary (≤132 chars):** On-device AI assistant. Ask about any page or rewrite highlighted text in place — runs a local LLM in your browser, nothing leaves your device.
+- **Summary (≤132 chars):** On-device AI: ask about any page or rewrite selected text in place. A local LLM runs in your browser — nothing leaves your device.
 - **Category:** Productivity (alt: Developer Tools).
 - **Language:** English.
 - **Privacy policy URL:** <https://privacy.hatstack.fun>
@@ -45,7 +45,7 @@ Note: `activeTab` and `scripting` were removed — the declarative `<all_urls>` 
 
 - [x] Icon — `icons/icon{16,32,48,128}.png`, generated from `icons/icon-source.png` via ffmpeg in `scripts/make-icons.mjs` (`npm run icons`). There is no `icons/icon.svg`. Wired into `manifest.json`.
 - [ ] **Screenshots** — 1280×800 (or 640×400) PNG/JPG, at least one. Capture the panel open on a real page: (1) asking a question about the page, (2) a highlighted-text rewrite mid-stream with the Undo/Accept bar. Requires running the unpacked extension in Chrome.
-- [ ] **Small promo tile** (optional, 440×280) — only needed for featuring.
+- [x] **Small promo tile** (440×280) — `web-store/promo-tile-440x280.png`, generated from `well_done.jpg` hero art via ffmpeg (scale-to-cover + center-crop).
 - [x] Store name decision — **Local Nano** (manifest `name`, in-panel window header, and listing all aligned).
 
 ## Pre-submit smoke test

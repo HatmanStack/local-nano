@@ -17,24 +17,41 @@ import {
   recordKnownGood,
 } from './offscreen/capability-store.js';
 import {
+  type CatalogEntry,
+  DEFAULT_MODEL_ID,
+  findCatalogEntry,
+  isLargerModelEnabled,
+  isQwen3_08bEnabled,
+  listCatalog,
+} from './offscreen/catalog.js';
+import {
   countTokens,
   getGpuInfo,
   rebuildSession,
   recreateOffscreen,
   streamPrompt,
   subscribeProgress,
+  touchIdle,
   warmupSession,
 } from './offscreen/client.js';
 import { buildDiagnostic, errorInfo, type LadderPathEntry } from './offscreen/diagnostic.js';
 import { classifyFailure, classifyLoadFailure } from './offscreen/failure.js';
 import {
-  assembleLadder,
+  assembleLadderForModel,
   firstTierIndex,
   isSmallerModelEnabled,
   nextAction,
   type Tier,
   tierKey,
 } from './offscreen/ladder.js';
+import {
+  DEFAULT_IDLE_TIMEOUT_MINUTES,
+  IDLE_TIMEOUT_OPTIONS,
+  loadModelPref,
+  resolveModelId,
+  setIdleTimeoutMinutes,
+  setModelId,
+} from './offscreen/model-pref.js';
 import {
   formatProgressText,
   GPU_LOADING_TEXT,
@@ -204,7 +221,25 @@ function safeManifestVersion(): string {
   }
 }
 
-export function initSession(deps: SessionDeps): void {
+/**
+ * The handle `initSession` returns so a caller (Phase 3's gear-popover Load
+ * control) can drive the serialized teardown + re-warm primitive. Exposed as a
+ * controller rather than a free function so each panel instance owns its own
+ * in-flight lock and `ensureWarm` closure.
+ */
+export interface SessionController {
+  /**
+   * Serialized teardown + re-warm (ADR-P6). Force-recreates the offscreen
+   * document and walks the ladder for the resolved model/tier under ONE
+   * in-flight lock, so a model switch and any other re-warm trigger can never
+   * overlap two loads (constraint 1). Concurrent callers coalesce onto the same
+   * in-flight promise. Caller precondition (ADR-P7): do not invoke while a
+   * generation is streaming; this primitive will not abort an active stream.
+   */
+  reloadModel: (opts?: { resetCapability?: boolean }) => Promise<void>;
+}
+
+export function initSession(deps: SessionDeps): SessionController {
   const {
     root,
     header,
@@ -350,6 +385,12 @@ export function initSession(deps: SessionDeps): void {
   let isFirstTurn = true;
   let activeAbort: AbortController | null = null;
 
+  // Hook the settings popover's Load-button gating into the stream lifecycle so
+  // a switch the user queued while a stream was in flight re-enables once the
+  // stream settles (ADR-P7). Assigned by the gear-popover block below; a no-op
+  // default keeps `runStreamTurn` working before the popover is built.
+  let refreshPopoverControls: () => void = () => undefined;
+
   function makeActionButton(label: string): HTMLButtonElement {
     const btn = window.document.createElement('button');
     btn.textContent = label;
@@ -457,6 +498,12 @@ export function initSession(deps: SessionDeps): void {
 
     activeAbort = new AbortController();
     setGeneratingState(actionBtn, i);
+    // Reset the idle-release window on generation START (decision 9). The SW
+    // measures the inactivity timeout from the last generation; firing here
+    // re-arms it as soon as a turn begins. Fire-and-forget: never awaited in the
+    // hot path, and `touchIdle` already swallows its own errors so a failed
+    // schedule cannot break the send.
+    void touchIdle();
 
     let modelText = '';
     let firstChunk = true;
@@ -471,13 +518,74 @@ export function initSession(deps: SessionDeps): void {
       responseEl.textContent = modelText;
       messages.scrollTop = messages.scrollHeight;
     };
+    // Proactive re-warm (ADR-P10): if the model is not ready and no re-warm is
+    // already running, warm before streaming. After an idle hard release the
+    // document is gone, so a send would otherwise error into a closed document.
+    // `ensureWarm` is a no-op when a panel-open warmup is already in flight
+    // (`warmStarted` true), so this never double-loads; it only re-walks when the
+    // doc was actually released (`warmStarted` reset). Routed so no two loads
+    // overlap (ADR-P6): `ensureWarm` is the same single walk the panel-open path
+    // and the serialized primitive use.
+    if (!modelReady && !reWarmInFlight) {
+      try {
+        await ensureWarm();
+        // runWarm leaves the button in the disabled "Loading" state, and its
+        // finally skips the idle-restore while activeAbort is set — so without
+        // re-asserting here the Stop affordance would be gone for the ENTIRE
+        // stream that follows. Re-apply the generating state, but only when the
+        // model actually came up; a failed warm leaves its own terminal/network
+        // UI and the stream attempt below drives the reactive recovery.
+        if (modelReady) setGeneratingState(actionBtn, i);
+      } catch {
+        // ensureWarm renders its own failure UI (terminal/network bubble); the
+        // stream attempt below will surface a closed-doc error if it is still
+        // down, which the reactive path then classifies.
+      }
+    }
+
     let succeeded = false;
+    // Bound the post-release recovery to a SINGLE retry so a genuinely dead
+    // device cannot spin. The reactive path re-warms once on a terminal/closed-
+    // document stream failure, then retries the same prompt exactly once; a
+    // second failure surfaces the normal error UI (ADR-P10).
+    let alreadyRetried = false;
     try {
       await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
       succeeded = true;
     } catch (err: unknown) {
       const name = (err as { name?: unknown })?.name;
-      if (name === 'AbortError') {
+      // Reactive re-warm + single retry (ADR-P10, decision 12). Only a
+      // terminal/closed-document failure recovers; an abort or an ordinary
+      // (non-terminal) generation error falls straight through to the normal
+      // error rendering below, preserving the "no churny auto-rebuild" rule.
+      if (name !== 'AbortError' && !alreadyRetried && classifyFailure(err) === 'terminal') {
+        alreadyRetried = true;
+        try {
+          // The failed stream is dead; clear the active-stream guard so the
+          // serialized re-warm primitive (ADR-P6) is not blocked by the ADR-P7
+          // "never tear down a live stream" early-return. Then re-establish a
+          // fresh abort controller for the retried send.
+          activeAbort = null;
+          await reloadModel();
+          activeAbort = new AbortController();
+          // Reset the per-attempt accumulator so the retry renders fresh from
+          // its first chunk (firstChunk clears the bubble on the next token).
+          modelText = '';
+          firstChunk = true;
+          await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+          succeeded = true;
+        } catch (retryErr: unknown) {
+          // The single retry also failed: surface it as the normal error UI.
+          // No further retry (bounded), preventing a loop on a dead device.
+          const retryName = (retryErr as { name?: unknown })?.name;
+          if (retryName === 'AbortError') {
+            modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
+          } else {
+            modelText = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          }
+          responseEl.textContent = modelText;
+        }
+      } else if (name === 'AbortError') {
         modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
         responseEl.textContent = modelText;
       } else {
@@ -506,6 +614,14 @@ export function initSession(deps: SessionDeps): void {
       }
       setIdleState(actionBtn, i);
       activeAbort = null;
+      // Re-arm the idle-release window after the LAST token (decision 9): the
+      // inactivity countdown starts from the END of generation, not the start.
+      // The SW verify-idle reschedules if a stream is still in flight when the
+      // alarm fires, so this post-completion touch is what opens the real
+      // window. Fire-and-forget; self-swallowing.
+      void touchIdle();
+      // Re-enable a Load the user queued while this stream was in flight (ADR-P7).
+      refreshPopoverControls();
       try {
         onFinally?.();
       } catch (e) {
@@ -742,6 +858,12 @@ export function initSession(deps: SessionDeps): void {
   // offscreen `ensureSession` singleton handles cross-tab dedupe.
   let warmStarted = false;
   let modelReady = false;
+  // The in-flight warm walk, or null when none is running. Lets concurrent
+  // callers (panel-open, the proactive send-path, and the serialized
+  // `reloadModel`) coalesce onto ONE walk, and lets `reloadModel` wait for an
+  // in-flight panel-open warm before tearing the document down, so two loads
+  // never overlap (constraint 1 / ADR-P6).
+  let warmInFlight: Promise<void> | null = null;
   // Captured during the ensureWarm preflight so the failure path can feed the
   // diagnostic the same adapter snapshot the load saw. Conservative default
   // (ADR-R11 / Task 1.4) until the preflight resolves.
@@ -863,28 +985,23 @@ export function initSession(deps: SessionDeps): void {
       ].join('\n'),
     );
 
-    // Shared re-walk driver for both controls. Force-recreates the document
-    // (ADR-R4) then re-runs the ladder. `resetFirst` clears the persisted record
-    // so the walk starts from tier 0 again (Reset and re-detect).
+    // Shared re-walk driver for both controls. Routes through the single
+    // serialized teardown + re-warm primitive (ADR-P6) so the terminal Retry,
+    // the Reset, the future model switch, and the future idle re-warm all share
+    // one path and can never overlap two loads. `resetFirst` clears the
+    // persisted record so the walk starts from tier 0 again (Reset and
+    // re-detect). `reloadModel` resets the warm flags, force-recreates the
+    // document (ADR-R4), then re-runs the ladder via `ensureWarm`.
     const rewalk = (button: HTMLButtonElement, resetFirst: boolean) => {
       button.disabled = true;
       bubble.remove();
-      // Reset so ensureWarm runs again; both flags clear so a true retry (not a
-      // no-op) happens and the model is treated as not-yet-ready.
-      warmStarted = false;
-      modelReady = false;
-      void (async () => {
-        try {
-          if (resetFirst) await clearCapabilityRecord();
-          await recreateOffscreen();
-        } catch (recreateErr) {
-          // A failed recreate/clear leaves the panel without a dead button:
-          // re-render the terminal message so the user can act again.
-          renderTerminalFailure(recreateErr);
-          return;
-        }
-        await ensureWarm();
-      })();
+      void reloadModel({ resetCapability: resetFirst }).catch((recreateErr) => {
+        // A failed recreate/clear (before the walk could start) leaves the panel
+        // without a dead button: re-render the terminal message so the user can
+        // act again. A failure inside the walk itself is already surfaced by
+        // ensureWarm's own terminal rendering.
+        renderTerminalFailure(recreateErr);
+      });
     };
 
     const controls = window.document.createElement('div');
@@ -1013,6 +1130,88 @@ export function initSession(deps: SessionDeps): void {
   }
 
   /**
+   * Shared muted-header-control style (the gear button mirrors the
+   * Copy-diagnostic affordance: transparent background, muted color, small font,
+   * `flex-shrink: 0` so it never crowds the close button).
+   */
+  const HEADER_CONTROL_CSS =
+    'flex-shrink: 0; padding: 1px 6px; font: inherit; font-size: 11px; cursor: pointer; background: transparent; color: #999; border: 1px solid #555; border-radius: 4px;';
+
+  /**
+   * The gear/settings affordance (ADR-P6, P7, P11, P12). A muted header button
+   * toggles an absolutely-positioned popover anchored under the header. The
+   * popover stays inside the panel root so it inherits the panel's fixed
+   * positioning and stacking context (the root is `z-index: 2147483647`) and is
+   * removed with the panel. Hidden by default; the gear toggles it, and a
+   * mousedown outside the popover or the gear closes it.
+   *
+   * Returns the gear button, the popover element, a `content` container later
+   * tasks populate (model list, idle-timeout group, Load button), and `isOpen`/
+   * `close` controls. `onOpen` runs each time the popover opens so the content
+   * re-reads the latest preference (the current selection re-reads on next open,
+   * Task 3.4). The outside-click listener is registered on the document so a
+   * press anywhere off the popover dismisses it; it is inert while closed and
+   * lives for the content-script lifetime like the panel.
+   */
+  function makeSettingsAffordance(onOpen: () => void): {
+    gearBtn: HTMLButtonElement;
+    popover: HTMLElement;
+    content: HTMLElement;
+    isOpen: () => boolean;
+    close: () => void;
+  } {
+    const gearBtn = window.document.createElement('button');
+    gearBtn.textContent = '⚙'; // gear glyph (U+2699)
+    gearBtn.setAttribute('aria-label', 'Open model and idle settings');
+    gearBtn.style.cssText = HEADER_CONTROL_CSS;
+
+    const popover = window.document.createElement('div');
+    popover.setAttribute('data-local-nano-popover', '');
+    // Anchored under the header, inside the panel root's fixed/stacking context.
+    // Hidden until the gear toggles it.
+    popover.style.cssText =
+      'display: none; position: absolute; top: 36px; right: 8px; width: 280px; max-height: 70%; overflow-y: auto; background: #2a2a2a; color: #eee; border: 1px solid #555; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); padding: 10px; z-index: 1; font-size: 12px;';
+
+    // The body later tasks fill (model rows, idle-timeout radios, Load button).
+    const content = window.document.createElement('div');
+    popover.appendChild(content);
+
+    const isOpen = () => popover.style.display !== 'none';
+    const open = () => {
+      // Re-render the content from the latest stored preference each open so a
+      // prior Load's new selection is reflected (Task 3.4).
+      onOpen();
+      popover.style.display = 'block';
+    };
+    const close = () => {
+      popover.style.display = 'none';
+    };
+
+    gearBtn.addEventListener('click', (e) => {
+      // Stop the bubbling so the outside-click listener below does not see this
+      // same press and immediately re-close the popover it just opened.
+      e.stopPropagation();
+      if (isOpen()) close();
+      else open();
+    });
+
+    // A press anywhere outside the popover and the gear closes it. Registered on
+    // the document so a click elsewhere on the page (not just inside the panel)
+    // dismisses it, matching the "click outside closes" affordance. The handler
+    // is inert while the popover is closed (early-return), so it never interferes
+    // with normal page interaction; it lives for the content-script lifetime
+    // like the panel itself.
+    window.document.addEventListener('mousedown', (e) => {
+      if (!isOpen()) return;
+      const target = e.target as Node;
+      if (popover.contains(target) || gearBtn.contains(target)) return;
+      close();
+    });
+
+    return { gearBtn, popover, content, isOpen, close };
+  }
+
+  /**
    * Attempt a single tier: warm the offscreen session with that
    * model/device/dtype. Resolves on a live session; throws the offscreen error
    * on a catchable load failure (a hard crash drops the channel, which surfaces
@@ -1022,8 +1221,20 @@ export function initSession(deps: SessionDeps): void {
     await warmupSession(tier);
   }
 
-  async function ensureWarm(): Promise<void> {
-    if (warmStarted) return;
+  function ensureWarm(): Promise<void> {
+    // Coalesce onto an in-flight walk so panel-open, the proactive send-path,
+    // and the serialized `reloadModel` never start a second concurrent load
+    // (constraint 1 / ADR-P6). A finished warm (warmStarted true, none in
+    // flight) stays a no-op, exactly as before.
+    if (warmInFlight) return warmInFlight;
+    if (warmStarted) return Promise.resolve();
+    warmInFlight = runWarm().finally(() => {
+      warmInFlight = null;
+    });
+    return warmInFlight;
+  }
+
+  async function runWarm(): Promise<void> {
     warmStarted = true;
     setLoadingState(actionBtn, i);
     // A live elapsed counter while the model loads. We deliberately do
@@ -1102,12 +1313,30 @@ export function initSession(deps: SessionDeps): void {
       }
 
       // Classify device capability from the (possibly conservative) snapshot
-      // and assemble the ladder accordingly (ADR-R8/R9). With the smaller-model
-      // flag off, `assembleLadder` returns the primary ladder unchanged, so the
-      // loop below is behaviorally identical to the primary-only path; the
-      // capability verdict only feeds the diagnostic until the flag is enabled.
+      // and assemble the ladder accordingly (ADR-R8/R9). The chosen model heads
+      // the walk when a preference is stored; otherwise this is identical to the
+      // primary-only path (ADR-P4). With the smaller-model flag off and no
+      // preference, `assembleLadderForModel` returns the primary ladder
+      // unchanged, so the loop below is behaviorally identical to today; the
+      // capability verdict only feeds the diagnostic until a flag is enabled.
       const capability = classifyCapability(lastGpuInfo);
-      const ladder = assembleLadder({
+      // Resolve the stored model preference into a catalog entry. An empty
+      // preference or an unknown/stale stored id resolves to null, which
+      // `assembleLadderForModel` treats as "no preference" (today's auto-pick,
+      // ADR-P4). The gate seams are read so a future enabled gate surfaces its
+      // entry; production gates are off, so only the two non-gated entries
+      // resolve.
+      const pref = await loadModelPref();
+      const prefId = resolveModelId(pref);
+      const entry =
+        prefId === null
+          ? null
+          : findCatalogEntry(prefId, {
+              qwen3Enabled: isQwen3_08bEnabled(),
+              largerEnabled: isLargerModelEnabled(),
+            });
+      const ladder = assembleLadderForModel({
+        entry,
         capability,
         smallerEnabled: isSmallerModelEnabled(),
       });
@@ -1127,8 +1356,21 @@ export function initSession(deps: SessionDeps): void {
       const record = await loadCapabilityRecord(extensionVersion);
       const knownBadKeys = new Set((record?.knownBad ?? []).map(tierKey));
       const knownGoodKey = record?.knownGood ? tierKey(record.knownGood) : null;
+      // When the user explicitly chose a model (entry !== null), only honor a
+      // persisted known-good tier that belongs to THAT model. The assembled
+      // ladder appends other models' tiers after the chosen model's, so a
+      // known-good key from a previously-used model would otherwise make
+      // firstTierIndex jump past the user's selection and load the old model
+      // (ADR-P4: the selection heads the ladder). With no preference
+      // (entry === null) the prior behavior is unchanged.
+      const effectiveKnownGoodKey =
+        entry !== null &&
+        knownGoodKey !== null &&
+        !entry.tiers.some((t) => tierKey(t) === knownGoodKey)
+          ? null
+          : knownGoodKey;
 
-      let attemptedIndex = firstTierIndex(ladder, knownGoodKey, knownBadKeys);
+      let attemptedIndex = firstTierIndex(ladder, effectiveKnownGoodKey, knownBadKeys);
       let lastError: unknown = null;
       let loaded = false;
       // Set when a tier's failure was a weights-download/network error
@@ -1228,6 +1470,63 @@ export function initSession(deps: SessionDeps): void {
     }
   }
 
+  // ---- Serialized teardown + re-warm primitive (ADR-P6, constraint 1) ----
+  // A model switch and an idle re-warm are the same operation: tear down the
+  // offscreen document (force-recreate) and re-warm against the resolved
+  // model/tier. This is the ONE primitive both share, guarded by a single
+  // in-flight lock so a user Load and any other re-warm trigger can never run
+  // concurrently. The v0.2.0 OOM came from overlapping loads, so serialization
+  // is a hard safety property. A re-warm already in flight short-circuits a
+  // second request onto the same promise.
+  let reWarmInFlight: Promise<void> | null = null;
+
+  /**
+   * Tear down and re-warm under one lock (ADR-P6). If a re-warm is already in
+   * flight, returns that same promise so concurrent callers coalesce onto one
+   * operation (exactly one recreate + one ladder walk run). Otherwise resets the
+   * warm flags, optionally clears the persisted capability record (so a Reset
+   * re-walks from tier 0), force-recreates the document, and walks the ladder.
+   *
+   * Caller precondition (ADR-P7): a model switch waits for an in-flight
+   * generation rather than aborting it, so the caller (the Phase 3 Load button)
+   * must not invoke this while a stream is in flight. This primitive enforces
+   * the precondition defensively (early-return while `activeAbort` is set) and
+   * NEVER aborts the active stream. It never starts a second `LanguageModel`
+   * load: the recreate tears the whole document down first (constraint 1,
+   * ADR-R3), and the offscreen side destroys the prior session before creating.
+   */
+  function reloadModel(opts?: { resetCapability?: boolean }): Promise<void> {
+    if (reWarmInFlight) return reWarmInFlight;
+    // Never overlap a live generation (ADR-P7): the caller is responsible for
+    // waiting, but guard here so a stray call can never tear the document out
+    // from under a streaming answer. Resolve as a no-op without aborting.
+    if (activeAbort) return Promise.resolve();
+    const resetCapability = opts?.resetCapability ?? false;
+    reWarmInFlight = (async () => {
+      // Serialize against an in-flight panel-open/proactive warm: wait for it to
+      // settle before tearing the document down, or the recreate below would
+      // overlap a walk in progress (two concurrent loads, the v0.2.0 OOM). The
+      // in-flight warm renders its own failure UI, so swallow its rejection here.
+      if (warmInFlight) {
+        try {
+          await warmInFlight;
+        } catch {
+          // In-flight warm failed and surfaced its own UI; proceed to re-warm.
+        }
+      }
+      // Reset so ensureWarm runs a true re-walk (not a no-op) and the model is
+      // treated as not-yet-ready until the walk succeeds.
+      warmStarted = false;
+      modelReady = false;
+      if (resetCapability) await clearCapabilityRecord();
+      await recreateOffscreen();
+      await ensureWarm();
+    })().finally(() => {
+      reWarmInFlight = null;
+    });
+    return reWarmInFlight;
+  }
+
   // ---- Always-available copy-diagnostic affordance (ADR-R11, Task 5.3) ----
   // Present whenever the panel is open, regardless of load state. Copy-only:
   // nothing leaves the device. Inserted into the header (left of the close
@@ -1238,6 +1537,277 @@ export function initSession(deps: SessionDeps): void {
     if (header) header.insertBefore(copyBtn, header.lastElementChild);
     else root.appendChild(copyBtn);
   }
+
+  // ---- Gear settings popover (Phase 3, ADR-P6/P7/P11/P12) ----
+  // The gear button mounts in the header next to the Copy-diagnostic control
+  // (left of the close button), mirroring that affordance's header-mount with a
+  // root fallback for the no-header test path. The popover lives inside the
+  // panel root so it inherits the panel's fixed positioning and is removed with
+  // the panel.
+  //
+  // Popover model-picker state (ADR-P12, select-then-Load). `pendingModelId` is
+  // the user's not-yet-applied selection (initialized to the resolved
+  // preference, or the default when none is stored); selecting a row only
+  // updates it (no persist, no reload). The Load control (Task 3.4) commits it.
+  // Re-read from storage on each popover open so a prior Load's new selection
+  // shows next time. `currentModelId` is the persisted/resolved current model
+  // (the marked row and the Load-enable baseline); `pendingModelId` is the
+  // not-yet-applied selection. They are equal on open and after a successful
+  // Load; a row click moves `pendingModelId` only.
+  let currentModelId = DEFAULT_MODEL_ID;
+  let pendingModelId = DEFAULT_MODEL_ID;
+
+  // The currently-selected idle timeout (minutes, or null for "Never"). Unlike
+  // the model, the timeout is not a multi-GB action, so it persists immediately
+  // on change (ADR-P11); it does not wait for an explicit Load. Initialized from
+  // the stored preference on each open. Phase 4 reads the stored value when
+  // scheduling the alarm; this phase only persists it (no alarm wired here).
+  let selectedIdleMinutes: number | null = DEFAULT_IDLE_TIMEOUT_MINUTES;
+
+  /**
+   * Build one selectable model row (ADR-P12): displayName, download size, and
+   * the docs/models.md note, marked when it is the pending selection. The
+   * default entry is labeled "(default)" (ADR-P4). Clicking the row sets the
+   * pending selection only (no persist, no reload) and re-renders so the marker
+   * (and the Load button, Task 3.4) reflect the change.
+   */
+  function buildModelRow(entry: CatalogEntry): HTMLElement {
+    const row = window.document.createElement('div');
+    row.setAttribute('data-model-id', entry.id);
+    row.setAttribute('role', 'radio');
+    // Focusable + key-activatable so keyboard users can select a model, not just
+    // mouse users (the row is a div, not a native radio input).
+    row.setAttribute('tabindex', '0');
+    const selected = entry.id === pendingModelId;
+    row.setAttribute('aria-checked', selected ? 'true' : 'false');
+    row.style.cssText = `padding: 6px 8px; margin-bottom: 4px; border-radius: 4px; cursor: pointer; border: 1px solid ${selected ? '#0a5fa3' : '#444'}; background: ${selected ? '#143a52' : 'transparent'};`;
+
+    const name = window.document.createElement('div');
+    name.style.cssText = 'font-weight: 600;';
+    name.textContent =
+      entry.id === DEFAULT_MODEL_ID ? `${entry.displayName} (default)` : entry.displayName;
+
+    const meta = window.document.createElement('div');
+    meta.style.cssText = 'color: #aaa; font-size: 11px; margin-top: 2px;';
+    meta.textContent = `${entry.downloadSize} — ${entry.note}`;
+
+    row.append(name, meta);
+    const selectRow = () => {
+      pendingModelId = entry.id;
+      renderPopoverContent();
+    };
+    row.addEventListener('click', selectRow);
+    row.addEventListener('keydown', (e: KeyboardEvent) => {
+      // Enter or Space activates the row like a click (radio semantics);
+      // preventDefault stops Space from scrolling the popover.
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        selectRow();
+      }
+    });
+    return row;
+  }
+
+  /**
+   * Map an idle-timeout option to a stable attribute token: the minute count, or
+   * `never` for the null ("release disabled") option. Used as the radio's
+   * `data-idle-minutes` value and to derive a unique input id.
+   */
+  function idleOptionToken(minutes: number | null): string {
+    return minutes === null ? 'never' : String(minutes);
+  }
+
+  /**
+   * Render the idle-timeout radio group (ADR-P11): 5/15/60 min and Never, with
+   * the stored/default option preselected. The timeout is not a multi-GB action,
+   * so a change persists immediately via `setIdleTimeoutMinutes` (null for
+   * Never) and triggers no reload or alarm. Phase 4 re-reads the persisted value
+   * on the next `touchIdle`; no live alarm reschedule is required here.
+   */
+  function renderIdleTimeoutGroup(parent: HTMLElement): void {
+    const heading = window.document.createElement('div');
+    heading.style.cssText = 'font-weight: 600; margin: 10px 0 6px;';
+    heading.textContent = 'Release model after';
+    parent.appendChild(heading);
+
+    const groupName = 'local-nano-idle-timeout';
+    for (const option of IDLE_TIMEOUT_OPTIONS) {
+      const token = idleOptionToken(option.minutes);
+      const label = window.document.createElement('label');
+      label.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 2px 0;';
+
+      const radio = window.document.createElement('input');
+      radio.type = 'radio';
+      radio.name = groupName;
+      radio.setAttribute('data-idle-minutes', token);
+      radio.checked = option.minutes === selectedIdleMinutes;
+      radio.addEventListener('change', () => {
+        if (!radio.checked) return;
+        selectedIdleMinutes = option.minutes;
+        // Persist immediately (ADR-P11). Fire-and-forget; a write failure logs
+        // but does not block the UI (the choice is non-critical).
+        void setIdleTimeoutMinutes(option.minutes).catch((err: unknown) => {
+          console.warn('[local-nano] idle-timeout persist failed:', err);
+        });
+      });
+
+      const text = window.document.createElement('span');
+      text.textContent = option.label;
+      label.append(radio, text);
+      parent.appendChild(label);
+    }
+  }
+
+  // The Load control (ADR-P6/P7): a single button reused across re-renders, plus
+  // an unobtrusive note shown while a stream blocks the switch. Built once so the
+  // refresh logic mutates one element rather than rebuilding it each render.
+  const loadBtn = window.document.createElement('button');
+  loadBtn.textContent = 'Load';
+  loadBtn.setAttribute('data-load-model', '');
+  loadBtn.style.cssText = `margin-top: 10px; ${BUTTON_CSS}`;
+  const loadNote = window.document.createElement('div');
+  loadNote.style.cssText = 'color: #aaa; font-size: 11px; margin-top: 4px; display: none;';
+  loadNote.textContent = 'finishing current response…';
+  loadBtn.addEventListener('click', () => {
+    void applyPendingModel();
+  });
+
+  /**
+   * Recompute the Load button's enabled state and the in-flight-stream note
+   * (ADR-P6/P7). Enabled only when the pending selection differs from the
+   * current one AND no stream is in flight (`activeAbort`) AND no re-warm is in
+   * flight (`reWarmInFlight`). While a stream blocks the switch, the note
+   * explains the wait rather than showing a hard error.
+   */
+  function refreshLoadControl(): void {
+    const differs = pendingModelId !== currentModelId;
+    const streaming = activeAbort !== null;
+    const reloading = reWarmInFlight !== null;
+    loadBtn.disabled = !differs || streaming || reloading;
+    loadNote.style.display = differs && streaming ? 'block' : 'none';
+  }
+
+  /**
+   * Persist the pending model id then run the serialized re-warm primitive
+   * (ADR-P6, Phase 2): force-recreate the document and re-walk the ladder, now
+   * resolving the new preference in `ensureWarm`. No-op while a stream is in
+   * flight (the button is disabled, but guard defensively, ADR-P7) or while a
+   * re-warm is already running (coalesced by `reWarmInFlight`). Closes the
+   * popover on a successful switch; the standard `ensureWarm` failure UI
+   * (terminal/network bubble, progress) covers a failed switch unchanged.
+   */
+  async function applyPendingModel(): Promise<void> {
+    if (pendingModelId === currentModelId) return;
+    if (activeAbort) return; // never tear down a live stream (ADR-P7)
+    if (reWarmInFlight) return; // a switch is already running
+    const target = pendingModelId;
+    // Capture the prior stored preference so a failed switch can revert it.
+    // setModelId must run BEFORE reloadModel (ensureWarm resolves the model from
+    // storage), so we cannot defer the write; instead we undo it on failure so a
+    // model that never loaded is not left as the persisted preference.
+    const previousStoredId = resolveModelId(await loadModelPref());
+    setLoadingState(actionBtn, i);
+    refreshLoadControl();
+    try {
+      await setModelId(target);
+      await reloadModel();
+      // reloadModel resolves even when the ladder failed to load: ensureWarm
+      // renders its own terminal/network bubble and resolves rather than
+      // throwing, so promise resolution is NOT proof the model came up. Verify
+      // modelReady before committing; on failure, throw so the catch reverts the
+      // stored preference and the popover stays open for another choice.
+      if (!modelReady) {
+        throw new Error('model did not become ready after switch');
+      }
+      // The switch landed: the new id is the current selection, and the popover
+      // re-reads it on next open. Close it now.
+      currentModelId = target;
+      settings.close();
+    } catch (err) {
+      // ensureWarm renders its own failure UI; log for the console trail.
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn('[local-nano] model switch failed:', message);
+      // Revert the persisted preference so the next session does not boot into a
+      // model that never loaded (storage would otherwise diverge from the
+      // unchanged in-memory currentModelId). Fire-and-forget; a revert failure
+      // only logs.
+      void setModelId(previousStoredId).catch((revertErr: unknown) => {
+        console.warn('[local-nano] model preference revert failed:', revertErr);
+      });
+    } finally {
+      // Restore the action button if the re-warm never reached ensureWarm's own
+      // idle-restore (e.g. recreateOffscreen threw before the walk ran). Guard on
+      // activeAbort exactly like ensureWarm so a stream that started meanwhile is
+      // never stomped. refreshLoadControl re-enables the Load button.
+      if (!activeAbort) setIdleState(actionBtn, i);
+      refreshLoadControl();
+    }
+  }
+
+  // Expose the refresh to the stream lifecycle (ADR-P7): when a stream settles,
+  // `runStreamTurn` calls this so a queued switch re-enables.
+  refreshPopoverControls = refreshLoadControl;
+
+  /**
+   * Render the popover body from the current state: the visible catalog (gated
+   * entries appear only when their gate flag is on, both off in production) as
+   * selectable rows, then the idle-timeout group and the Load control. Called on
+   * each open (after the preference is read) and whenever the pending selection
+   * changes.
+   */
+  function renderPopoverContent(): void {
+    const content = settings.content;
+    content.replaceChildren();
+
+    const modelHeading = window.document.createElement('div');
+    modelHeading.style.cssText = 'font-weight: 600; margin-bottom: 6px;';
+    modelHeading.textContent = 'Model';
+    content.appendChild(modelHeading);
+
+    for (const entry of listCatalog()) content.appendChild(buildModelRow(entry));
+
+    renderIdleTimeoutGroup(content);
+    content.append(loadBtn, loadNote);
+    refreshLoadControl();
+  }
+
+  /**
+   * Re-read the persisted preference and reset the popover's pending model and
+   * selected idle timeout to match, so each open reflects a Load (or timeout
+   * change) committed since the last open. An unknown/stale stored model id
+   * resolves to the default (ADR-P4) via the catalog gate seams; the idle
+   * timeout falls back to the default when unset.
+   */
+  async function syncPopoverFromPref(): Promise<void> {
+    const pref = await loadModelPref();
+    const storedId = resolveModelId(pref);
+    const resolved =
+      storedId !== null &&
+      findCatalogEntry(storedId, {
+        qwen3Enabled: isQwen3_08bEnabled(),
+        largerEnabled: isLargerModelEnabled(),
+      }) !== null
+        ? storedId
+        : DEFAULT_MODEL_ID;
+    currentModelId = resolved;
+    pendingModelId = resolved;
+    // Use the loaded value directly: `loadModelPref` already returns the default
+    // (15) for a missing/invalid record, so a `null` here is a deliberate
+    // "Never" choice, not an unset field, and must not be coerced to the default.
+    selectedIdleMinutes = pref.idleTimeoutMinutes;
+    renderPopoverContent();
+  }
+
+  const settings = makeSettingsAffordance(() => {
+    // Fire-and-forget: render synchronously from the prior state first (so the
+    // popover is never empty), then refresh once the async preference read
+    // resolves. The read is fast (one storage.local.get).
+    renderPopoverContent();
+    void syncPopoverFromPref();
+  });
+  if (header) header.insertBefore(settings.gearBtn, header.lastElementChild);
+  else root.appendChild(settings.gearBtn);
+  root.appendChild(settings.popover);
 
   // ---- Toggle listener ----
   let convertedAnchor = false;
@@ -1260,4 +1830,8 @@ export function initSession(deps: SessionDeps): void {
 
   // ---- Initial restore ----
   void restore();
+
+  // The controller seam: Phase 3's gear-popover Load control drives the
+  // serialized re-warm primitive through this handle. No UI calls it yet.
+  return { reloadModel };
 }

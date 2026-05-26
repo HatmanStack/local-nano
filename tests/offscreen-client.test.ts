@@ -7,6 +7,7 @@ import {
   sendPrompt,
   streamPrompt,
   subscribeProgress,
+  touchIdle,
   warmupSession,
 } from '../src/offscreen/client.js';
 import {
@@ -27,6 +28,8 @@ import {
   type StreamChunk,
   type StreamDone,
   type StreamRequest,
+  TOUCH_IDLE_REQUEST,
+  TOUCH_IDLE_RESPONSE,
   WARMUP_REQUEST,
   WARMUP_RESPONSE,
 } from '../src/offscreen/protocol.js';
@@ -612,6 +615,76 @@ describe('subscribeProgress (content-script client)', () => {
     const unsubscribe = subscribeProgress(() => undefined);
     await flushTimers();
     expect(() => unsubscribe()).not.toThrow();
+  });
+});
+
+describe('touchIdle (content-script client)', () => {
+  beforeEach(() => {
+    chromeMock.runtime.lastError = undefined;
+  });
+
+  it('sends TOUCH_IDLE_REQUEST to the SW and resolves on ok:true', async () => {
+    const seen: unknown[] = [];
+    chromeMock.runtime.sendMessage.mockImplementation(async (msg: unknown) => {
+      seen.push(msg);
+      return { type: TOUCH_IDLE_RESPONSE, ok: true };
+    });
+    await expect(touchIdle()).resolves.toBeUndefined();
+    expect(seen).toEqual([{ type: TOUCH_IDLE_REQUEST }]);
+  });
+
+  it('resolves (never throws) when chrome.runtime.lastError is set', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      chromeMock.runtime.sendMessage.mockImplementation(async () => {
+        chromeMock.runtime.lastError = { message: 'no SW' };
+        return undefined;
+      });
+      await expect(touchIdle()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+      chromeMock.runtime.lastError = undefined;
+    }
+  });
+
+  it('resolves (never throws) on a malformed reply', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      chromeMock.runtime.sendMessage.mockImplementation(async () => ({ type: 'something-else' }));
+      await expect(touchIdle()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('resolves (never throws) when the SW replies ok:false', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+        type: TOUCH_IDLE_RESPONSE,
+        ok: false,
+        error: 'schedule failed',
+      }));
+      await expect(touchIdle()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('schedule failed'));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('resolves (never throws) when sendMessage itself throws', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      chromeMock.runtime.sendMessage.mockImplementation(async () => {
+        throw new Error('transport down');
+      });
+      await expect(touchIdle()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 
