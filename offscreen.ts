@@ -376,11 +376,9 @@ function handleWarmup(msg: WarmupRequest, sendResponse: SendResponse): void {
   (async () => {
     try {
       if (msg.tier) {
-        const tier: Tier = {
-          modelName: msg.tier.modelName,
-          device: msg.tier.device,
-          dtype: msg.tier.dtype,
-        };
+        // `msg.tier` is a `WarmupTier`, now an alias of `Tier` (ADR-3), so it is
+        // used directly — no field-by-field hand conversion to drift out of sync.
+        const tier: Tier = msg.tier;
         // Safety net for a soft tier change inside a still-live document
         // (ADR-R1/R3): if a session is already loaded for a DIFFERENT tier,
         // destroy it and null sessionPromise before creating, so two loads never

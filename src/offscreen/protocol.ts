@@ -20,6 +20,11 @@
  * caller opens one port per stream and disconnects when done.
  */
 
+// Type-only import: erases at build time so this introduces no runtime
+// dependency on `ladder.ts` (and `ladder.ts` keeps zero protocol coupling).
+// `WarmupTier` aliases `Tier` so the wire shape has ONE structural source.
+import type { Tier } from './ladder.js';
+
 export const ENSURE_OFFSCREEN_REQUEST = 'offscreen/ensure-request' as const;
 export const ENSURE_OFFSCREEN_RESPONSE = 'offscreen/ensure-response' as const;
 
@@ -270,15 +275,15 @@ export const WARMUP_RESPONSE = 'offscreen/warmup-response' as const;
 
 /**
  * One `{ modelName, device, dtype }` triple the ladder can ask the offscreen
- * document to load (ADR-R7). Mirrors `Tier` in `ladder.ts` but is redeclared
- * here so the wire protocol owns its own shape and `ladder.ts` stays free of
- * Chrome/protocol imports.
+ * document to load (ADR-R7). This is the WIRE MIRROR of `Tier` in `ladder.ts`:
+ * it shares ONE structural source via a TYPE-ONLY import so a field added to
+ * `Tier` propagates here automatically and the offscreen side needs no hand
+ * conversion (ADR-3 / HEALTH MED-3). The import is type-only, so it erases at
+ * build time — `ladder.ts` gains no runtime protocol dependency, preserving its
+ * freedom from Chrome/protocol RUNTIME imports. The runtime validator
+ * `isWarmupTier` below still structurally validates the wire shape.
  */
-export interface WarmupTier {
-  modelName: string;
-  device: 'webgpu' | 'wasm';
-  dtype: string;
-}
+export type WarmupTier = Tier;
 
 /**
  * Block-load (warmup) the offscreen session, optionally dictating the tier to

@@ -286,16 +286,16 @@ dependency.
 
 **Verification Checklist:**
 
-- [ ] `WarmupTier` is defined as an alias of `Tier` (single structural source);
+- [x] `WarmupTier` is defined as an alias of `Tier` (single structural source);
       a field added to `Tier` propagates to `WarmupTier` automatically.
-- [ ] `ladder.ts` has NO new runtime import (still imports only
+- [x] `ladder.ts` has NO new runtime import (still imports only
       `./capability.js`); the new coupling is a TYPE-ONLY import in
       `protocol.ts`.
-- [ ] `isWarmupTier` is unchanged and still validates the wire shape at runtime.
-- [ ] The hand conversion in `offscreen.ts` `handleWarmup` is removed;
+- [x] `isWarmupTier` is unchanged and still validates the wire shape at runtime.
+- [x] The hand conversion in `offscreen.ts` `handleWarmup` is removed;
       `msg.tier` is used directly as a `Tier`.
-- [ ] `npm run typecheck` clean; `npm run build` reports no import cycle.
-- [ ] `tests/offscreen-protocol.test.ts` passes unchanged.
+- [x] `npm run typecheck` clean; `npm run build` reports no import cycle.
+- [x] `tests/offscreen-protocol.test.ts` passes unchanged.
 
 **Testing Instructions:** `npm run typecheck`, `npm run build`, `npm test`
 (`tests/offscreen-protocol.test.ts` covers `isWarmupTier`). No new test needed —
