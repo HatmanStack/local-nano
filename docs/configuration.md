@@ -25,9 +25,9 @@ A Hugging Face model identifier in `org/repo` form. The model must be an ONNX-fo
 
 Smaller models load faster and are kinder to your GPU memory; bigger ones are smarter but take longer to download and to respond. Some practical picks:
 
-- `onnx-community/gemma-4-E2B-it-ONNX` — bigger, smarter; needs WebGPU (the default).
-- `onnx-community/Qwen3.5-0.8B-ONNX` — small, fast, decent for short answers; needs WebGPU.
-- `onnx-community/Qwen2.5-0.5B-Instruct` — proven safe pick when you're stuck on WASM.
+- `onnx-community/gemma-4-E2B-it-ONNX` — the default; bigger and smarter, runs on WebGPU (`q4f16`).
+- `onnx-community/Qwen3-0.6B-ONNX` — the small WebGPU option; a reasoning model whose `<think>` block is stripped before display, with a WASM fallback behind it.
+- `onnx-community/Qwen2.5-0.5B-Instruct` — the smallest that answers; CPU/WASM only (WebGPU parrots for this model, so do not run it on WebGPU).
 
 Picking the right model for your hardware is its own topic — see [`docs/models.md`](models.md) for a field guide covering which models we've tried, what fails, and how to run without WebGPU.
 
