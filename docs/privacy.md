@@ -27,6 +27,7 @@ From `manifest.json`:
 | ---------------------------------------- | ----------------------------------------------------------------- |
 | `storage`                                | Persist conversation history in `chrome.storage.local`.           |
 | `offscreen`                              | Host the long-lived `LanguageModel` session in a hidden offscreen document. |
+| `alarms`                                 | Schedule the idle resource-release timer (measured from the last generation, so it survives MV3 service-worker eviction) that closes the offscreen document to reclaim VRAM. The alarm only fires a local check; no data leaves the device. |
 | `host_permissions` for `huggingface.co` and `*.huggingface.co` | Download model weights from Hugging Face and its CDN subdomains. |
 | `host_permissions` for `cdn-lfs.huggingface.co` | Download large model files from Hugging Face's LFS CDN. |
 

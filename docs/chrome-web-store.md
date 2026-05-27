@@ -32,6 +32,7 @@ Paste one per permission in the dashboard.
 
 - **`storage`** — Persists per-URL chat history locally via `chrome.storage.local` so a conversation survives navigation and reload. Never synced or transmitted.
 - **`offscreen`** — Hosts the long-lived LLM session in an offscreen document so the model loads once and is shared across tabs instead of reloading on every navigation. WebGPU/WASM inference cannot run in the service worker.
+- **`alarms`** — Schedules an inactivity timer that releases the in-memory model and closes the offscreen document to reclaim memory after a configurable idle period. Backed by `chrome.alarms` so it survives MV3 service-worker eviction; the alarm fires only a local check and accesses no network.
 - **Host permission `https://huggingface.co/*`, `https://*.huggingface.co/*`, `https://cdn-lfs.huggingface.co/*`** — One-time download of the open model weights, cached locally thereafter. This is the extension's only outbound network access. No other hosts are contacted.
 - **Content script on `<all_urls>`** — The assistant panel must be injectable on any page the user opens it on (it's a general-purpose page assistant), and reads the current page's visible text to answer questions about it / applies the user's requested in-place rewrites. Reading happens only within the page's own context; nothing is exfiltrated.
 
