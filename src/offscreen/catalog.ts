@@ -177,12 +177,7 @@ interface GateOpts {
  * position. Gated entries are filtered by `listCatalog`/`findCatalogEntry` via
  * each entry's own `isVisible`.
  */
-const ALL_ENTRIES: InternalEntry[] = [
-  SMALLER_ENTRY,
-  QWEN3_06B_ENTRY,
-  DEFAULT_ENTRY,
-  LARGER_ENTRY,
-];
+const ALL_ENTRIES: InternalEntry[] = [SMALLER_ENTRY, QWEN3_06B_ENTRY, DEFAULT_ENTRY, LARGER_ENTRY];
 
 /**
  * The visible catalog. Returns the non-gated entries always (gemma default,
