@@ -63,7 +63,10 @@ Remediation is deferred because the fix requires a Vitest major upgrade (a break
 │   ├── background/
 │   │   ├── handler.ts
 │   │   └── offscreen.ts   # Service-worker side of the offscreen lifecycle
-│   ├── offscreen/         # client, protocol, stream-client, dispatch, busy-gate
+│   ├── offscreen/         # 14 modules: client, protocol, stream-client, dispatch,
+│   │                      # busy-gate, ladder, catalog, model-pref, idle-policy,
+│   │                      # capability(-store), progress, diagnostic, failure
+│   │                      # (see docs/architecture.md for the full inventory)
 │   ├── selection-rewrite.ts
 │   ├── session.ts         # Content-script chat session lifecycle
 │   ├── history.ts

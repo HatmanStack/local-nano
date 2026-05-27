@@ -90,7 +90,11 @@ Before building it copies the ONNX runtime `.wasm` / `.mjs` files into `dist/ort
 | Panel DOM + dragging | `content.ts`                          |
 | Chat session lifecycle | `src/session.ts`                    |
 | Model host + session | `offscreen.ts`                        |
-| Offscreen client/protocol | `src/offscreen/`                 |
+| Offscreen modules (14) | `src/offscreen/` (enumerated below) |
+| Model picker + curated catalog | `src/offscreen/catalog.ts`, `src/offscreen/model-pref.ts` |
+| Idle resource release | `src/offscreen/idle-policy.ts` (+ SW scheduler in `src/background/offscreen.ts`) |
+| Fallback ladder / capability | `src/offscreen/ladder.ts`, `src/offscreen/capability.ts`, `src/offscreen/capability-store.ts` |
+| `<think>` stripping  | `src/think-strip.ts`                  |
 | Message rendering    | `src/ui/messages.ts`                  |
 | Send/Stop button     | `src/ui/state.ts`                     |
 | Page context prompt  | `src/pageContext.ts`                  |
@@ -99,6 +103,21 @@ Before building it copies the ONNX runtime `.wasm` / `.mjs` files into `dist/ort
 | Polyfill + backend   | `vendor/prompt-api-polyfill/`         |
 | Build                | `build.mjs`                           |
 | Manifest             | `manifest.json`                       |
+
+The `src/offscreen/` directory holds 14 modules. Most are pure, Chrome-free cores (data + reducers) so they can be unit-tested without WebGPU:
+
+- `busy-gate.ts` — one-generation-at-a-time gate over the shared session.
+- `capability.ts` / `capability-store.ts` — WebGPU adapter classification and its per-device persisted record.
+- `catalog.ts` — the curated model catalog (display metadata + per-model tier ladder).
+- `client.ts` / `stream-client.ts` — the content-script side of the offscreen port and the shared streaming helper.
+- `diagnostic.ts` — the copy-only diagnostic snapshot.
+- `dispatch.ts` — request dispatch over the port.
+- `failure.ts` — load-failure classification (terminal / network / load-failure).
+- `idle-policy.ts` — pure idle close-vs-reschedule decision and alarm-time math.
+- `ladder.ts` — the dtype/device fallback ladder data and its pure reducer.
+- `model-pref.ts` — persistence of the chosen model and idle timeout (`local-nano:model-pref:v1`).
+- `progress.ts` — the download-progress percent parser.
+- `protocol.ts` — the wire-message types and runtime guards shared across contexts.
 
 ## Session Lifecycle
 
