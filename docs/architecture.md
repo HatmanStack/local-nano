@@ -59,13 +59,13 @@ When you send a message:
 
 ## Offscreen document (`offscreen.ts`)
 
-The offscreen document is the actual model host. The service worker creates it once via `chrome.offscreen.createDocument` and never tears it down — keeping the model warm is the whole point. On the first stream request it calls `loadHeavy()`, which dynamically imports `@huggingface/transformers` and the polyfill (`offscreen.ts:76-79`), sets the ONNX wasm path to the bundled `dist/ort/` copy, and injects the config (see below). `ensureSession()` then creates the single long-lived `LanguageModel` session, shared across all tabs and URLs. A second concurrent stream on the shared session is rejected with a busy error rather than queued (`src/offscreen/busy-gate.ts`).
+The offscreen document is the actual model host. The service worker creates it once via `chrome.offscreen.createDocument` and never tears it down — keeping the model warm is the whole point. On the first stream request it calls `loadHeavy()`, which dynamically imports `@huggingface/transformers` and the polyfill (`offscreen.ts:127-128`), sets the ONNX wasm path to the bundled `dist/ort/` copy, and injects the config (see below). `ensureSession()` then creates the single long-lived `LanguageModel` session, shared across all tabs and URLs. A second concurrent stream on the shared session is rejected with a busy error rather than queued (`src/offscreen/busy-gate.ts`).
 
 ## Prompt API polyfill
 
 `vendor/prompt-api-polyfill/` is a slimmed copy of Google's polyfill, loaded inside the offscreen document. We strip every backend except Transformers.js (in `backends-registry.js`), remove the upstream iframe-injection block from `prompt-api-polyfill.js` (a `MutationObserver` over `documentElement` that was a meaningful perf cost on SPA-style host pages), and raise `max_new_tokens` from 1024 to 2048 in the Transformers backend. See [docs/prompt-api.md](prompt-api.md) for the full inventory of modifications and the resync procedure.
 
-`TransformersBackend` (in `vendor/prompt-api-polyfill/backends/transformers.js`) wraps `@huggingface/transformers`'s `pipeline()` and `TextStreamer`. Configuration comes from `window.TRANSFORMERS_CONFIG`, which the offscreen document populates: `offscreen.ts:20` does `import transformersConfig from './.env.json'` and `offscreen.ts:83` assigns it to `window.TRANSFORMERS_CONFIG` (model name, device, dtype). The content script never touches the config.
+`TransformersBackend` (in `vendor/prompt-api-polyfill/backends/transformers.js`) wraps `@huggingface/transformers`'s `pipeline()` and `TextStreamer`. Configuration comes from `window.TRANSFORMERS_CONFIG`, which the offscreen document populates: `offscreen.ts:21` does `import transformersConfig from './.env.json'` and `offscreen.ts:133` assigns it to `window.TRANSFORMERS_CONFIG` (model name, device, dtype). The content script never touches the config.
 
 ## Why a service worker, a content script, and an offscreen document?
 
@@ -129,8 +129,8 @@ Offscreen state (`offscreen.ts`, module-scoped, shared across all tabs):
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `heavyPromise` | `Promise \| null` | Memoizes the dynamic import of transformers + polyfill; nulled on failure to allow retry (`offscreen.ts:93`) |
-| `sessionPromise` | `Promise \| null` | Memoizes the single shared `LanguageModel` session; nulled on failure to allow retry (`offscreen.ts:127`) |
+| `heavyPromise` | `Promise \| null` | Memoizes the dynamic import of transformers + polyfill; nulled on failure to allow retry (`offscreen.ts:143`) |
+| `sessionPromise` | `Promise \| null` | Memoizes the single shared `LanguageModel` session; nulled on failure to allow retry (`offscreen.ts:201`) |
 | `generationGate` | `BusyGate` | Serializes the shared session: a second concurrent stream is rejected as busy |
 
 Chat-layer state (`src/session.ts`, per content-script closure):
@@ -187,8 +187,8 @@ version-locked npm deps. Vendoring keeps the diffs visible in this repo.
 ### ADR-004: Why the offscreen load promises are nulled on failure
 
 If `loadHeavy()` or `LanguageModel.create()` fails, the rejected promise must
-not be cached. `offscreen.ts` nulls `heavyPromise` (`offscreen.ts:93`) and
-`sessionPromise` (`offscreen.ts:127`) in their respective `catch` blocks.
+not be cached. `offscreen.ts` nulls `heavyPromise` (`offscreen.ts:143`) and
+`sessionPromise` (`offscreen.ts:201`) in their respective `catch` blocks.
 Without this, every subsequent `loadHeavy()` / `ensureSession()` call would
 return the same rejected promise and the model would be permanently unloadable
 until the offscreen document is recreated. Nulling on failure lets the next

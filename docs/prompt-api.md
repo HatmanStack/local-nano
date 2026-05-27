@@ -65,7 +65,7 @@ When pulling a new upstream commit of the polyfill:
 
 ## How it's wired in
 
-[`offscreen.ts`](../offscreen.ts) lazy-imports the polyfill alongside `@huggingface/transformers` on the first stream request (`offscreen.ts:76-79`):
+[`offscreen.ts`](../offscreen.ts) lazy-imports the polyfill alongside `@huggingface/transformers` on the first stream request (`offscreen.ts:127-128`):
 
 ```ts
 const [tfMod, polyfillMod] = await Promise.all([
@@ -78,13 +78,13 @@ The content script never loads these modules; it streams to the offscreen sessio
 
 The polyfill installs itself onto `globalThis.LanguageModel` at module load. We use the `LanguageModel` class exported directly from the module — not the global — so we never accidentally pick up a gated native implementation on hardware where it exists but doesn't actually run.
 
-Configuration flows through the polyfill via `window.TRANSFORMERS_CONFIG`, which the offscreen document populates: `offscreen.ts:20` does `import transformersConfig from './.env.json'` and `offscreen.ts:83` assigns it to `window.TRANSFORMERS_CONFIG`. The polyfill's Transformers backend reads `device`, `dtype`, and `modelName` from there. The content script does not touch the config.
+Configuration flows through the polyfill via `window.TRANSFORMERS_CONFIG`, which the offscreen document populates: `offscreen.ts:21` does `import transformersConfig from './.env.json'` and `offscreen.ts:133` assigns it to `window.TRANSFORMERS_CONFIG`. The polyfill's Transformers backend reads `device`, `dtype`, and `modelName` from there. The content script does not touch the config.
 
 The session itself is created once (`ensureSession`) and reused across every conversation turn and every tab:
 
 - `expectedInputs` / `expectedOutputs` advertise text-only English to the polyfill.
-- `initialPrompts` seeds a system turn with the hardcoded literal in `offscreen.ts:59` — `'You are a helpful assistant. Answer concisely and directly.'` — followed by any restored history turns (`buildInitialPrompts`, `offscreen.ts:100`). The polyfill normalizes the system role across model families — for Gemma (which has no native system role) it merges the content into the first user turn.
-- There is no `monitor`/`downloadprogress` wiring and no percentage UI. While the model loads, the content-script chat layer shows a live elapsed-seconds counter — `'Loading model… 0s'` ticking up `Loading model… ${secs}s` (`src/session.ts:682-690`) — and after ~45s it appends "taking longer than usual" remedies. The polyfill backend still emits download progress internally, but the app does not consume it.
+- `initialPrompts` seeds a system turn with the hardcoded literal in `offscreen.ts:81` — `'You are a helpful assistant. Answer concisely and directly.'` — followed by any restored history turns (`buildInitialPrompts`, `offscreen.ts:150`). The polyfill normalizes the system role across model families — for Gemma (which has no native system role) it merges the content into the first user turn.
+- A `monitor` IS wired in (ADR-R10, shipped 0.3.0): when the session is created with progress reporting, `offscreen.ts` passes a `monitor` into `LanguageModel.create()` whose `downloadprogress` events are relayed by `broadcastProgress` over the `STREAM_PROGRESS` port to the panel. The panel renders progress in phases: the real download percent as `'Downloading model NN%'`, then an indeterminate `'Loading into GPU…'` once the percent reaches 100 while the warmup is still pending, and — when no progress frame has arrived yet — a live elapsed-seconds counter starting at `'Loading model… 0s'` (`src/session.ts:1273`) that ticks up and, after ~45s, appends "taking longer than usual" remedies (`elapsedHint`, `src/session.ts:1286`). This matches the "Phased first-run download progress" entry in the 0.3.0 changelog. The percent/text parser lives in `src/offscreen/progress.ts`.
 
 Every turn calls `session.promptStreaming(input, { signal })` in the offscreen document, returning a `ReadableStream` of string chunks that are posted over the port and appended to the DOM in real time. The `AbortController` wired to the Stop button cancels mid-generation; the signal is threaded into the offscreen generator so decoding actually halts.
 
