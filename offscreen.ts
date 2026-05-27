@@ -11,10 +11,11 @@
  * frames until a `StreamDone` frame closes the exchange. Callers can
  * cancel mid-stream by posting `StreamAbort`.
  *
- * The heavy-module load mirrors the inline pattern in `src/session.ts` —
- * deliberately not extracted into a shared helper. v0.2 went down that
- * path with `src/heavy.ts` and was reverted; the duplication here keeps
- * the chat client and offscreen session independent.
+ * The heavy `@huggingface/transformers` import lives only here, in the
+ * offscreen document — the chat layer (`src/session.ts`) holds no model and
+ * streams over a port instead. The load is deliberately inline in this entry
+ * file: v0.2 extracted it into a shared `src/heavy.ts` helper and that was
+ * reverted, keeping the offscreen session self-contained.
  */
 
 import transformersConfig from './.env.json';
