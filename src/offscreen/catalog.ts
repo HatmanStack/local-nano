@@ -8,18 +8,21 @@
  * state machine: the `nextAction`/`firstTierIndex` reducer is model-agnostic and
  * walks whatever `Tier[]` it is handed (ADR-P1).
  *
- * A model is non-gated (always listed, live on every device) ONLY when
- * `docs/models.md` confirms it has a clean, currently-preferred working tier
- * (ADR-P2). Exactly two entries qualify:
+ * Non-gated (always listed, live) entries, each with a tier confirmed working by
+ * manual smoke testing:
  *
  * - `onnx-community/gemma-4-E2B-it-ONNX` (the default) at `webgpu/q4f16`.
- * - `onnx-community/Qwen2.5-0.5B-Instruct` at `wasm/q8` (the "smallest model
- *   that actually answers", the WASM-tier default in `docs/models.md`).
+ * - `onnx-community/Qwen2.5-0.5B-Instruct` at `wasm/q8` (WASM-only — WebGPU
+ *   parrots for this model; see `docs/models.md`).
+ * - `onnx-community/Qwen3-0.6B-ONNX` at `webgpu/q4f16` (the small WebGPU option;
+ *   loads and answers on the dev integrated GPU, WASM fallback behind it).
  *
- * Every other candidate sits behind an off-by-default build-time gate, read
- * through a function seam mirroring `isSmallerModelEnabled()` in `ladder.ts`, so
- * the picker can be exercised with gated entries on and off in tests via
- * `vi.spyOn` without flipping a production constant.
+ * Other candidates sit behind off-by-default build-time gates, read through a
+ * function seam mirroring `isSmallerModelEnabled()` in `ladder.ts`, so the picker
+ * can be exercised with gated entries on and off in tests via `vi.spyOn` without
+ * flipping a production constant. (Smoke-rejected candidates — the Qwen3.5 VL
+ * model, the unsupported `qwen3_5_text` arch, and Qwen3-1.7B on integrated GPUs —
+ * are recorded in `docs/models.md`.)
  *
  * No Chrome, polyfill, or timer dependency: this is pure data plus pure
  * accessors.
@@ -49,7 +52,6 @@ export interface CatalogEntry {
 /** Resolved gate states passed to each entry's visibility predicate. */
 interface GateState {
   largerEnabled: boolean;
-  qwen3Enabled: boolean;
 }
 
 /**
@@ -66,21 +68,6 @@ interface InternalEntry extends CatalogEntry {
 export const DEFAULT_MODEL_ID = PRIMARY_MODEL;
 
 /**
- * Build-time gate for `onnx-community/Qwen3.5-0.8B-ONNX`. DEFAULT OFF.
- *
- * Qwen3.5-0.8B is GATED, not live, because `docs/models.md` shows it has NO
- * clean, currently-preferred WebGPU tier: `webgpu/q4f16` fails numerically
- * (emits a few real tokens then loops one repeated token on Iris Xe), and
- * `webgpu/q4` only "worked historically" and carries the `q4` SIGILL caveat the
- * project deliberately moved off for the primary model (CHANGELOG 0.2.4). On
- * WASM, every quantized variant fails on `GatherBlockQuantized`, leaving only
- * the slow per-component path. Flipping this flag is a manual WebGPU-smoke
- * follow-up (ROADMAP #6), not a CI change: it must NOT be set true until a
- * manual smoke pass confirms a clean, SIGILL-free working tier on real hardware.
- */
-export const QWEN3_08B_ENABLED = false;
-
-/**
  * Build-time gate for the larger-than-default smoke-vetting candidate. DEFAULT
  * OFF.
  *
@@ -89,16 +76,6 @@ export const QWEN3_08B_ENABLED = false;
  * manual WebGPU-smoke follow-up (ROADMAP #6), not a CI change.
  */
 export const LARGER_MODEL_ENABLED = false;
-
-/**
- * Read the Qwen3.5-0.8B gate through a function seam so the picker can be
- * exercised with the gated entry on and off in tests (`vi.spyOn`) without
- * flipping the production constant. Production always returns
- * `QWEN3_08B_ENABLED` (false).
- */
-export function isQwen3_08bEnabled(): boolean {
-  return QWEN3_08B_ENABLED;
-}
 
 /**
  * Read the larger-model gate through a function seam, mirroring
@@ -112,8 +89,13 @@ export function isLargerModelEnabled(): boolean {
 /**
  * The non-gated smaller entry: `onnx-community/Qwen2.5-0.5B-Instruct`, the only
  * smaller model `docs/models.md` confirms working, at the only cell it vets
- * (`wasm/q8`). The same model `ladder.ts` names as `SMALLER_MODEL_CANDIDATE`. It
- * is given NO WebGPU tier here because the guide does not vet one.
+ * (`wasm/q8`). WebGPU was smoke-tested 2026-05-26 and REJECTED for this model:
+ * both `q4f16` and `fp16` PARROT the input on this GPU class. It is not a
+ * precision problem — the more-quantized `wasm/q8` answers correctly while
+ * full-precision `fp16` on WebGPU does not — but a WebGPU execution-provider
+ * correctness issue for this model's ops (gemma is unaffected on WebGPU). A
+ * WebGPU tier would be a landmine here: it LOADS, so the ladder cannot
+ * auto-recover from the garbage. So this entry stays WASM-only.
  */
 const SMALLER_ENTRY: InternalEntry = {
   id: 'onnx-community/Qwen2.5-0.5B-Instruct',
@@ -121,6 +103,31 @@ const SMALLER_ENTRY: InternalEntry = {
   downloadSize: '~0.5 GB',
   note: 'smallest that answers; CPU/WASM only, ~1-3 tok/s',
   tiers: [{ modelName: 'onnx-community/Qwen2.5-0.5B-Instruct', device: 'wasm', dtype: 'q8' }],
+  gated: false,
+  isVisible: () => true,
+};
+
+/**
+ * The non-gated small WebGPU entry: `onnx-community/Qwen3-0.6B-ONNX`. Verified
+ * text-only (`Qwen3ForCausalLM`, `qwen3`, no `vision_config`), single-file ONNX.
+ * Smoke-accepted 2026-05-26 as the small WebGPU option — it loads and answers on
+ * the dev integrated GPU (it is a reasoning model; the `<think>` block is
+ * stripped in `src/think-strip.ts`). Leads with `webgpu/q4f16`, then WASM
+ * `q8` → `fp16`. Caveat: `q4f16` is vetted only on the dev's GPU; like any
+ * small-model WebGPU tier it could parrot on other GPUs (as Qwen2.5 did) with no
+ * auto-recovery, since parroting is not a load failure — accepted for release as
+ * the lightweight Q&A option, with gemma-4-E2B remaining the capable default.
+ */
+const QWEN3_06B_ENTRY: InternalEntry = {
+  id: 'onnx-community/Qwen3-0.6B-ONNX',
+  displayName: 'Qwen3 0.6B',
+  downloadSize: '~0.5 GB',
+  note: 'small WebGPU model; prefers WebGPU (q4f16), WASM fallback',
+  tiers: [
+    { modelName: 'onnx-community/Qwen3-0.6B-ONNX', device: 'webgpu', dtype: 'q4f16' },
+    { modelName: 'onnx-community/Qwen3-0.6B-ONNX', device: 'wasm', dtype: 'q8' },
+    { modelName: 'onnx-community/Qwen3-0.6B-ONNX', device: 'wasm', dtype: 'fp16' },
+  ],
   gated: false,
   isVisible: () => true,
 };
@@ -138,33 +145,6 @@ const DEFAULT_ENTRY: InternalEntry = {
   tiers: PRIMARY_LADDER,
   gated: false,
   isVisible: () => true,
-};
-
-/**
- * The gated Qwen3.5-0.8B entry. Gated because `docs/models.md` shows no clean
- * preferred WebGPU tier (numerical breakdown on `q4f16`; SIGILL-caveated `q4`
- * the project abandoned). The only vetted path is the slow per-component WASM
- * config `{embed_tokens: 'fp16', decoder_model_merged: 'q8'}` (~50s TTFT for a
- * 1500-char context), encoded here as the single tier so no clean WebGPU tier is
- * claimed. `dtype` is a JSON string of the per-component object the
- * transformers v4 object form accepts; the note marks this entry as a
- * manual-smoke target. Flipping `QWEN3_08B_ENABLED` is a manual WebGPU-smoke
- * follow-up, not a CI change.
- */
-const QWEN3_08B_ENTRY: InternalEntry = {
-  id: 'onnx-community/Qwen3.5-0.8B-ONNX',
-  displayName: 'Qwen3.5 0.8B',
-  downloadSize: '~0.8 GB',
-  note: 'WebGPU-quirky; WASM only via slow per-component path; unvetted on WebGPU',
-  tiers: [
-    {
-      modelName: 'onnx-community/Qwen3.5-0.8B-ONNX',
-      device: 'wasm',
-      dtype: '{"embed_tokens":"fp16","decoder_model_merged":"q8"}',
-    },
-  ],
-  gated: true,
-  isVisible: (gates) => gates.qwen3Enabled,
 };
 
 /**
@@ -190,7 +170,6 @@ const LARGER_ENTRY: InternalEntry = {
 /** Options that override the gate states (default to the production seams). */
 interface GateOpts {
   largerEnabled?: boolean;
-  qwen3Enabled?: boolean;
 }
 
 /**
@@ -198,12 +177,17 @@ interface GateOpts {
  * position. Gated entries are filtered by `listCatalog`/`findCatalogEntry` via
  * each entry's own `isVisible`.
  */
-const ALL_ENTRIES: InternalEntry[] = [SMALLER_ENTRY, DEFAULT_ENTRY, QWEN3_08B_ENTRY, LARGER_ENTRY];
+const ALL_ENTRIES: InternalEntry[] = [
+  SMALLER_ENTRY,
+  QWEN3_06B_ENTRY,
+  DEFAULT_ENTRY,
+  LARGER_ENTRY,
+];
 
 /**
- * The visible catalog. Returns the non-gated entries always (the default +
- * Qwen2.5-0.5B), and includes a gated entry only when its gate is on. Order is
- * smallest to largest with the default in its size position.
+ * The visible catalog. Returns the non-gated entries always (gemma default,
+ * Qwen2.5-0.5B, Qwen3-0.6B), and includes a gated entry only when its gate is on.
+ * Order is smallest to largest with the default in its size position.
  */
 export function listCatalog(opts: GateOpts = {}): CatalogEntry[] {
   // Route the default through the module's own exports so tests can drive the
@@ -212,7 +196,6 @@ export function listCatalog(opts: GateOpts = {}): CatalogEntry[] {
   // import lets the spy intercept).
   const gates: GateState = {
     largerEnabled: opts.largerEnabled ?? self.isLargerModelEnabled(),
-    qwen3Enabled: opts.qwen3Enabled ?? self.isQwen3_08bEnabled(),
   };
   return ALL_ENTRIES.filter((e) => e.isVisible(gates));
 }

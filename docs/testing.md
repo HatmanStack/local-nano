@@ -24,6 +24,7 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 | `tests/background-handler.test.ts`   | Command handler (toggle, ignore unknown, no-id) |
 | `tests/background-offscreen.test.ts` | `ensureOffscreen` document lifecycle         |
 | `tests/session.test.ts`              | `initSession` — lifecycle, streaming, abort, toggle, restore re-seed, quota advisory, gear settings popover (model list, idle-timeout, Load control) |
+| `tests/think-strip.test.ts`          | `stripThink` streaming `<think>…</think>` reasoning-block remover (partial-marker hold, append-only visible stream) |
 | `tests/stream-client.test.ts`        | `streamOverPort` port wiring and chunk accumulation |
 | `tests/offscreen-client.test.ts`     | `streamPrompt` content-script client over the SW |
 | `tests/offscreen-protocol.test.ts`   | Wire-message discriminators and finiteness guards (incl. `isProgressFrame`) |

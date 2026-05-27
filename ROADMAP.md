@@ -9,48 +9,54 @@ feature-shaped (design via `/brainstorm` then build via `/pipeline`), and some a
 process/release work (a checklist, an `/audit`, a manual test matrix). Sequence and
 vehicle below.
 
-## Status (updated 2026-05-24)
+## Status (updated 2026-05-26)
 
 Workstreams 1-5 shipped in **v0.3.0** (model-load resilience: graceful failure,
 fallback ladder, capability-based model selection, phased download progress,
-copy-only diagnostic). #7 (release hygiene) is done; #8 (store listing) is
-submitted; #6 (manual smoke) passed a first real-device run. The sections below
-are kept as the design record for that effort.
+copy-only diagnostic). #6/#7/#8 (manual smoke, release hygiene, store listing) are
+done; v0.3.0 is on the Web Store.
 
-## Next priority (post-0.3.0): idle resource release
+**v0.4.0** (in progress) adds the user model picker (gear popover, curated
+catalog, select-then-Load, update-surviving preference), idle resource release
+(`chrome.alarms` inactivity timer, SW-owned hard close, send-path re-warm), and
+reasoning-model `<think>` stripping. The shipped catalog (3 live models):
+gemma-4-E2B (`webgpu/q4f16`, capable default), Qwen2.5-0.5B (`wasm/q8`, light),
+and Qwen3-0.6B (`webgpu/q4f16`, small WebGPU option). Catalog smoke findings
+(see `docs/models.md`): Qwen2.5-0.5B is WASM-only (WebGPU parrots — a WebGPU-EP
+correctness issue for that model, not precision); Qwen3.5-0.8B is vision-language
+(rejected); `Qwen3.5-0.8B-Text` failed to load (the `qwen3_5_text` arch is not
+implemented by transformers@4.2.0); Qwen3-1.7B's WebGPU load-failed on a 4 GiB
+integrated GPU (only the unusable `wasm/fp16` loaded). The sections below are kept
+as the design record for the v0.3.0 effort.
 
-The model is never released after use. Once warmed, the offscreen document holds
-the multi-GB WebGPU session for the entire browser session: the close button only
-hides the panel, and the session is destroyed only on a tier switch or manual
-Retry (`offscreen.ts:215,371`); `closeOffscreen()` runs only via Retry/tests.
-There is no idle teardown, no release when the last panel closes, and no tab-close
-hook. (Audit found no classic accumulating leak — timers, ports, and listeners are
-cleaned up; this is one large, never-released allocation.)
+## Next priority (post-0.4.0): cancel an in-flight model load
 
-Why it's next: memory is the historical killer for this project (the v0.2.0 OOM),
-a wide audience includes weak machines, and a persistent multi-GB GPU allocation is
-a plausible memory-pressure contributor — a Chrome crash was observed 2026-05-24,
-though one crash is not yet conclusive (could be a Dawn/driver/kernel fault).
+A model load cannot be interrupted today. While a load is in flight the action
+button sits in the disabled "Loading…" state and the popover Load button is either
+disabled (during a switch) or merely queues behind the current load (during the
+initial panel-open warm, via `reloadModel`'s `await warmInFlight`). There is no way
+to abandon a slow or wrong load and start a different model — you wait it out. (See
+the model-picker code in `src/session.ts`: `ensureWarm`/`runWarm`, `reloadModel`,
+`refreshLoadControl`, `applyPendingModel`.)
 
-Approach: free the model (close the offscreen document) after a period of
-inactivity OR when the last panel closes, and re-warm on next use. This is
-explicitly NOT the removed churny per-stream-error auto-rebuild (do not reintroduce
-that) — idle-release frees memory only when genuinely unused, trading a one-time
-reload when the user returns.
+Approach: a "Cancel" / "Stop loading" affordance shown during warming that signals
+the in-flight ladder walk to stop CLEANLY (return to idle, not render a
+terminal/network failure bubble), plus `recreateOffscreen()` to actually kill the
+pending `LanguageModel.create()` (transformers.js loads are not directly
+abortable). The new load then serializes behind the cancelled one through the
+existing `warmInFlight`/`reWarmInFlight` locks.
 
 Caveats:
 
-1. Touches the single-shared-session / offscreen lifecycle — handle with care (the
-   v0.2.0 OOM and the removed guard both came from this area).
-1. Not unit-testable: needs a cross-device manual smoke pass (CI can't exercise WebGPU).
-1. A full browser/tab crash is not catchable by the extension; idle-release reduces
-   pressure, it does not "gracefully handle" a crash.
+1. Touches the single-shared-session / offscreen load lifecycle — the most fragile,
+   OOM-prone area (the v0.2.0 OOM). `runWarm`'s catch must distinguish "cancelled"
+   from "load failed" so a cancel never advances the ladder or shows a crash
+   bubble, and the new load must not start until the cancelled one fully unwinds
+   (no two concurrent loads).
+1. Not unit-testable end to end: needs a manual WebGPU smoke pass (CI can't
+   exercise real model loads).
 
-Evidence to gather first: on recurrence, capture the Copy diagnostic (device /
-adapter / buffer size) and `chrome://gpu` to distinguish memory pressure from a
-driver/kernel crash.
-
-Vehicle: `/brainstorm` then `/pipeline`, targeting 0.3.1 / 0.4.0.
+Vehicle: `/brainstorm` then `/pipeline`. Medium lift, high review/smoke overhead.
 
 ## Sequencing
 

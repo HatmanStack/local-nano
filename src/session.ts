@@ -21,7 +21,6 @@ import {
   DEFAULT_MODEL_ID,
   findCatalogEntry,
   isLargerModelEnabled,
-  isQwen3_08bEnabled,
   listCatalog,
 } from './offscreen/catalog.js';
 import {
@@ -69,6 +68,7 @@ import {
   streamRewriteIntoRange,
   undoRewrite,
 } from './selection-rewrite.js';
+import { stripThink } from './think-strip.js';
 import { makeTypingIndicator, renderMessage } from './ui/messages.js';
 import { setGeneratingState, setIdleState, setLoadingState } from './ui/state.js';
 
@@ -505,16 +505,34 @@ export function initSession(deps: SessionDeps): SessionController {
     // schedule cannot break the send.
     void touchIdle();
 
-    let modelText = '';
-    let firstChunk = true;
+    // Accumulate the RAW model output separately from the VISIBLE text. Reasoning
+    // models (Qwen3, etc.) stream a `<think>…</think>` block we must not show;
+    // `stripThink` recomputes the visible text from the full raw buffer each chunk
+    // (robust to markers split across chunk boundaries). While the model is still
+    // "thinking" the visible text is empty, so we keep the typing indicator up
+    // until the first visible token, then swap to the answer.
+    let rawText = '';
+    let modelText = ''; // visible text (think blocks stripped) — also what we persist
+    let shownFirstVisible = false;
     const onChunk = (chunk: string) => {
-      if (firstChunk) {
+      rawText += chunk;
+      const visible = stripThink(rawText);
+      if (visible === modelText) return; // still thinking / held partial marker
+      // `visible` extends `modelText` in the normal forward-streaming case; the
+      // delta drives the rewrite path's incremental apply. Guard with startsWith
+      // so a rare non-prefix recompute never feeds a bogus delta downstream (the
+      // full-text render below stays correct regardless).
+      const delta = visible.startsWith(modelText) ? visible.slice(modelText.length) : '';
+      modelText = visible;
+      if (!shownFirstVisible) {
+        // First visible token: drop the warmup hint + typing indicator and clear
+        // the bubble so the answer renders from a clean slate.
         if (preHint?.parentNode) preHint.remove();
+        if (indicator.parentNode) indicator.remove();
         responseEl.textContent = '';
-        firstChunk = false;
+        shownFirstVisible = true;
       }
-      extraOnChunk?.(chunk);
-      modelText += chunk;
+      if (delta) extraOnChunk?.(delta);
       responseEl.textContent = modelText;
       messages.scrollTop = messages.scrollHeight;
     };
@@ -568,10 +586,11 @@ export function initSession(deps: SessionDeps): SessionController {
           activeAbort = null;
           await reloadModel();
           activeAbort = new AbortController();
-          // Reset the per-attempt accumulator so the retry renders fresh from
-          // its first chunk (firstChunk clears the bubble on the next token).
+          // Reset the per-attempt accumulators so the retry renders fresh from its
+          // first visible token (onChunk clears the bubble on the next one).
+          rawText = '';
           modelText = '';
-          firstChunk = true;
+          shownFirstVisible = false;
           await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
           succeeded = true;
         } catch (retryErr: unknown) {
@@ -1332,7 +1351,6 @@ export function initSession(deps: SessionDeps): SessionController {
         prefId === null
           ? null
           : findCatalogEntry(prefId, {
-              qwen3Enabled: isQwen3_08bEnabled(),
               largerEnabled: isLargerModelEnabled(),
             });
       const ladder = assembleLadderForModel({
@@ -1784,7 +1802,6 @@ export function initSession(deps: SessionDeps): SessionController {
     const resolved =
       storedId !== null &&
       findCatalogEntry(storedId, {
-        qwen3Enabled: isQwen3_08bEnabled(),
         largerEnabled: isLargerModelEnabled(),
       }) !== null
         ? storedId

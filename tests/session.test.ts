@@ -2586,11 +2586,13 @@ describe('initSession — popover model list', () => {
     await flushMicrotasks();
     const popover = findPopover(deps._root);
     const rows = modelRows(popover);
-    // Production (all gates off): two rows, gemma default + Qwen2.5-0.5B.
-    expect(rows.length).toBe(2);
+    // Production (larger gate off): three non-gated rows — gemma default,
+    // Qwen2.5-0.5B, and Qwen3-0.6B.
+    expect(rows.length).toBe(3);
     const ids = rows.map((r) => r.getAttribute('data-model-id'));
     expect(ids).toContain(DEFAULT_MODEL_ID);
     expect(ids).toContain(QWEN25_05B);
+    expect(ids).toContain('onnx-community/Qwen3-0.6B-ONNX');
     // The Qwen row carries its displayName, size, and note text.
     const qwen = rowFor(popover, QWEN25_05B);
     expect(qwen.textContent).toContain('Qwen2.5 0.5B Instruct');
@@ -2598,13 +2600,15 @@ describe('initSession — popover model list', () => {
     expect(qwen.textContent).toContain('smallest that answers');
   });
 
-  it('in production only the two non-gated models render', async () => {
+  it('in production only the three non-gated models render', async () => {
     const deps = makeDepsWithHeader();
     initSession(deps);
     findGearButton(deps._header).click();
     await flushMicrotasks();
     const ids = modelRows(findPopover(deps._root)).map((r) => r.getAttribute('data-model-id'));
-    expect(ids.sort()).toEqual([DEFAULT_MODEL_ID, QWEN25_05B].sort());
+    expect(ids.sort()).toEqual(
+      [DEFAULT_MODEL_ID, QWEN25_05B, 'onnx-community/Qwen3-0.6B-ONNX'].sort(),
+    );
   });
 
   it('marks the default model as the current selection when no preference is stored', async () => {
@@ -2635,15 +2639,15 @@ describe('initSession — popover model list', () => {
     expect(rowFor(popover, DEFAULT_MODEL_ID).getAttribute('aria-checked')).toBe('false');
   });
 
-  it('shows a gated entry when its gate flag is on (spy isQwen3_08bEnabled)', async () => {
-    const spy = vi.spyOn(catalogModule, 'isQwen3_08bEnabled').mockReturnValue(true);
+  it('shows a gated entry when its gate flag is on (spy isLargerModelEnabled)', async () => {
+    const spy = vi.spyOn(catalogModule, 'isLargerModelEnabled').mockReturnValue(true);
     try {
       const deps = makeDepsWithHeader();
       initSession(deps);
       findGearButton(deps._header).click();
       await flushMicrotasks();
       const ids = modelRows(findPopover(deps._root)).map((r) => r.getAttribute('data-model-id'));
-      expect(ids).toContain('onnx-community/Qwen3.5-0.8B-ONNX');
+      expect(ids).toContain('onnx-community/LARGER-MODEL-PLACEHOLDER');
     } finally {
       spy.mockRestore();
     }
