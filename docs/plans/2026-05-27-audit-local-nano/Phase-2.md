@@ -16,14 +16,14 @@ small and individually committed:
 
 **Success criteria:**
 
-- A generation in flight (gate busy) blocks the tier-change teardown and the
+- [x] A generation in flight (gate busy) blocks the tier-change teardown and the
   count-tokens measure; behavior is reject/skip, never a concurrent destroy.
-- The incremental strip produces byte-identical visible output to
+- [x] The incremental strip produces byte-identical visible output to
   `stripThink(fullBuffer)` for arbitrary chunk boundaries (property test),
   preserving every existing `tests/think-strip.test.ts` case.
-- `WarmupTier` and `Tier` share one structural source; the hand conversion in
+- [x] `WarmupTier` and `Tier` share one structural source; the hand conversion in
   `offscreen.ts` is gone; the runtime validator `isWarmupTier` still works.
-- All gates green, coverage thresholds held.
+- [x] All gates green, coverage thresholds held.
 
 **Estimated tokens:** ~40k.
 
@@ -316,15 +316,17 @@ the hand conversion. Runtime validator isWarmupTier is unchanged.
 
 ## Phase Verification
 
-- [ ] `npm run lint:ci` — exit 0 (direct, not piped).
-- [ ] `npm run typecheck` — exit 0.
-- [ ] `npm test` — all pass (new property test + all prior cases).
-- [ ] `npm run coverage` — thresholds held (line ≥ 75, others ≥ 80); new logic
+- [x] `npm run lint:ci` — exit 0 (direct, not piped).
+- [x] `npm run typecheck` — exit 0.
+- [x] `npm test` — all pass (new property test + all prior cases).
+- [x] `npm run coverage` — thresholds held (line ≥ 75, others ≥ 80); new logic
       covered.
-- [ ] `npm run build` — succeeds, no import cycle.
-- [ ] Constraint 2 re-verified: no path begins a second load or destroy while a
+- [x] `npm run build` — succeeds, no import cycle.
+- [x] Constraint 2 re-verified: no path begins a second load or destroy while a
       generation holds the gate.
-- [ ] If a test file was added, `docs/testing.md`'s test-file table is accurate
-      (drift-guard `tests/docs-config.test.ts` green).
-- [ ] Three atomic commits (2.1, 2.2, 2.3), conventional format, no
+- [x] If a test file was added, `docs/testing.md`'s test-file table is accurate
+      (drift-guard `tests/docs-config.test.ts` green). No NEW test file added
+      (extended `tests/think-strip.test.ts`), so the table is unchanged and the
+      drift-guard passes.
+- [x] Three atomic commits (2.1, 2.2, 2.3), conventional format, no
       `Co-Authored-By`.
