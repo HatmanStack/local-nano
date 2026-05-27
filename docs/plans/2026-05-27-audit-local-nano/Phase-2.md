@@ -201,17 +201,17 @@ strip that processes only the delta, while preserving EXACT equivalence
 
 **Verification Checklist:**
 
-- [ ] Property test asserts incremental == full-buffer `stripThink` over many
+- [x] Property test asserts incremental == full-buffer `stripThink` over many
       chunk splittings for: plain, complete block, multiple blocks, unclosed,
       text-before, literal `<`, split OPEN marker, split CLOSE marker.
-- [ ] All pre-existing `tests/think-strip.test.ts` cases still pass.
-- [ ] `session.ts` `onChunk` no longer calls `stripThink(rawText)` on the full
+- [x] All pre-existing `tests/think-strip.test.ts` cases still pass.
+- [x] `session.ts` `onChunk` no longer calls `stripThink(rawText)` on the full
       buffer each chunk; the visible stream stays append-only and the
       `delta`/`extraOnChunk` rewrite contract is preserved.
-- [ ] Per-chunk work is bounded by the delta + a constant tail (verified by code
+- [x] Per-chunk work is bounded by the delta + a constant tail (verified by code
       review / the design, not a timing assertion).
-- [ ] No flaky timing-based test added.
-- [ ] `npm run typecheck`, `npm test`, `npm run coverage` green; the incremental
+- [x] No flaky timing-based test added.
+- [x] `npm run typecheck`, `npm test`, `npm run coverage` green; the incremental
       code is covered.
 
 **Testing Instructions:** `npm test` (focus `tests/think-strip.test.ts`) then

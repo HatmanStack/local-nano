@@ -68,7 +68,7 @@ import {
   streamRewriteIntoRange,
   undoRewrite,
 } from './selection-rewrite.js';
-import { stripThink } from './think-strip.js';
+import { createThinkStripper } from './think-strip.js';
 import { makeTypingIndicator, renderMessage } from './ui/messages.js';
 import { setGeneratingState, setIdleState, setLoadingState } from './ui/state.js';
 
@@ -505,18 +505,20 @@ export function initSession(deps: SessionDeps): SessionController {
     // schedule cannot break the send.
     void touchIdle();
 
-    // Accumulate the RAW model output separately from the VISIBLE text. Reasoning
+    // Strip the RAW model output into VISIBLE text incrementally. Reasoning
     // models (Qwen3, etc.) stream a `<think>…</think>` block we must not show;
-    // `stripThink` recomputes the visible text from the full raw buffer each chunk
-    // (robust to markers split across chunk boundaries). While the model is still
+    // the stripper processes only each chunk's delta while carrying open-block
+    // and partial-marker state (robust to markers split across chunk
+    // boundaries), so a long think block no longer makes the render loop
+    // O(n^2). It returns the new FULL visible text — provably equal to
+    // `stripThink` over the whole raw buffer. While the model is still
     // "thinking" the visible text is empty, so we keep the typing indicator up
     // until the first visible token, then swap to the answer.
-    let rawText = '';
+    let stripper = createThinkStripper();
     let modelText = ''; // visible text (think blocks stripped) — also what we persist
     let shownFirstVisible = false;
     const onChunk = (chunk: string) => {
-      rawText += chunk;
-      const visible = stripThink(rawText);
+      const visible = stripper.push(chunk);
       if (visible === modelText) return; // still thinking / held partial marker
       // `visible` extends `modelText` in the normal forward-streaming case; the
       // delta drives the rewrite path's incremental apply. Guard with startsWith
@@ -587,8 +589,10 @@ export function initSession(deps: SessionDeps): SessionController {
           await reloadModel();
           activeAbort = new AbortController();
           // Reset the per-attempt accumulators so the retry renders fresh from its
-          // first visible token (onChunk clears the bubble on the next one).
-          rawText = '';
+          // first visible token (onChunk clears the bubble on the next one). A
+          // fresh stripper drops any partial-marker/open-block state from the
+          // dead attempt.
+          stripper = createThinkStripper();
           modelText = '';
           shownFirstVisible = false;
           await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
