@@ -49,7 +49,7 @@ Remediation is deferred because the fix requires a Vitest major upgrade (a break
 - **Service worker logs.** Click the **service worker** link on the extension's card at `chrome://extensions`. That opens a dedicated DevTools for the worker.
 - **Offscreen document logs.** The model runs in a hidden offscreen document. Its logs (prefixed `[local-nano/offscreen]`, including `heavy modules loaded`) appear in the offscreen document's own DevTools, reachable from `chrome://extensions` → the extension's **Inspect views** list (look for `offscreen.html`).
 - **Storage.** Inspect persisted chat history at DevTools → Application → Storage → Extension Storage.
-- **Model load progress.** While the model loads the panel shows a live elapsed-seconds counter (`Loading model… Ns`), not a percentage; after ~45s it appends "taking longer than usual" remedies. If you see a permission error, the host permissions in `manifest.json` are the place to look — Transformers.js fetches from `huggingface.co` and `cdn-lfs.huggingface.co`.
+- **Model load progress.** While the model loads the panel shows a real download percentage (`Downloading model NN%`) when progress frames arrive, falling back to a live elapsed-seconds counter (`Loading model… Ns`) when no frame arrives or for a cached load; after ~45s the counter appends "taking longer than usual" remedies. If you see a permission error, the host permissions in `manifest.json` are the place to look — Transformers.js fetches from `huggingface.co` and `cdn-lfs.huggingface.co`.
 
 ## Project layout
 
