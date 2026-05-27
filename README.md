@@ -43,7 +43,7 @@ A Chrome extension with a small, **fully local** AI assistant that **edits the p
 
 ## Install (from source)
 
-This isn't on the Chrome Web Store. To try it:
+To run the current source or the latest build:
 
 ```bash
 git clone https://github.com/HatmanStack/local-nano.git
