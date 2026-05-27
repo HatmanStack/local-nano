@@ -336,6 +336,19 @@ function handleRebuildSession(msg: RebuildSessionRequest, sendResponse: SendResp
 // slow or broken count never blocks a transform.
 function handleCountTokens(msg: CountTokensRequest, sendResponse: SendResponse): void {
   (async () => {
+    // Skip the measure while a generation holds the gate (eval Pragmatism 8->9,
+    // ADR-1): measureContextUsage touches the shared session, which a concurrent
+    // warmup teardown could be tearing down. Reply non-fatal so the client's
+    // heuristic fallback takes over — a skipped count never blocks a transform.
+    if (generationGate.busy) {
+      const busy: CountTokensResponse = {
+        type: COUNT_TOKENS_RESPONSE,
+        ok: false,
+        error: 'busy: a generation is in progress',
+      };
+      sendResponse(busy);
+      return;
+    }
     try {
       const session = await ensureSession();
       const count = await session.measureContextUsage(msg.text);
@@ -373,7 +386,28 @@ function handleWarmup(msg: WarmupRequest, sendResponse: SendResponse): void {
         // destroy it and null sessionPromise before creating, so two loads never
         // overlap. The normal ladder advance recreates the whole document first,
         // so sessionPromise is null and this is a no-op.
-        if (sessionPromise && (activeTier === null || tierKey(activeTier) !== tierKey(tier))) {
+        const tierChange =
+          sessionPromise !== null && (activeTier === null || tierKey(activeTier) !== tierKey(tier));
+        // Enforce the single-load invariant via the gate MECHANISM, not the
+        // caller contract (eval Pragmatism 8->9, ADR-1). The destructive teardown
+        // below would destroy the live session and start a second load; if a
+        // generation holds the gate, that overlaps a load with an in-flight
+        // generator — the v0.2.0 OOM. Refuse while busy (mirrors the stream
+        // path's reject-when-busy policy) so a future warmup entry point cannot
+        // reintroduce the overlap. The check is a one-liner against the existing
+        // BusyGate, so no extracted predicate is warranted (Phase 2 step 5).
+        // Loading a fresh session when none exists (no tier change) is NOT a
+        // concurrency hazard, so it is left unguarded below.
+        if (tierChange && generationGate.busy) {
+          const busy: WarmupResponse = {
+            type: WARMUP_RESPONSE,
+            ok: false,
+            error: 'busy: a generation is in progress',
+          };
+          sendResponse(busy);
+          return;
+        }
+        if (tierChange) {
           try {
             const previous = await sessionPromise;
             previous?.destroy();
