@@ -37,6 +37,12 @@ This runs esbuild in watch mode. After each save, refresh the extension at `chro
 | `npm run test:watch` | Vitest in watch mode                                          |
 | `npm run coverage`   | Vitest run + v8 coverage report, enforcing the thresholds set in `vitest.config.ts` |
 
+## Dependency advisories
+
+`npm audit` reports moderate advisories (6 as of 2026-05-27), all confined to the dev/CI-only `vitest → vite → esbuild` chain. Production exposure is zero — `npm audit --omit=dev` reports 0 vulnerabilities, and none of these packages ship in the extension bundle.
+
+Remediation is deferred because the fix requires a Vitest major upgrade (a breaking change to the test toolchain). This is a tracked follow-up, not accepted production risk — revisit when bumping Vitest is otherwise warranted.
+
 ## Debugging
 
 - **Content script logs.** Open DevTools on the page itself. The extension prefixes everything with `[local-nano]`.
