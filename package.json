@@ -17,13 +17,13 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",
-    "@types/chrome": "^0.0.270",
-    "@vitest/coverage-v8": "^2.1.5",
-    "esbuild": "^0.24.0",
-    "jsdom": "^25.0.1",
-    "onnxruntime-web": "1.26.0-dev.20260416-b7804b056c",
-    "typescript": "^5.6.0",
-    "vitest": "^2.1.5"
+    "@types/chrome": "^0.1.42",
+    "@vitest/coverage-v8": "^4.1.7",
+    "esbuild": "^0.28.0",
+    "jsdom": "^29.1.1",
+    "onnxruntime-web": "1.26.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0"
