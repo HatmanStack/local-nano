@@ -11,6 +11,9 @@ coverage/
 .DS_Store
 Thumbs.db
 
+# Dev screenshots
+/Screenshot *.png
+
 # Local skill-runs manifest (per-developer audit/pipeline history)
 .claude/
 web-store/
