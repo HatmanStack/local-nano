@@ -219,6 +219,11 @@ async function rebuildSession(history: HistoryTurn[]): Promise<void> {
     // Previous session may have failed to load — nothing to destroy.
   }
   sessionPromise = null;
+  // Clear the tier mirror too: it must not outlive the session it describes.
+  // Leaving it stale here is a latent OOM-guard bypass — if the handleWarmup
+  // destroy-guard (ADR-R1/R3) is ever reordered, a stale activeTier could skip
+  // the destroy that prevents overlapping loads.
+  activeTier = null;
   await ensureSession(history);
 }
 
