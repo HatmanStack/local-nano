@@ -198,7 +198,11 @@ export async function handleAlarm(alarm: { name: string }): Promise<void> {
  * channel-race discipline so a sibling listener can still answer.
  */
 export function installEnsureListener(): void {
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    // Defense in depth: only field messages from THIS extension. Chrome already
+    // bars cross-extension messaging when `externally_connectable` is unset,
+    // but the explicit check makes the trust boundary visible to a reviewer.
+    if (sender.id !== chrome.runtime.id) return false;
     if (isEnsureOffscreenRequest(msg)) {
       ensureOffscreen().then(
         () => {

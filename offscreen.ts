@@ -463,7 +463,12 @@ function handleIsBusy(sendResponse: SendResponse): void {
 // it owns the message (keeping the async channel open) and false for
 // everything else, letting other contexts' listeners field their own
 // messages.
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Defense in depth: only field messages from THIS extension. Same rationale
+  // as the SW listener in src/background/offscreen.ts — the trust boundary is
+  // already enforced by Chrome (no externally_connectable), but the explicit
+  // check makes it visible.
+  if (sender.id !== chrome.runtime.id) return false;
   const kind = classifyOffscreenMessage(msg);
   if (!kind) return false;
   switch (kind) {

@@ -122,6 +122,7 @@ const chromeMock = {
   storage: { local },
   alarms,
   runtime: {
+    id: 'test-ext',
     getURL: vi.fn((p: string) => `chrome-extension://test/${p}`),
     getManifest: vi.fn(() => ({ version: '0.2.4' })),
     onMessage: { addListener: vi.fn() },
@@ -129,7 +130,14 @@ const chromeMock = {
     lastError: undefined as { message?: string } | undefined,
     connect: vi.fn((opts: { name: string }) => new FakePort(opts.name)),
   },
-  commands: { onCommand: { addListener: vi.fn() } },
+  commands: {
+    onCommand: { addListener: vi.fn() },
+    getAll: vi.fn(async () => [] as Array<{ name?: string; shortcut?: string }>),
+  },
+  action: {
+    onClicked: { addListener: vi.fn() },
+    setTitle: vi.fn(async (_opts: { title: string }) => undefined),
+  },
   tabs: {
     query: vi.fn((_q: unknown, cb: (tabs: Array<{ id?: number }>) => void) => cb([{ id: 1 }])),
     sendMessage: vi.fn(),
@@ -161,6 +169,11 @@ beforeEach(() => {
     (opts: { name: string }) => new FakePort(opts.name),
   );
   chromeMock.commands.onCommand.addListener.mockClear();
+  chromeMock.commands.getAll.mockClear();
+  chromeMock.commands.getAll.mockImplementation(async () => []);
+  chromeMock.action.onClicked.addListener.mockClear();
+  chromeMock.action.setTitle.mockClear();
+  chromeMock.action.setTitle.mockImplementation(async (_opts: { title: string }) => undefined);
   chromeMock.tabs.query.mockClear();
   chromeMock.tabs.sendMessage.mockClear();
   chromeMock.offscreen.createDocument.mockClear();

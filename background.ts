@@ -1,4 +1,4 @@
-import { handleCommand } from './src/background/handler.js';
+import { handleActionClick, handleCommand, refreshActionTitle } from './src/background/handler.js';
 import {
   closeOffscreen,
   ensureOffscreen,
@@ -36,3 +36,13 @@ Object.assign(globalThis as unknown as Record<string, unknown>, {
 });
 
 chrome.commands.onCommand.addListener(handleCommand);
+
+// Toolbar-icon click path. Fresh Web Store installs don't always honor the
+// command's suggested_key, so the icon is the no-config way in; the keyboard
+// command still works once the user binds it at chrome://extensions/shortcuts.
+chrome.action.onClicked.addListener(handleActionClick);
+
+// Tooltip reflects the current binding: "(Ctrl+Shift+K)" when bound, or a
+// pointer to chrome://extensions/shortcuts when not — self-documents the fix
+// for the very install state that needs the toolbar fallback.
+void refreshActionTitle();

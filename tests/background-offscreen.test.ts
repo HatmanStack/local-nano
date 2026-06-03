@@ -155,9 +155,19 @@ describe('installEnsureListener', () => {
     installEnsureListener();
     const listener = captureListener();
     const sendResponse = vi.fn();
-    const result = listener({ type: 'something-else' }, {}, sendResponse);
+    const result = listener({ type: 'something-else' }, { id: 'test-ext' }, sendResponse);
     expect(result).toBe(false);
     expect(sendResponse).not.toHaveBeenCalled();
+  });
+
+  it('rejects messages from foreign senders (sender.id mismatch)', () => {
+    installEnsureListener();
+    const listener = captureListener();
+    const sendResponse = vi.fn();
+    const result = listener({ type: ENSURE_OFFSCREEN_REQUEST }, { id: 'other-ext' }, sendResponse);
+    expect(result).toBe(false);
+    expect(sendResponse).not.toHaveBeenCalled();
+    expect(chromeMock.offscreen.createDocument).not.toHaveBeenCalled();
   });
 
   it('replies with ok:true after ensureOffscreen resolves', async () => {
@@ -165,7 +175,7 @@ describe('installEnsureListener', () => {
     installEnsureListener();
     const listener = captureListener();
     const sendResponse = vi.fn();
-    const kept = listener({ type: ENSURE_OFFSCREEN_REQUEST }, {}, sendResponse);
+    const kept = listener({ type: ENSURE_OFFSCREEN_REQUEST }, { id: 'test-ext' }, sendResponse);
     expect(kept).toBe(true); // channel kept open for the async reply
     for (let i = 0; i < 10 && sendResponse.mock.calls.length === 0; i++) {
       await new Promise((r) => setTimeout(r, 0));
@@ -185,7 +195,7 @@ describe('installEnsureListener', () => {
     installEnsureListener();
     const listener = captureListener();
     const sendResponse = vi.fn();
-    listener({ type: ENSURE_OFFSCREEN_REQUEST }, {}, sendResponse);
+    listener({ type: ENSURE_OFFSCREEN_REQUEST }, { id: 'test-ext' }, sendResponse);
     for (let i = 0; i < 10 && sendResponse.mock.calls.length === 0; i++) {
       await new Promise((r) => setTimeout(r, 0));
     }
@@ -199,7 +209,7 @@ describe('installEnsureListener', () => {
     installEnsureListener();
     const listener = captureListener();
     const sendResponse = vi.fn();
-    const kept = listener({ type: RECREATE_OFFSCREEN_REQUEST }, {}, sendResponse);
+    const kept = listener({ type: RECREATE_OFFSCREEN_REQUEST }, { id: 'test-ext' }, sendResponse);
     expect(kept).toBe(true);
     for (let i = 0; i < 10 && sendResponse.mock.calls.length === 0; i++) {
       await new Promise((r) => setTimeout(r, 0));
@@ -217,7 +227,7 @@ describe('installEnsureListener', () => {
     installEnsureListener();
     const listener = captureListener();
     const sendResponse = vi.fn();
-    listener({ type: RECREATE_OFFSCREEN_REQUEST }, {}, sendResponse);
+    listener({ type: RECREATE_OFFSCREEN_REQUEST }, { id: 'test-ext' }, sendResponse);
     for (let i = 0; i < 10 && sendResponse.mock.calls.length === 0; i++) {
       await new Promise((r) => setTimeout(r, 0));
     }
@@ -231,7 +241,7 @@ describe('installEnsureListener', () => {
     installEnsureListener();
     const listener = captureListener();
     const sendResponse = vi.fn();
-    const kept = listener({ type: TOUCH_IDLE_REQUEST }, {}, sendResponse);
+    const kept = listener({ type: TOUCH_IDLE_REQUEST }, { id: 'test-ext' }, sendResponse);
     expect(kept).toBe(true);
     for (let i = 0; i < 10 && sendResponse.mock.calls.length === 0; i++) {
       await new Promise((r) => setTimeout(r, 0));

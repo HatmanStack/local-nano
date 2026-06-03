@@ -5,6 +5,14 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-06-02
+
+Adds a toolbar-icon click as a no-config way to open the panel, so a fresh Chrome Web Store install can toggle Local Nano even when Chrome did not honor the `Ctrl+Shift+K` `suggested_key`. The icon tooltip self-documents: it shows the bound shortcut when one is set, and points users at `chrome://extensions/shortcuts` when not.
+
+### Added
+
+- **Toolbar-icon toggle.** Clicking the Local Nano icon next to the address bar now opens (or closes) the panel via the same `{a:'toggle'}` message path the keyboard command uses; no popup, no extra permissions. The icon tooltip resolves the current `chrome.commands` binding on service-worker startup — "Toggle Local Nano (Ctrl+Shift+K)" when bound, or "Toggle Local Nano — set a shortcut at chrome://extensions/shortcuts" when not.
+
 ## [0.4.0] - 2026-05-26
 
 Lets you choose which on-device model to run, and stops holding the model in memory when you're not using it. A new gear/settings popover offers a curated model catalog — pick one and click Load to switch — and the offscreen model is now released after a configurable idle timeout and re-warmed on return, reclaiming the multi-GB WebGPU allocation that previously lived for the entire browser session.
