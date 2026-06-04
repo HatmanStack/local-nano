@@ -2561,6 +2561,7 @@ describe('deriveHistoryThreshold', () => {
         isFallback: true,
         maxBufferSize: 0,
         configuredThreshold: 42,
+        lastDeviceLostAt: null,
       }),
     ).toBe(42);
     expect(
@@ -2569,6 +2570,7 @@ describe('deriveHistoryThreshold', () => {
         isFallback: false,
         maxBufferSize: null,
         configuredThreshold: 12345,
+        lastDeviceLostAt: null,
       }),
     ).toBe(12345);
   });
@@ -2580,6 +2582,7 @@ describe('deriveHistoryThreshold', () => {
         isFallback: false,
         maxBufferSize: null,
         configuredThreshold: null,
+        lastDeviceLostAt: null,
       }),
     ).toBe(8000);
   });
@@ -2591,6 +2594,7 @@ describe('deriveHistoryThreshold', () => {
         isFallback: true,
         maxBufferSize: null,
         configuredThreshold: null,
+        lastDeviceLostAt: null,
       }),
     ).toBe(800);
   });
@@ -2602,6 +2606,7 @@ describe('deriveHistoryThreshold', () => {
         isFallback: false,
         maxBufferSize: null,
         configuredThreshold: null,
+        lastDeviceLostAt: null,
       }),
     ).toBe(1500);
   });
@@ -2612,6 +2617,7 @@ describe('deriveHistoryThreshold', () => {
       isFallback: false,
       maxBufferSize: mb * 1024 * 1024,
       configuredThreshold: null,
+      lastDeviceLostAt: null,
     });
     expect(deriveHistoryThreshold(mk(256))).toBe(1000); // <512 MiB → 1000
     expect(deriveHistoryThreshold(mk(768))).toBe(1500); // <1 GiB → 1500
@@ -2626,6 +2632,7 @@ describe('preflightWarning', () => {
     isFallback: false,
     maxBufferSize: null,
     configuredThreshold: null,
+    lastDeviceLostAt: null,
   };
   it('returns null for wasm device (no GPU needed)', () => {
     expect(preflightWarning({ ...base, device: 'wasm' })).toBeNull();

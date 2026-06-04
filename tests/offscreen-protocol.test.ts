@@ -434,6 +434,7 @@ describe('isGpuInfoResponse', () => {
         isFallback: false,
         maxBufferSize: 2147483648,
         configuredThreshold: 1500,
+        lastDeviceLostAt: '2026-06-04T00:00:00.000Z',
       }),
     ).toBe(true);
   });
@@ -447,8 +448,50 @@ describe('isGpuInfoResponse', () => {
         isFallback: false,
         maxBufferSize: null,
         configuredThreshold: null,
+        lastDeviceLostAt: null,
       }),
     ).toBe(true);
+  });
+
+  it('accepts a null lastDeviceLostAt', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'webgpu',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+        lastDeviceLostAt: null,
+      }),
+    ).toBe(true);
+  });
+
+  it('accepts an absent lastDeviceLostAt for backward shape', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'webgpu',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a non-string, non-null lastDeviceLostAt', () => {
+    expect(
+      isGpuInfoResponse({
+        type: GPU_INFO_RESPONSE,
+        ok: true,
+        device: 'webgpu',
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+        lastDeviceLostAt: 1717459200000,
+      }),
+    ).toBe(false);
   });
 
   it('rejects unknown device strings', () => {

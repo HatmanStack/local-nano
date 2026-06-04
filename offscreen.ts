@@ -323,6 +323,8 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: false,
       maxBufferSize: null,
       configuredThreshold,
+      // WASM has no WebGPU device to lose.
+      lastDeviceLostAt: null,
     };
   }
 
@@ -337,6 +339,7 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: true,
       maxBufferSize: null,
       configuredThreshold,
+      lastDeviceLostAt,
     };
   }
   try {
@@ -349,6 +352,7 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
         isFallback: true,
         maxBufferSize: null,
         configuredThreshold,
+        lastDeviceLostAt,
       };
     }
     const maxBufferSize =
@@ -360,6 +364,7 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: Boolean(adapter.isFallbackAdapter),
       maxBufferSize,
       configuredThreshold,
+      lastDeviceLostAt,
     };
   } catch {
     return {
@@ -369,6 +374,7 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: false,
       maxBufferSize: null,
       configuredThreshold,
+      lastDeviceLostAt,
     };
   }
 }

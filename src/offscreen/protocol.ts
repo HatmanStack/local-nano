@@ -147,6 +147,8 @@ export interface GpuInfoSnapshot {
   isFallback: boolean;
   maxBufferSize: number | null;
   configuredThreshold: number | null;
+  /** ISO timestamp of the most recent device.lost event, or null. */
+  lastDeviceLostAt: string | null;
 }
 
 export interface GpuInfoRequest {
@@ -171,6 +173,15 @@ export function isGpuInfoResponse(value: unknown): value is GpuInfoResponse {
     if (typeof v.isFallback !== 'boolean') return false;
     if (v.maxBufferSize !== null && !Number.isFinite(v.maxBufferSize)) return false;
     if (v.configuredThreshold !== null && !Number.isFinite(v.configuredThreshold)) return false;
+    // Absent is treated as null for backward wire shape; the offscreen always
+    // populates the field after the Phase 4 device-loss diagnostic landed.
+    if (
+      v.lastDeviceLostAt !== undefined &&
+      v.lastDeviceLostAt !== null &&
+      typeof v.lastDeviceLostAt !== 'string'
+    ) {
+      return false;
+    }
     return true;
   }
   if (v.ok === false) return typeof v.error === 'string';

@@ -952,6 +952,7 @@ export function initSession(deps: SessionDeps): SessionController {
     isFallback: false,
     maxBufferSize: null,
     configuredThreshold: null,
+    lastDeviceLostAt: null,
   };
   // The tier last attempted and the ordered list of tiers tried this walk with
   // their per-tier outcomes (ADR-R1: the panel owns ladder state). The
