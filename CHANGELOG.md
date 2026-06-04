@@ -5,6 +5,14 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-06-04
+
+Fixes a "no response" failure that surfaced on ChromeOS integrated GPUs after switching tabs and reopening the panel. When the offscreen document was backgrounded across a tab switch, the WebGPU adapter could be lost; the freshly re-warmed session's first generation then ran on a broken GPU device, ORT threw inside WASM (`undefined.destroy()` on a `GPUBuffer` wrapper), Transformers.js swallowed the throw with a console-only "Generation error", and the stream completed with zero tokens. The panel rendered the benign `(no response — the model returned an empty answer)` fallback, leaving the user no recovery affordance.
+
+### Fixed
+
+- **Poisoned-session recovery on empty-output streams.** A `streamPrompt` that resolves with zero accumulated output (no chunks, no error) is now treated as the same class of recoverable failure the terminal-failure path handles: the offscreen document is dropped, the session re-warmed once via the existing serialized primitive, and the same prompt retried exactly once. If the retry also produces empty output the panel reads `Generation failed — the model state was lost (often a ChromeOS tab-switch quirk). Please try again.` rather than the silent benign fallback. The detection signal is the server-side accumulated stream value, not visible token count, so a reasoning model whose entire reply is a `<think>` block (visible text empty, raw stream non-empty) does NOT trigger a churny retry.
+
 ## [0.4.1] - 2026-06-02
 
 Adds a toolbar-icon click as a no-config way to open the panel, so a fresh Chrome Web Store install can toggle Local Nano even when Chrome did not honor the `Ctrl+Shift+K` `suggested_key`. The icon tooltip self-documents: it shows the bound shortcut when one is set, and points users at `chrome://extensions/shortcuts` when not.

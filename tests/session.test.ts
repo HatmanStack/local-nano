@@ -1606,6 +1606,69 @@ describe('initSession — send-path re-warm recovery (idle release)', () => {
     call.resolve('answer');
     await flushMicrotasks();
   });
+
+  it('re-warms and retries when the stream resolves with empty output (poisoned-session path)', async () => {
+    // ChromeOS tab-switch repro: the offscreen doc was rebuilt, warmup
+    // reported success, but the first generation runs on a GPU whose adapter
+    // is in a bad state. ORT throws inside WASM, Transformers.js swallows the
+    // throw, and the stream completes with zero tokens. The reactive path
+    // must treat that as a recoverable failure and retry once.
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // Empty success: no onChunk, resolve with empty accumulated string.
+    first.resolve('');
+    const retry = await awaitPending();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    expect(retry.prompt).toBe(first.prompt);
+    retry.opts.onChunk?.('recovered after rebuild');
+    retry.resolve('recovered after rebuild');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('recovered after rebuild');
+  });
+
+  it("renders the 'Generation failed' message when both attempts produce empty output", async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    first.resolve('');
+    const retry = await awaitPending();
+    retry.resolve('');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toContain('Generation failed');
+    expect(modelBubble?.textContent).toContain('try again');
+  });
+
+  it('does NOT trigger the empty-output retry when the stream returned tokens that the think-stripper hid', async () => {
+    // Reasoning models can emit a `<think>` block as the entire response.
+    // The stripper makes modelText empty, but streamResult (the raw
+    // accumulated value) is non-empty. That is a legitimate "no visible
+    // answer", not a poisoned session — no churny retry.
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // No visible chunks fired (stripper would have hidden them); resolve
+    // with a non-empty raw value to mark "tokens were produced".
+    first.resolve('<think>reasoning only</think>');
+    await flushMicrotasks();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    expect(pending.length).toBe(0);
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toContain('no response');
+  });
 });
 
 describe('initSession — serialized reloadModel primitive', () => {

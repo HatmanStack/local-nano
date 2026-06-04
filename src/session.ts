@@ -569,8 +569,15 @@ export function initSession(deps: SessionDeps): SessionController {
     // document stream failure, then retries the same prompt exactly once; a
     // second failure surfaces the normal error UI (ADR-P10).
     let alreadyRetried = false;
+    // The server-side accumulated stream value. Empty string means the
+    // offscreen stream produced zero tokens — distinct from "produced tokens
+    // that the think-stripper hid", which leaves `modelText` empty but
+    // `streamResult` non-empty. Used by the poisoned-session recovery below
+    // so a reasoning model whose entire reply is a `<think>` block does not
+    // trigger a churny retry.
+    let streamResult = '';
     try {
-      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+      streamResult = await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
       succeeded = true;
     } catch (err: unknown) {
       const name = (err as { name?: unknown })?.name;
@@ -615,43 +622,92 @@ export function initSession(deps: SessionDeps): SessionController {
         modelText = err instanceof Error ? err.message : String(err);
         responseEl.textContent = modelText;
       }
-    } finally {
-      if (indicator.parentNode) indicator.remove();
-      if (preHint?.parentNode) preHint.remove();
-      if (!modelText) {
-        responseEl.textContent = '(no response — the model returned an empty answer)';
-      }
-      if (modelText) {
-        pushEntry({ role: 'model', text: modelText });
-        persist();
-      }
-      if (succeeded) {
-        // A throwing success tail (e.g. rewrite's DOM action-bar attach) must
-        // not skip the cleanup below, or the Send button stays stuck in the
-        // generating state and activeAbort dangles.
-        try {
-          onSuccess?.(modelText, prompt.length, responseEl);
-        } catch (e) {
-          console.error('[local-nano] onSuccess handler threw:', e);
-        }
-      }
-      setIdleState(actionBtn, i);
-      activeAbort = null;
-      // Re-arm the idle-release window after the LAST token (decision 9): the
-      // inactivity countdown starts from the END of generation, not the start.
-      // The SW verify-idle reschedules if a stream is still in flight when the
-      // alarm fires, so this post-completion touch is what opens the real
-      // window. Fire-and-forget; self-swallowing.
-      void touchIdle();
-      // Re-enable a Load the user queued while this stream was in flight (ADR-P7).
-      refreshPopoverControls();
-      try {
-        onFinally?.();
-      } catch (e) {
-        console.error('[local-nano] onFinally handler threw:', e);
-      }
-      i.focus();
     }
+
+    // Empty-success recovery (poisoned-session path). On ChromeOS the offscreen
+    // doc's WebGPU adapter can be lost when the panel is closed across a tab
+    // switch; the next generation runs on the freshly re-warmed session but
+    // ORT throws inside WASM (`undefined.destroy()` on a GPUBuffer wrapper),
+    // Transformers.js swallows the throw (logs `Generation error` to the
+    // console) and yields zero tokens. Without this block the stream looks
+    // like a clean empty completion and the finally below renders the benign
+    // "(no response)" fallback — leaving no recovery affordance. Treat
+    // succeeded-but-empty as the same class of recoverable failure the
+    // terminal catch handles: drop the dead session, re-warm once, retry the
+    // same prompt exactly once. A second empty result drops through to the
+    // failure message in the finally below.
+    if (succeeded && !streamResult && !alreadyRetried) {
+      alreadyRetried = true;
+      succeeded = false;
+      try {
+        activeAbort = null;
+        await reloadModel();
+        activeAbort = new AbortController();
+        stripper = createThinkStripper();
+        modelText = '';
+        shownFirstVisible = false;
+        streamResult = await streamPrompt(prompt, {
+          signal: activeAbort.signal,
+          onChunk,
+        });
+        succeeded = true;
+      } catch (retryErr: unknown) {
+        const retryName = (retryErr as { name?: unknown })?.name;
+        if (retryName === 'AbortError') {
+          modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
+        } else {
+          modelText = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        }
+        responseEl.textContent = modelText;
+      }
+    }
+
+    // Cleanup (originally the try/finally pair was a single try-catch-finally;
+    // the catch above never re-throws — all paths set modelText — so the
+    // finally is unnecessary, and removing it lets the empty-success recovery
+    // block above run cleanly between the stream attempt and the cleanup).
+    if (indicator.parentNode) indicator.remove();
+    if (preHint?.parentNode) preHint.remove();
+    if (!modelText) {
+      // After a retry attempt (terminal-error path OR poisoned-session path)
+      // an empty result is NOT a legitimate empty answer — the model state
+      // was lost and recovery did not bring it back. Surface that plainly
+      // so the user knows to send again rather than seeing the benign
+      // "no response" string.
+      responseEl.textContent = alreadyRetried
+        ? 'Generation failed — the model state was lost (often a ChromeOS tab-switch quirk). Please try again.'
+        : '(no response — the model returned an empty answer)';
+    }
+    if (modelText) {
+      pushEntry({ role: 'model', text: modelText });
+      persist();
+    }
+    if (succeeded) {
+      // A throwing success tail (e.g. rewrite's DOM action-bar attach) must
+      // not skip the cleanup below, or the Send button stays stuck in the
+      // generating state and activeAbort dangles.
+      try {
+        onSuccess?.(modelText, prompt.length, responseEl);
+      } catch (e) {
+        console.error('[local-nano] onSuccess handler threw:', e);
+      }
+    }
+    setIdleState(actionBtn, i);
+    activeAbort = null;
+    // Re-arm the idle-release window after the LAST token (decision 9): the
+    // inactivity countdown starts from the END of generation, not the start.
+    // The SW verify-idle reschedules if a stream is still in flight when the
+    // alarm fires, so this post-completion touch is what opens the real
+    // window. Fire-and-forget; self-swallowing.
+    void touchIdle();
+    // Re-enable a Load the user queued while this stream was in flight (ADR-P7).
+    refreshPopoverControls();
+    try {
+      onFinally?.();
+    } catch (e) {
+      console.error('[local-nano] onFinally handler threw:', e);
+    }
+    i.focus();
   }
 
   async function sendChat(text: string): Promise<void> {
