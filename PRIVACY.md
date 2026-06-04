@@ -53,6 +53,9 @@ cloud backends removed, so it cannot reach a remote LLM provider.)
   locally.
 - **offscreen** — host the local model in a hidden offscreen document so it
   loads once and is shared across tabs.
+- **alarms** — schedule the idle resource-release timer that frees the in-memory
+  model after a period of inactivity to reclaim memory. The model re-warms on
+  your next use. The alarm only fires a local check; nothing is transmitted.
 - **Host access to Hugging Face domains** — the one-time model-weights download
   described above.
 - **Content script on the pages where you open the panel** — to read the visible

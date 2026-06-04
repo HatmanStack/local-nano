@@ -5,6 +5,33 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-06-04
+
+Roots out the WebGPU device-loss failure that 0.4.2 caught reactively. Captures the GPUDevice handle through a transparent navigator.gpu monkey-patch in the offscreen document, listens for device.lost, marks the session poisoned, and rebuilds lazily on the next ensure. Pins the offscreen document open while any panel is visible so the 30-second no-port reap cannot close it across a tab switch. Promotes the offscreen's zero-chunk stream completion from a silent ok:true to a typed terminal failure so the existing reactive recovery runs.
+
+### Fixed
+
+- **Layer A: GPUDevice.lost listener.** The offscreen installs a transparent navigator.gpu monkey-patch at module top, captures the GPUDevice the polyfill flows through to, and attaches a .lost handler that marks the offscreen session poisoned and pushes SESSION_POISONED to the service worker. The next ENSURE_OFFSCREEN_REQUEST recreates the offscreen document (when not busy, per ADR-P7) before the user's send is dispatched.
+- **Layer B: SW-pinned offscreen port while panels are open.** The content script holds a long-lived port to the SW while the panel is visible; the SW holds a long-lived port to the offscreen while at least one panel-pin port is open. The pin port's existence prevents Chrome's 30-second no-port reap from closing the offscreen document across a tab switch.
+- **Layer C: authoritative zero-chunk stream detection.** A natural stream completion with zero tokens now surfaces as STREAM_DONE { ok: false, error: 'no tokens emitted; session may be poisoned' }. classifyFailure classes that as terminal so the existing reactive recovery in src/session.ts re-warms via the serialized primitive and retries the prompt once.
+- **Diagnostic.** The Copy diagnostic gains a new deviceLostAt field so future bug reports carry the ISO timestamp of the most recent device.lost event observed in the offscreen.
+
+## [0.4.2] - 2026-06-04
+
+Fixes a "no response" failure that surfaced on ChromeOS integrated GPUs after switching tabs and reopening the panel. When the offscreen document was backgrounded across a tab switch, the WebGPU adapter could be lost; the freshly re-warmed session's first generation then ran on a broken GPU device, ORT threw inside WASM (`undefined.destroy()` on a `GPUBuffer` wrapper), Transformers.js swallowed the throw with a console-only "Generation error", and the stream completed with zero tokens. The panel rendered the benign `(no response — the model returned an empty answer)` fallback, leaving the user no recovery affordance.
+
+### Fixed
+
+- **Poisoned-session recovery on empty-output streams.** A `streamPrompt` that resolves with zero accumulated output (no chunks, no error) is now treated as the same class of recoverable failure the terminal-failure path handles: the offscreen document is dropped, the session re-warmed once via the existing serialized primitive, and the same prompt retried exactly once. If the retry also produces empty output the panel reads `Generation failed — the model state was lost (often a ChromeOS tab-switch quirk). Please try again.` rather than the silent benign fallback. The detection signal is the server-side accumulated stream value, not visible token count, so a reasoning model whose entire reply is a `<think>` block (visible text empty, raw stream non-empty) does NOT trigger a churny retry.
+
+## [0.4.1] - 2026-06-02
+
+Adds a toolbar-icon click as a no-config way to open the panel, so a fresh Chrome Web Store install can toggle Local Nano even when Chrome did not honor the `Ctrl+Shift+K` `suggested_key`. The icon tooltip self-documents: it shows the bound shortcut when one is set, and points users at `chrome://extensions/shortcuts` when not.
+
+### Added
+
+- **Toolbar-icon toggle.** Clicking the Local Nano icon next to the address bar now opens (or closes) the panel via the same `{a:'toggle'}` message path the keyboard command uses; no popup, no extra permissions. The icon tooltip resolves the current `chrome.commands` binding on service-worker startup — "Toggle Local Nano (Ctrl+Shift+K)" when bound, or "Toggle Local Nano — set a shortcut at chrome://extensions/shortcuts" when not.
+
 ## [0.4.0] - 2026-05-26
 
 Lets you choose which on-device model to run, and stops holding the model in memory when you're not using it. A new gear/settings popover offers a curated model catalog — pick one and click Load to switch — and the offscreen model is now released after a configurable idle timeout and re-warmed on return, reclaiming the multi-GB WebGPU allocation that previously lived for the entire browser session.
@@ -12,14 +39,14 @@ Lets you choose which on-device model to run, and stops holding the model in mem
 ### Added
 
 - **User-selectable model picker.** A gear button in the panel header opens a settings popover listing a curated model catalog. Selection is select-then-Load: clicking a row only marks the choice; the Load button commits it, force-recreating the offscreen document and re-walking the fallback ladder headed by the chosen model. The choice persists in `chrome.storage.local` (key `local-nano:model-pref:v1`) and — unlike the per-device capability record — is NOT invalidated on an extension-version bump, since a model preference is a user choice, not a device fact. No preference set means today's capability-based auto-pick (`onnx-community/gemma-4-E2B-it-ONNX`). The picker chooses the model only; dtype/device stay automatic (the existing load-time ladder steps them capable→lean), and the model rows are keyboard-operable.
-- **Curated model catalog.** Two live entries — the `gemma-4-E2B-it` default (`webgpu/q4f16`) and the smaller `onnx-community/Qwen2.5-0.5B-Instruct` (`wasm/q8`, the CPU/WASM-only "smallest that answers") — span a both-directions size spectrum. `Qwen3.5-0.8B` and a larger-model slot ship gated OFF (`QWEN3_08B_ENABLED`, `LARGER_MODEL_ENABLED`, both `false`), mirroring the existing `SMALLER_MODEL_ENABLED` gate, pending manual WebGPU smoke-vetting; only combinations `docs/models.md` confirms working are ever live.
+- **Curated model catalog.** Three live entries span a both-directions size spectrum: the `onnx-community/gemma-4-E2B-it-ONNX` default (`webgpu/q4f16`, capable), `onnx-community/Qwen3-0.6B-ONNX` (`webgpu/q4f16` with WASM fallback, the small WebGPU option — a reasoning model whose `<think>` block is stripped), and `onnx-community/Qwen2.5-0.5B-Instruct` (`wasm/q8`, the CPU/WASM-only "smallest that answers"). A larger-than-default slot ships gated OFF behind `LARGER_MODEL_ENABLED` (mirroring the existing `SMALLER_MODEL_ENABLED` ladder gate), pending manual WebGPU smoke-vetting; only combinations `docs/models.md` confirms working are ever live.
 - **Idle resource release.** The offscreen model (a multi-GB WebGPU session) is now freed after a period of inactivity instead of being held for the whole browser session. A `chrome.alarms` timer — measured from the last generation, so it survives the MV3 service-worker eviction a plain timer would not — fires the service worker, which verifies no generation is in flight (reschedules if one is) and then closes the entire offscreen document, a hard release that actually reclaims VRAM. The offscreen document never closes itself, keeping the worker's readiness flag honest. The next use re-warms: recovery works from the send path (not just panel-open), bounded to a single retry so a dead device cannot spin. The timeout is configurable in the popover — 5 / 15 / 60 min or Never (default 15) — and "Never" disables release for users who would rather keep the model warm.
 
 ### Notes
 
 - A model switch and an idle re-warm share ONE serialized teardown+re-warm primitive under a single lock, so two model loads can never overlap (the v0.2.0 `VK_ERROR_OUT_OF_DEVICE_MEMORY` came from concurrent sessions). A failed switch reverts the stored preference so the next session does not boot into a model that never loaded.
 - All inference still runs on-device. The only network access remains the one-time model-weights download from Hugging Face; switching to a catalog model not yet cached triggers a one-time download for that model.
-- The gated catalog entries (`Qwen3.5-0.8B`, the larger-model slot) stay off until a manual WebGPU smoke pass confirms each tier loads and answers — CI cannot exercise WebGPU, so on-hardware behavior (real VRAM reclamation, release-then-return) is gated on the manual smoke matrix.
+- The gated placeholders — the larger-model slot behind `LARGER_MODEL_ENABLED` and the smaller-model ladder rung behind `SMALLER_MODEL_ENABLED` — stay off until a manual WebGPU smoke pass confirms each tier loads and answers. CI cannot exercise WebGPU, so on-hardware behavior (real VRAM reclamation, release-then-return) is gated on the manual smoke matrix.
 
 ## [0.3.0] - 2026-05-24
 

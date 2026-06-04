@@ -37,13 +37,19 @@ This runs esbuild in watch mode. After each save, refresh the extension at `chro
 | `npm run test:watch` | Vitest in watch mode                                          |
 | `npm run coverage`   | Vitest run + v8 coverage report, enforcing the thresholds set in `vitest.config.ts` |
 
+## Dependency advisories
+
+`npm audit` reports moderate advisories (6 as of 2026-05-27), all confined to the dev/CI-only `vitest → vite → esbuild` chain. Production exposure is zero — `npm audit --omit=dev` reports 0 vulnerabilities, and none of these packages ship in the extension bundle.
+
+Remediation is deferred because the fix requires a Vitest major upgrade (a breaking change to the test toolchain). This is a tracked follow-up, not accepted production risk — revisit when bumping Vitest is otherwise warranted.
+
 ## Debugging
 
 - **Content script logs.** Open DevTools on the page itself. The extension prefixes everything with `[local-nano]`.
 - **Service worker logs.** Click the **service worker** link on the extension's card at `chrome://extensions`. That opens a dedicated DevTools for the worker.
 - **Offscreen document logs.** The model runs in a hidden offscreen document. Its logs (prefixed `[local-nano/offscreen]`, including `heavy modules loaded`) appear in the offscreen document's own DevTools, reachable from `chrome://extensions` → the extension's **Inspect views** list (look for `offscreen.html`).
 - **Storage.** Inspect persisted chat history at DevTools → Application → Storage → Extension Storage.
-- **Model load progress.** While the model loads the panel shows a live elapsed-seconds counter (`Loading model… Ns`), not a percentage; after ~45s it appends "taking longer than usual" remedies. If you see a permission error, the host permissions in `manifest.json` are the place to look — Transformers.js fetches from `huggingface.co` and `cdn-lfs.huggingface.co`.
+- **Model load progress.** While the model loads the panel shows a real download percentage (`Downloading model NN%`) when progress frames arrive, falling back to a live elapsed-seconds counter (`Loading model… Ns`) when no frame arrives or for a cached load; after ~45s the counter appends "taking longer than usual" remedies. If you see a permission error, the host permissions in `manifest.json` are the place to look — Transformers.js fetches from `huggingface.co` and `cdn-lfs.huggingface.co`.
 
 ## Project layout
 
@@ -57,7 +63,10 @@ This runs esbuild in watch mode. After each save, refresh the extension at `chro
 │   ├── background/
 │   │   ├── handler.ts
 │   │   └── offscreen.ts   # Service-worker side of the offscreen lifecycle
-│   ├── offscreen/         # client, protocol, stream-client, dispatch, busy-gate
+│   ├── offscreen/         # 14 modules: client, protocol, stream-client, dispatch,
+│   │                      # busy-gate, ladder, catalog, model-pref, idle-policy,
+│   │                      # capability(-store), progress, diagnostic, failure
+│   │                      # (see docs/architecture.md for the full inventory)
 │   ├── selection-rewrite.ts
 │   ├── session.ts         # Content-script chat session lifecycle
 │   ├── history.ts

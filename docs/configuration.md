@@ -25,9 +25,9 @@ A Hugging Face model identifier in `org/repo` form. The model must be an ONNX-fo
 
 Smaller models load faster and are kinder to your GPU memory; bigger ones are smarter but take longer to download and to respond. Some practical picks:
 
-- `onnx-community/gemma-4-E2B-it-ONNX` — bigger, smarter; needs WebGPU (the default).
-- `onnx-community/Qwen3.5-0.8B-ONNX` — small, fast, decent for short answers; needs WebGPU.
-- `onnx-community/Qwen2.5-0.5B-Instruct` — proven safe pick when you're stuck on WASM.
+- `onnx-community/gemma-4-E2B-it-ONNX` — the default; bigger and smarter, runs on WebGPU (`q4f16`).
+- `onnx-community/Qwen3-0.6B-ONNX` — the small WebGPU option; a reasoning model whose `<think>` block is stripped before display, with a WASM fallback behind it.
+- `onnx-community/Qwen2.5-0.5B-Instruct` — the smallest that answers; CPU/WASM only (WebGPU parrots for this model, so do not run it on WebGPU).
 
 Picking the right model for your hardware is its own topic — see [`docs/models.md`](models.md) for a field guide covering which models we've tried, what fails, and how to run without WebGPU.
 
@@ -87,7 +87,7 @@ Not every model publishes every variant — check the model's `onnx/` folder on 
 
 ### `apiKey` (string)
 
-A placeholder. The vendored polyfill **does** read this field (`prompt-api-polyfill.js:189`, `if (config && config.apiKey)`), but the Transformers.js backend ignores it — there is no cloud call to authenticate. The `"dummy"` value is a deliberate placeholder that the polyfill reads and the backend never uses. It exists because the upstream polyfill supports cloud backends (firebase / gemini / openai) that need real keys; the slimmed `backends-registry.js` in this repo only ships the Transformers.js backend, so keep it as `"dummy"`.
+A placeholder. The vendored polyfill **does** read this field (`prompt-api-polyfill.js:191`, `if (config && config.apiKey)`), but the Transformers.js backend ignores it — there is no cloud call to authenticate. The `"dummy"` value is a deliberate placeholder that the polyfill reads and the backend never uses. It exists because the upstream polyfill supports cloud backends (firebase / gemini / openai) that need real keys; the slimmed `backends-registry.js` in this repo only ships the Transformers.js backend, so keep it as `"dummy"`.
 
 ### `historyTokenWarnThreshold` (number, optional)
 
@@ -101,6 +101,26 @@ Override for the conversation-history token threshold above which the panel surf
 - WebGPU `maxBufferSize` &ge; 2 GiB — `4000`
 
 Set this field if the auto-derived value is wrong for your hardware. The number is in estimated tokens (`chars / 3` over persisted history text); typical chat turn is ~100-300 tokens, typical rewrite turn ~400-600.
+
+## Model picker and idle release
+
+Beyond `.env.json`, the panel exposes two runtime settings through a gear popover in its header. These are user preferences, not `.env.json` fields, and they persist in `chrome.storage.local` under `local-nano:model-pref:v1`. Unlike the per-device capability record, this preference is **not** invalidated on an extension-version bump — a model choice is a user preference, not a device fact, so it survives updates.
+
+### Choosing a model
+
+The gear opens a settings popover listing a curated model catalog (not arbitrary Hugging Face ids). Selection is select-then-Load: clicking a row only marks the choice; the **Load** button commits it, force-recreating the offscreen document and re-walking the fallback ladder headed by the chosen model. With no preference set, the panel auto-picks the capability-based default (`onnx-community/gemma-4-E2B-it-ONNX`). The picker chooses the model only; dtype and device stay automatic (the load-time ladder steps them from capable to lean).
+
+The live catalog has three entries, matching `src/offscreen/catalog.ts`:
+
+- `onnx-community/gemma-4-E2B-it-ONNX` — the default; WebGPU (`q4f16`).
+- `onnx-community/Qwen3-0.6B-ONNX` — the small WebGPU option (`q4f16`, WASM fallback). This is a reasoning model: it emits a `<think>…</think>` chain-of-thought block, which the panel strips so only the final answer is shown.
+- `onnx-community/Qwen2.5-0.5B-Instruct` — the smallest that answers; CPU/WASM only (`q8`).
+
+See [`docs/models.md`](models.md) for which models we tried and why others were rejected.
+
+### Idle resource release
+
+The popover also sets an idle timeout: **5 / 15 / 60 minutes or Never** (default 15). The window is measured from the last generation. When it elapses with no generation in flight, the service worker hard-closes the offscreen document to reclaim the multi-GB WebGPU allocation; the model re-warms automatically on the next use. The timer is backed by `chrome.alarms` so it survives MV3 service-worker eviction. Choosing **Never** disables release and keeps the model warm for the whole browser session. See [`docs/architecture.md`](architecture.md) for how the pieces fit together.
 
 ## Changing the keyboard shortcut
 

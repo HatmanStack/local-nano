@@ -6,6 +6,8 @@ import { DEFAULT_MODEL_ID } from '../src/offscreen/catalog.js';
 import * as ladderModule from '../src/offscreen/ladder.js';
 import { SMALLER_MODEL_CANDIDATE } from '../src/offscreen/ladder.js';
 import { MODEL_PREF_KEY } from '../src/offscreen/model-pref.js';
+import { PANEL_PIN_PORT_NAME } from '../src/offscreen/protocol.js';
+import { POISONED_STREAM_ERROR } from '../src/offscreen/stream-finalize.js';
 import type { SelectionSnapshot } from '../src/selection-rewrite.js';
 import {
   deriveHistoryThreshold,
@@ -13,7 +15,7 @@ import {
   preflightWarning,
   type SessionDeps,
 } from '../src/session.js';
-import { chromeMock } from './setup.js';
+import { chromeMock, type FakePort } from './setup.js';
 
 // ---------------------------------------------------------------------------
 // Mock the offscreen client
@@ -264,6 +266,63 @@ describe('initSession — toggle behavior', () => {
     deps._root.style.display = 'none';
     listener({ a: 'something-else' } as unknown as typeof TOGGLE_MESSAGE);
     expect(deps._root.style.display).toBe('none');
+  });
+
+  /** The FakePort the panel opened to the SW via chrome.runtime.connect. */
+  function lastPinPort(): FakePort {
+    return chromeMock.runtime.connect.mock.results.at(-1)?.value as FakePort;
+  }
+
+  it('opens a panel-pin port to the SW exactly once when the panel first opens', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    deps._root.style.display = 'none';
+    listener(TOGGLE_MESSAGE); // open
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(1);
+    expect(chromeMock.runtime.connect).toHaveBeenCalledWith({ name: PANEL_PIN_PORT_NAME });
+  });
+
+  it('disconnects the panel-pin port when the panel closes', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    deps._root.style.display = 'none';
+    listener(TOGGLE_MESSAGE); // open
+    const pinPort = lastPinPort();
+    listener(TOGGLE_MESSAGE); // close
+    expect(pinPort.disconnect).toHaveBeenCalledTimes(1);
+    expect(pinPort.isConnected).toBe(false);
+  });
+
+  it('re-acquires the panel-pin port on a second open after a close', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    deps._root.style.display = 'none';
+    listener(TOGGLE_MESSAGE); // open
+    listener(TOGGLE_MESSAGE); // close
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(1);
+    listener(TOGGLE_MESSAGE); // re-open
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(2);
+    expect(chromeMock.runtime.connect).toHaveBeenLastCalledWith({ name: PANEL_PIN_PORT_NAME });
+  });
+
+  it('re-acquires after the SW drops the pin port mid-life', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    deps._root.style.display = 'none';
+    listener(TOGGLE_MESSAGE); // open
+    const pinPort = lastPinPort();
+    // SW restart drops the port mid-life; the onDisconnect handler nulls the
+    // local handle so the next open re-acquires rather than reusing a dead port.
+    pinPort._emitDisconnect();
+    listener(TOGGLE_MESSAGE); // close (no live port to disconnect)
+    listener(TOGGLE_MESSAGE); // re-open
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(2);
+    const fresh = lastPinPort();
+    expect(fresh.isConnected).toBe(true);
   });
 
   it('Enter key triggers send when input has content', async () => {
@@ -1131,6 +1190,7 @@ describe('initSession — copy-diagnostic affordance', () => {
       isFallback: false,
       maxBufferSize: null,
       configuredThreshold: null,
+      lastDeviceLostAt: null,
     });
   });
 
@@ -1270,6 +1330,39 @@ describe('initSession — copy-diagnostic affordance', () => {
       expect(copied).toContain('errorMessage: VK_ERROR_OUT_OF_DEVICE_MEMORY');
       expect(copied).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q4f16 -> load-failure');
       expect(copied).toContain('chosenModel: onnx-community/gemma-4-E2B-it-ONNX');
+      // No device.lost observed in this run: the preflight reply carried null.
+      expect(copied).toContain('deviceLostAt: none');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('renders the device-loss timestamp from the gpu-info preflight', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const writeText = vi.fn((_t: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      getGpuInfoMock.mockResolvedValue({
+        device: 'webgpu' as const,
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+        lastDeviceLostAt: '2026-06-04T12:00:00.000Z',
+      });
+      warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      const btn = findCopyButton(deps._root);
+      btn.click();
+      await flushMicrotasks();
+      const copied = writeText.mock.calls[0][0] as string;
+      expect(copied).toContain('deviceLostAt: 2026-06-04T12:00:00.000Z');
     } finally {
       Reflect.deleteProperty(navigator, 'clipboard');
       warnSpy.mockRestore();
@@ -1551,6 +1644,59 @@ describe('initSession — send-path re-warm recovery (idle release)', () => {
     expect(modelBubble?.textContent).toBe('recovered answer');
   });
 
+  it('re-warms and retries the same prompt once on a poisoned-stream terminal failure', async () => {
+    // Phase 1 / brainstorm decision 1c: the offscreen zero-chunk detector now
+    // emits STREAM_DONE { ok: false, error: POISONED_STREAM_ERROR } on a natural
+    // completion that produced no tokens. classifyFailure classes that prefix as
+    // terminal, so the same reactive re-warm + single retry the closed-document
+    // case exercises must run before the 0.4.2 panel-side empty-success net.
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    first.reject(new Error(POISONED_STREAM_ERROR));
+    const retry = await awaitPending();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    expect(retry.prompt).toBe(first.prompt);
+    retry.opts.onChunk?.('recovered answer');
+    retry.resolve('recovered answer');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('recovered answer');
+  });
+
+  it('does NOT re-warm on a successful first stream (poisoned path leaves the happy path alone)', async () => {
+    // A non-empty success followed by an immediate second user send must not
+    // trigger the poisoned-stream recovery: no recreate, no extra retry queued.
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    first.opts.onChunk?.('a real answer');
+    first.resolve('a real answer');
+    await flushMicrotasks();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    expect(pending.length).toBe(0);
+    const firstBubble = deps._messages.children[1];
+    expect(firstBubble?.textContent).toBe('a real answer');
+    // A second user send proceeds normally on the healthy session.
+    deps._input.value = 'another question';
+    deps._actionBtn.click();
+    const second = await awaitPending();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    second.opts.onChunk?.('second answer');
+    second.resolve('second answer');
+    await flushMicrotasks();
+    const secondBubble = deps._messages.children[3];
+    expect(secondBubble?.textContent).toBe('second answer');
+  });
+
   it('does NOT re-warm on a non-terminal stream error (no churny auto-rebuild)', async () => {
     const deps = makeDeps();
     initSession(deps);
@@ -1605,6 +1751,69 @@ describe('initSession — send-path re-warm recovery (idle release)', () => {
     call.opts.onChunk?.('answer');
     call.resolve('answer');
     await flushMicrotasks();
+  });
+
+  it('re-warms and retries when the stream resolves with empty output (poisoned-session path)', async () => {
+    // ChromeOS tab-switch repro: the offscreen doc was rebuilt, warmup
+    // reported success, but the first generation runs on a GPU whose adapter
+    // is in a bad state. ORT throws inside WASM, Transformers.js swallows the
+    // throw, and the stream completes with zero tokens. The reactive path
+    // must treat that as a recoverable failure and retry once.
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // Empty success: no onChunk, resolve with empty accumulated string.
+    first.resolve('');
+    const retry = await awaitPending();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    expect(retry.prompt).toBe(first.prompt);
+    retry.opts.onChunk?.('recovered after rebuild');
+    retry.resolve('recovered after rebuild');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('recovered after rebuild');
+  });
+
+  it("renders the 'Generation failed' message when both attempts produce empty output", async () => {
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    first.resolve('');
+    const retry = await awaitPending();
+    retry.resolve('');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toContain('Generation failed');
+    expect(modelBubble?.textContent).toContain('try again');
+  });
+
+  it('does NOT trigger the empty-output retry when the stream returned tokens that the think-stripper hid', async () => {
+    // Reasoning models can emit a `<think>` block as the entire response.
+    // The stripper makes modelText empty, but streamResult (the raw
+    // accumulated value) is non-empty. That is a legitimate "no visible
+    // answer", not a poisoned session — no churny retry.
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    // No visible chunks fired (stripper would have hidden them); resolve
+    // with a non-empty raw value to mark "tokens were produced".
+    first.resolve('<think>reasoning only</think>');
+    await flushMicrotasks();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    expect(pending.length).toBe(0);
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toContain('no response');
   });
 });
 
@@ -2386,6 +2595,7 @@ describe('deriveHistoryThreshold', () => {
         isFallback: true,
         maxBufferSize: 0,
         configuredThreshold: 42,
+        lastDeviceLostAt: null,
       }),
     ).toBe(42);
     expect(
@@ -2394,6 +2604,7 @@ describe('deriveHistoryThreshold', () => {
         isFallback: false,
         maxBufferSize: null,
         configuredThreshold: 12345,
+        lastDeviceLostAt: null,
       }),
     ).toBe(12345);
   });
@@ -2405,6 +2616,7 @@ describe('deriveHistoryThreshold', () => {
         isFallback: false,
         maxBufferSize: null,
         configuredThreshold: null,
+        lastDeviceLostAt: null,
       }),
     ).toBe(8000);
   });
@@ -2416,6 +2628,7 @@ describe('deriveHistoryThreshold', () => {
         isFallback: true,
         maxBufferSize: null,
         configuredThreshold: null,
+        lastDeviceLostAt: null,
       }),
     ).toBe(800);
   });
@@ -2427,6 +2640,7 @@ describe('deriveHistoryThreshold', () => {
         isFallback: false,
         maxBufferSize: null,
         configuredThreshold: null,
+        lastDeviceLostAt: null,
       }),
     ).toBe(1500);
   });
@@ -2437,6 +2651,7 @@ describe('deriveHistoryThreshold', () => {
       isFallback: false,
       maxBufferSize: mb * 1024 * 1024,
       configuredThreshold: null,
+      lastDeviceLostAt: null,
     });
     expect(deriveHistoryThreshold(mk(256))).toBe(1000); // <512 MiB → 1000
     expect(deriveHistoryThreshold(mk(768))).toBe(1500); // <1 GiB → 1500
@@ -2451,6 +2666,7 @@ describe('preflightWarning', () => {
     isFallback: false,
     maxBufferSize: null,
     configuredThreshold: null,
+    lastDeviceLostAt: null,
   };
   it('returns null for wasm device (no GPU needed)', () => {
     expect(preflightWarning({ ...base, device: 'wasm' })).toBeNull();

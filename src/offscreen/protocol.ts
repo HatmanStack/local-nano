@@ -20,6 +20,11 @@
  * caller opens one port per stream and disconnects when done.
  */
 
+// Type-only import: erases at build time so this introduces no runtime
+// dependency on `ladder.ts` (and `ladder.ts` keeps zero protocol coupling).
+// `WarmupTier` aliases `Tier` so the wire shape has ONE structural source.
+import type { Tier } from './ladder.js';
+
 export const ENSURE_OFFSCREEN_REQUEST = 'offscreen/ensure-request' as const;
 export const ENSURE_OFFSCREEN_RESPONSE = 'offscreen/ensure-response' as const;
 
@@ -142,6 +147,8 @@ export interface GpuInfoSnapshot {
   isFallback: boolean;
   maxBufferSize: number | null;
   configuredThreshold: number | null;
+  /** ISO timestamp of the most recent device.lost event, or null. */
+  lastDeviceLostAt: string | null;
 }
 
 export interface GpuInfoRequest {
@@ -166,6 +173,15 @@ export function isGpuInfoResponse(value: unknown): value is GpuInfoResponse {
     if (typeof v.isFallback !== 'boolean') return false;
     if (v.maxBufferSize !== null && !Number.isFinite(v.maxBufferSize)) return false;
     if (v.configuredThreshold !== null && !Number.isFinite(v.configuredThreshold)) return false;
+    // Absent is treated as null for backward wire shape; the offscreen always
+    // populates the field after the Phase 4 device-loss diagnostic landed.
+    if (
+      v.lastDeviceLostAt !== undefined &&
+      v.lastDeviceLostAt !== null &&
+      typeof v.lastDeviceLostAt !== 'string'
+    ) {
+      return false;
+    }
     return true;
   }
   if (v.ok === false) return typeof v.error === 'string';
@@ -238,6 +254,46 @@ export function isIsBusyResponse(value: unknown): value is IsBusyResponse {
   return false;
 }
 
+export const SESSION_POISONED_REQUEST = 'offscreen/session-poisoned-request' as const;
+export const SESSION_POISONED_RESPONSE = 'offscreen/session-poisoned-response' as const;
+
+/**
+ * Poisoned-session push (Layer A, ADR-1). The offscreen document sends this
+ * fire-and-forget to the service worker the moment a captured `GPUDevice`'s
+ * `lost` event fires. The SW flips a sticky `sessionPoisoned` flag and, on the
+ * next `ENSURE_OFFSCREEN_REQUEST`, recreates the offscreen document (when not
+ * busy) so the next user send runs on a healthy session. `at` is the ISO 8601
+ * loss timestamp; `reason`/`message` mirror the WebGPU `GPUDeviceLostInfo`
+ * fields for diagnostics. The offscreen does not await the reply (push, not
+ * pull); the ack exists for protocol uniformity and test observability.
+ */
+export interface SessionPoisonedRequest {
+  type: typeof SESSION_POISONED_REQUEST;
+  at: string;
+  reason: string;
+  message: string;
+}
+
+export type SessionPoisonedResponse =
+  | { type: typeof SESSION_POISONED_RESPONSE; ok: true }
+  | { type: typeof SESSION_POISONED_RESPONSE; ok: false; error: string };
+
+export function isSessionPoisonedRequest(value: unknown): value is SessionPoisonedRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== SESSION_POISONED_REQUEST) return false;
+  return typeof v.at === 'string' && typeof v.reason === 'string' && typeof v.message === 'string';
+}
+
+export function isSessionPoisonedResponse(value: unknown): value is SessionPoisonedResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== SESSION_POISONED_RESPONSE) return false;
+  if (v.ok === true) return true;
+  if (v.ok === false) return typeof v.error === 'string';
+  return false;
+}
+
 export const COUNT_TOKENS_REQUEST = 'offscreen/count-tokens-request' as const;
 export const COUNT_TOKENS_RESPONSE = 'offscreen/count-tokens-response' as const;
 
@@ -270,15 +326,15 @@ export const WARMUP_RESPONSE = 'offscreen/warmup-response' as const;
 
 /**
  * One `{ modelName, device, dtype }` triple the ladder can ask the offscreen
- * document to load (ADR-R7). Mirrors `Tier` in `ladder.ts` but is redeclared
- * here so the wire protocol owns its own shape and `ladder.ts` stays free of
- * Chrome/protocol imports.
+ * document to load (ADR-R7). This is the WIRE MIRROR of `Tier` in `ladder.ts`:
+ * it shares ONE structural source via a TYPE-ONLY import so a field added to
+ * `Tier` propagates here automatically and the offscreen side needs no hand
+ * conversion (ADR-3 / HEALTH MED-3). The import is type-only, so it erases at
+ * build time — `ladder.ts` gains no runtime protocol dependency, preserving its
+ * freedom from Chrome/protocol RUNTIME imports. The runtime validator
+ * `isWarmupTier` below still structurally validates the wire shape.
  */
-export interface WarmupTier {
-  modelName: string;
-  device: 'webgpu' | 'wasm';
-  dtype: string;
-}
+export type WarmupTier = Tier;
 
 /**
  * Block-load (warmup) the offscreen session, optionally dictating the tier to
@@ -393,6 +449,27 @@ export function isStreamDone(value: unknown): value is StreamDone {
  */
 export const STREAM_PROGRESS_PORT = 'offscreen-progress' as const;
 export const STREAM_PROGRESS = 'stream/progress' as const;
+
+/**
+ * Panel-pin port (Layer B, Phase 3, ADR-2). Content script -> service worker.
+ * Lifetime is panel visibility: the content script opens this port when the
+ * chat panel becomes visible and disconnects it when the panel hides. The SW
+ * counts open ports of this name; the port carries no messages, its mere
+ * existence is the "a panel is open" signal. The `local-nano-` prefix
+ * disambiguates this content-side port from the offscreen-document-side ports
+ * (offscreen-stream, offscreen-progress, offscreen-pin).
+ */
+export const PANEL_PIN_PORT_NAME = 'local-nano-panel-pin' as const;
+
+/**
+ * Offscreen-pin port (Layer B, Phase 3, ADR-2). Service worker -> offscreen
+ * document. Lifetime is "any panel-pin open": the SW opens this port to the
+ * offscreen on the 0->1 panel-pin transition and disconnects it on the 1->0
+ * transition (deferred while the offscreen is busy). The open port prevents
+ * Chrome's 30-second no-port reap from closing the offscreen document while a
+ * panel is open. Carries no messages.
+ */
+export const OFFSCREEN_PIN_PORT_NAME = 'offscreen-pin' as const;
 
 /**
  * One forwarded `downloadprogress` ProgressEvent. The polyfill dispatches

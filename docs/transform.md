@@ -42,7 +42,7 @@ DOM untouched. Press `Esc` again to switch back to Edit mode.
   headings, blockquotes, and similar).
 - Public web pages with standard DOM selections.
 
-Out of scope (queued for v0.3.0):
+Out of scope:
 
 - `<input>` and `<textarea>` selections. These use a different
   selection API and need synthetic `input` events to notify frameworks.
@@ -54,8 +54,8 @@ Out of scope (queued for v0.3.0):
 ## Architecture constraints inherited from v0.2.0
 
 The v0.2.0 release shipped the same conceptual feature and was reverted
-after a WebGPU OOM regression. The rewrite shipped in v0.2.3 (the project
-is now on 0.2.4). Three non-negotiable constraints carry over:
+after a WebGPU OOM regression. The rewrite shipped in v0.2.3. Three
+non-negotiable constraints carry over:
 
 1. **Single offscreen `LanguageModel` session.** Transforms reuse the
    long-lived session created by `offscreen.ts:ensureSession`. No new
@@ -105,7 +105,7 @@ machine:
    swaps to `Ask about selection…` and that sending leaves the DOM
    untouched.
 
-## v0.3.0 follow-ups
+## Follow-ups
 
 - `<input>` / `<textarea>` / `contenteditable` selection support.
 - Multi-level undo across multiple rewrites.
