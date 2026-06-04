@@ -16,6 +16,8 @@ import {
   IS_BUSY_RESPONSE,
   RECREATE_OFFSCREEN_REQUEST,
   RECREATE_OFFSCREEN_RESPONSE,
+  SESSION_POISONED_REQUEST,
+  SESSION_POISONED_RESPONSE,
   TOUCH_IDLE_REQUEST,
   TOUCH_IDLE_RESPONSE,
 } from '../src/offscreen/protocol.js';
@@ -250,6 +252,100 @@ describe('installEnsureListener', () => {
     expect(chromeMock.alarms.create).toHaveBeenCalledTimes(1);
     const [name] = chromeMock.alarms.create.mock.calls[0] as [string, { when: number }];
     expect(name).toBe(IDLE_ALARM_NAME);
+  });
+
+  /** Drive a message into the listener and await its async sendResponse reply. */
+  async function dispatch(listener: Listener, msg: unknown): Promise<unknown> {
+    const sendResponse = vi.fn();
+    listener(msg, { id: 'test-ext' }, sendResponse);
+    for (let i = 0; i < 20 && sendResponse.mock.calls.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    return sendResponse.mock.calls[0]?.[0];
+  }
+
+  /** Mock the IS_BUSY round-trip the ensure-poisoned path uses via sendMessage. */
+  function mockBusy(busy: boolean): void {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: IS_BUSY_RESPONSE,
+      ok: true,
+      busy,
+    }));
+  }
+
+  it('flips the poisoned flag and acks ok:true on SESSION_POISONED_REQUEST', async () => {
+    chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+    installEnsureListener();
+    const listener = captureListener();
+    const reply = await dispatch(listener, {
+      type: SESSION_POISONED_REQUEST,
+      at: '2026-06-04T00:00:00.000Z',
+      reason: 'destroyed',
+      message: 'lost',
+    });
+    expect(reply).toEqual({ type: SESSION_POISONED_RESPONSE, ok: true });
+  });
+
+  it('recreates the offscreen on the next ensure when poisoned and not busy', async () => {
+    chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+    installEnsureListener();
+    const listener = captureListener();
+    // Build the document once so a later recreate has something to close.
+    await dispatch(listener, { type: ENSURE_OFFSCREEN_REQUEST });
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(1);
+    // Poison the session.
+    await dispatch(listener, {
+      type: SESSION_POISONED_REQUEST,
+      at: 'a',
+      reason: 'destroyed',
+      message: 'lost',
+    });
+    // Next ensure with IS_BUSY -> busy:false recreates (close + create).
+    mockBusy(false);
+    const reply = await dispatch(listener, { type: ENSURE_OFFSCREEN_REQUEST });
+    expect(reply).toEqual({ type: ENSURE_OFFSCREEN_RESPONSE, ok: true });
+    expect(chromeMock.offscreen.closeDocument).toHaveBeenCalledTimes(1);
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(2);
+    // The flag is cleared: a further ensure does NOT recreate again.
+    const before = chromeMock.offscreen.closeDocument.mock.calls.length;
+    await dispatch(listener, { type: ENSURE_OFFSCREEN_REQUEST });
+    expect(chromeMock.offscreen.closeDocument.mock.calls.length).toBe(before);
+  });
+
+  it('defers the recreate while busy, then recreates on the next ensure', async () => {
+    chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+    installEnsureListener();
+    const listener = captureListener();
+    await dispatch(listener, { type: ENSURE_OFFSCREEN_REQUEST });
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(1);
+    await dispatch(listener, {
+      type: SESSION_POISONED_REQUEST,
+      at: 'a',
+      reason: 'destroyed',
+      message: 'lost',
+    });
+    // Busy ensure: do NOT recreate, flag stays set.
+    mockBusy(true);
+    await dispatch(listener, { type: ENSURE_OFFSCREEN_REQUEST });
+    expect(chromeMock.offscreen.closeDocument).not.toHaveBeenCalled();
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(1);
+    // Next ensure, now idle: recreate fires.
+    mockBusy(false);
+    await dispatch(listener, { type: ENSURE_OFFSCREEN_REQUEST });
+    expect(chromeMock.offscreen.closeDocument).toHaveBeenCalledTimes(1);
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not recreate on ensure when there was no prior poison', async () => {
+    chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+    installEnsureListener();
+    const listener = captureListener();
+    await dispatch(listener, { type: ENSURE_OFFSCREEN_REQUEST });
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(1);
+    // A second ensure with no poison must not close/recreate.
+    await dispatch(listener, { type: ENSURE_OFFSCREEN_REQUEST });
+    expect(chromeMock.offscreen.closeDocument).not.toHaveBeenCalled();
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(1);
   });
 });
 

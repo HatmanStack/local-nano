@@ -27,9 +27,12 @@ import {
   isEnsureOffscreenRequest,
   isIsBusyResponse,
   isRecreateOffscreenRequest,
+  isSessionPoisonedRequest,
   isTouchIdleRequest,
   RECREATE_OFFSCREEN_RESPONSE,
   type RecreateOffscreenResponse,
+  SESSION_POISONED_RESPONSE,
+  type SessionPoisonedResponse,
   TOUCH_IDLE_RESPONSE,
   type TouchIdleResponse,
 } from '../offscreen/protocol.js';
@@ -41,6 +44,17 @@ const OFFSCREEN_JUSTIFICATION = 'Hosts shared LanguageModel session backed by ON
 
 let createInFlight: Promise<void> | null = null;
 let documentReady = false;
+
+/**
+ * Sticky poisoned-session flag (Layer A, ADR-1). Set true when the offscreen
+ * document pushes `SESSION_POISONED` after a GPUDevice `lost` event. The next
+ * `ENSURE_OFFSCREEN_REQUEST` consults it: when set and the offscreen is not
+ * busy, the SW recreates the document on a healthy session and clears the flag.
+ * Module-scoped and NOT persisted: a fresh SW after eviction has no live
+ * offscreen anyway (it was reaped with the SW), so the next ensure builds a
+ * clean document and there is nothing to recover.
+ */
+let sessionPoisoned = false;
 
 async function offscreenAlreadyExists(): Promise<boolean> {
   if (documentReady) return true;
@@ -156,6 +170,32 @@ export async function queryOffscreenBusy(): Promise<boolean> {
 }
 
 /**
+ * Ensure the offscreen document for a panel-open request, recreating it first
+ * when the session is poisoned (Layer A, ADR-1, ADR-P7).
+ *
+ * When `sessionPoisoned` is set, probe the offscreen `IS_BUSY` state via the
+ * existing `queryOffscreenBusy` round-trip. If a generation is in flight
+ * (`busy === true`) the recreate is DEFERRED: the flag stays set and a plain
+ * `ensureOffscreen` runs so the panel is not blocked, and the next ensure tries
+ * again once the generation finishes. NEVER tear down a live stream. When not
+ * busy, `recreateOffscreen` (which itself ensures a fresh document) runs and the
+ * flag is cleared BEFORE returning. The clear happens only on a completed
+ * recreate so a recreate failure leaves the session poisoned for a retry.
+ */
+async function ensurePossiblyRecreate(): Promise<void> {
+  if (sessionPoisoned) {
+    const busy = await queryOffscreenBusy();
+    if (!busy) {
+      await recreateOffscreen();
+      sessionPoisoned = false;
+      return;
+    }
+    // Busy: defer the recreate; just ensure the document is up for the panel.
+  }
+  await ensureOffscreen();
+}
+
+/**
  * Idle-alarm listener body (ADR-P8, P9). Ignores any alarm that is not the idle
  * alarm. On the idle alarm: read the current timeout, probe the offscreen busy
  * state, then act per the pure `decideIdleAction`:
@@ -188,10 +228,12 @@ export async function handleAlarm(alarm: { name: string }): Promise<void> {
 
 /**
  * Register a `chrome.runtime.onMessage` listener that fields
- * `ENSURE_OFFSCREEN_REQUEST`, `RECREATE_OFFSCREEN_REQUEST`, and
- * `TOUCH_IDLE_REQUEST` messages from content scripts. Call this once from
- * `background.ts` at top level. Idempotent across SW restarts — Chrome dedupes
- * addListener calls keyed by the function reference.
+ * `ENSURE_OFFSCREEN_REQUEST`, `RECREATE_OFFSCREEN_REQUEST`,
+ * `SESSION_POISONED_REQUEST`, and `TOUCH_IDLE_REQUEST` messages. The ensure
+ * branch recreates the document first when the session is poisoned and idle
+ * (ADR-1). Call this once from `background.ts` at top level. Idempotent across
+ * SW restarts — Chrome dedupes addListener calls keyed by the function
+ * reference.
  *
  * Returns `true` only for owned messages (to keep the reply channel open for
  * the async response) and `false` otherwise, preserving the MV3
@@ -204,7 +246,7 @@ export function installEnsureListener(): void {
     // but the explicit check makes the trust boundary visible to a reviewer.
     if (sender.id !== chrome.runtime.id) return false;
     if (isEnsureOffscreenRequest(msg)) {
-      ensureOffscreen().then(
+      ensurePossiblyRecreate().then(
         () => {
           const ok: EnsureOffscreenResponse = { type: ENSURE_OFFSCREEN_RESPONSE, ok: true };
           sendResponse(ok);
@@ -220,6 +262,16 @@ export function installEnsureListener(): void {
         },
       );
       return true; // keep the channel open for the async reply
+    }
+    if (isSessionPoisonedRequest(msg)) {
+      // Push from the offscreen on device.lost (ADR-1). Flip the sticky flag
+      // and ack. The offscreen does not await this reply; the ack exists for
+      // protocol uniformity and test observability. The actual recreate is
+      // deferred to the next ensure (when the offscreen is not busy).
+      sessionPoisoned = true;
+      const ok: SessionPoisonedResponse = { type: SESSION_POISONED_RESPONSE, ok: true };
+      sendResponse(ok);
+      return true; // keep the channel open for the (synchronous) reply
     }
     if (isRecreateOffscreenRequest(msg)) {
       recreateOffscreen().then(
@@ -276,4 +328,5 @@ export function sendPrompt(prompt: string): Promise<string> {
 export function _resetForTests(): void {
   documentReady = false;
   createInFlight = null;
+  sessionPoisoned = false;
 }
