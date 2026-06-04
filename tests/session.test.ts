@@ -6,6 +6,7 @@ import { DEFAULT_MODEL_ID } from '../src/offscreen/catalog.js';
 import * as ladderModule from '../src/offscreen/ladder.js';
 import { SMALLER_MODEL_CANDIDATE } from '../src/offscreen/ladder.js';
 import { MODEL_PREF_KEY } from '../src/offscreen/model-pref.js';
+import { POISONED_STREAM_ERROR } from '../src/offscreen/stream-finalize.js';
 import type { SelectionSnapshot } from '../src/selection-rewrite.js';
 import {
   deriveHistoryThreshold,
@@ -1549,6 +1550,59 @@ describe('initSession — send-path re-warm recovery (idle release)', () => {
     await flushMicrotasks();
     const modelBubble = deps._messages.children[1];
     expect(modelBubble?.textContent).toBe('recovered answer');
+  });
+
+  it('re-warms and retries the same prompt once on a poisoned-stream terminal failure', async () => {
+    // Phase 1 / brainstorm decision 1c: the offscreen zero-chunk detector now
+    // emits STREAM_DONE { ok: false, error: POISONED_STREAM_ERROR } on a natural
+    // completion that produced no tokens. classifyFailure classes that prefix as
+    // terminal, so the same reactive re-warm + single retry the closed-document
+    // case exercises must run before the 0.4.2 panel-side empty-success net.
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    first.reject(new Error(POISONED_STREAM_ERROR));
+    const retry = await awaitPending();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore + 1);
+    expect(retry.prompt).toBe(first.prompt);
+    retry.opts.onChunk?.('recovered answer');
+    retry.resolve('recovered answer');
+    await flushMicrotasks();
+    const modelBubble = deps._messages.children[1];
+    expect(modelBubble?.textContent).toBe('recovered answer');
+  });
+
+  it('does NOT re-warm on a successful first stream (poisoned path leaves the happy path alone)', async () => {
+    // A non-empty success followed by an immediate second user send must not
+    // trigger the poisoned-stream recovery: no recreate, no extra retry queued.
+    const deps = makeDeps();
+    initSession(deps);
+    await flushMicrotasks();
+    deps._input.value = 'question';
+    deps._actionBtn.click();
+    const first = await awaitPending();
+    const recreateBefore = recreateOffscreenMock.mock.calls.length;
+    first.opts.onChunk?.('a real answer');
+    first.resolve('a real answer');
+    await flushMicrotasks();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    expect(pending.length).toBe(0);
+    const firstBubble = deps._messages.children[1];
+    expect(firstBubble?.textContent).toBe('a real answer');
+    // A second user send proceeds normally on the healthy session.
+    deps._input.value = 'another question';
+    deps._actionBtn.click();
+    const second = await awaitPending();
+    expect(recreateOffscreenMock.mock.calls.length).toBe(recreateBefore);
+    second.opts.onChunk?.('second answer');
+    second.resolve('second answer');
+    await flushMicrotasks();
+    const secondBubble = deps._messages.children[3];
+    expect(secondBubble?.textContent).toBe('second answer');
   });
 
   it('does NOT re-warm on a non-terminal stream error (no churny auto-rebuild)', async () => {
