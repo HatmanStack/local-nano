@@ -440,6 +440,27 @@ export const STREAM_PROGRESS_PORT = 'offscreen-progress' as const;
 export const STREAM_PROGRESS = 'stream/progress' as const;
 
 /**
+ * Panel-pin port (Layer B, Phase 3, ADR-2). Content script -> service worker.
+ * Lifetime is panel visibility: the content script opens this port when the
+ * chat panel becomes visible and disconnects it when the panel hides. The SW
+ * counts open ports of this name; the port carries no messages, its mere
+ * existence is the "a panel is open" signal. The `local-nano-` prefix
+ * disambiguates this content-side port from the offscreen-document-side ports
+ * (offscreen-stream, offscreen-progress, offscreen-pin).
+ */
+export const PANEL_PIN_PORT_NAME = 'local-nano-panel-pin' as const;
+
+/**
+ * Offscreen-pin port (Layer B, Phase 3, ADR-2). Service worker -> offscreen
+ * document. Lifetime is "any panel-pin open": the SW opens this port to the
+ * offscreen on the 0->1 panel-pin transition and disconnects it on the 1->0
+ * transition (deferred while the offscreen is busy). The open port prevents
+ * Chrome's 30-second no-port reap from closing the offscreen document while a
+ * panel is open. Carries no messages.
+ */
+export const OFFSCREEN_PIN_PORT_NAME = 'offscreen-pin' as const;
+
+/**
  * One forwarded `downloadprogress` ProgressEvent. The polyfill dispatches
  * `new ProgressEvent('downloadprogress', { loaded, total, lengthComputable })`
  * (`prompt-api-polyfill.js` `dispatchProgress`); the offscreen monitor reads
