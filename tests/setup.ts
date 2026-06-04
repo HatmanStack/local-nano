@@ -238,6 +238,24 @@ const alarms = {
   },
 };
 
+/**
+ * `chrome.runtime.onConnect` stand-in (Phase 3). The SW registers a listener
+ * for the panel-pin port via `installPanelPinListener`; `_emitConnect(port)`
+ * invokes every registered listener with the given port so a test can drive a
+ * panel-pin connect/disconnect without a real cross-context port.
+ */
+const onConnectListeners: Array<(port: FakePort) => void> = [];
+
+const onConnect = {
+  addListener: vi.fn((l: (port: FakePort) => void) => {
+    onConnectListeners.push(l);
+  }),
+  /** Test helper: fire every registered onConnect listener with a port. */
+  _emitConnect(port: FakePort) {
+    for (const l of onConnectListeners) l(port);
+  },
+};
+
 const chromeMock = {
   storage: { local },
   alarms,
@@ -246,6 +264,7 @@ const chromeMock = {
     getURL: vi.fn((p: string) => `chrome-extension://test/${p}`),
     getManifest: vi.fn(() => ({ version: '0.2.4' })),
     onMessage: { addListener: vi.fn() },
+    onConnect,
     sendMessage: vi.fn(async (_msg: unknown) => undefined as unknown),
     lastError: undefined as { message?: string } | undefined,
     connect: vi.fn((opts: { name: string }) => new FakePort(opts.name)),
@@ -288,6 +307,8 @@ beforeEach(() => {
   chromeMock.runtime.connect.mockImplementation(
     (opts: { name: string }) => new FakePort(opts.name),
   );
+  chromeMock.runtime.onConnect.addListener.mockClear();
+  onConnectListeners.length = 0;
   chromeMock.commands.onCommand.addListener.mockClear();
   chromeMock.commands.getAll.mockClear();
   chromeMock.commands.getAll.mockImplementation(async () => []);

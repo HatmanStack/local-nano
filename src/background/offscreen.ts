@@ -29,6 +29,8 @@ import {
   isRecreateOffscreenRequest,
   isSessionPoisonedRequest,
   isTouchIdleRequest,
+  OFFSCREEN_PIN_PORT_NAME,
+  PANEL_PIN_PORT_NAME,
   RECREATE_OFFSCREEN_RESPONSE,
   type RecreateOffscreenResponse,
   SESSION_POISONED_RESPONSE,
@@ -37,6 +39,7 @@ import {
   type TouchIdleResponse,
 } from '../offscreen/protocol.js';
 import { type StreamPromptOptions, streamOverPort } from '../offscreen/stream-client.js';
+import { _newState, onPanelConnect, onPanelDisconnect, type PanelPinState } from './panel-pin.js';
 
 const OFFSCREEN_URL = 'dist/offscreen.html';
 const OFFSCREEN_REASONS = ['WORKERS'] as const;
@@ -55,6 +58,24 @@ let documentReady = false;
  * clean document and there is nothing to recover.
  */
 let sessionPoisoned = false;
+
+/**
+ * Panel-pin lifetime state (Layer B, Phase 3, ADR-2). `panelPinState` counts
+ * the open content-script panel-pin ports. `offscreenPinPort` is the long-lived
+ * port the SW holds to the offscreen document WHILE at least one panel is open;
+ * its mere existence prevents Chrome's 30-second no-port reap from closing the
+ * offscreen. `pendingRelease` records a release that was deferred because the
+ * offscreen was busy (a stream was mid-generation); the next idle-alarm tick
+ * retries it (ADR-P7: never tear down a live stream).
+ *
+ * Module-scoped and NOT persisted: the count is rebuilt from observed
+ * `onConnect` events after SW eviction, not loaded from storage (Phase-0
+ * constraint 9). A fresh SW starts at 0; a page open across the eviction
+ * keeps its port and re-fires `onConnect` when the SW wakes.
+ */
+let panelPinState: PanelPinState = _newState();
+let offscreenPinPort: chrome.runtime.Port | null = null;
+let pendingRelease = false;
 
 async function offscreenAlreadyExists(): Promise<boolean> {
   if (documentReady) return true;
@@ -208,6 +229,11 @@ async function ensurePossiblyRecreate(): Promise<void> {
  */
 export async function handleAlarm(alarm: { name: string }): Promise<void> {
   if (alarm.name !== IDLE_ALARM_NAME) return;
+  // A panel-pin release deferred while the offscreen was busy (Phase 3) gets a
+  // retry here, before the idle decision: the alarm fire is the next
+  // opportunity to drop a pin port that the last panel-close could not release
+  // because a stream was in flight (ADR-P7).
+  if (pendingRelease) await releaseOffscreenPin();
   const pref = await loadModelPref();
   const timeoutMinutes = pref.idleTimeoutMinutes;
   const busy = await queryOffscreenBusy();
@@ -312,6 +338,77 @@ export function installEnsureListener(): void {
 }
 
 /**
+ * Open the SW-to-offscreen pin port (Layer B, Phase 3). Ensures the offscreen
+ * document is up, then opens a long-lived `OFFSCREEN_PIN_PORT_NAME` port whose
+ * mere existence keeps Chrome from reaping the document while a panel is open.
+ * The port carries no messages. A second acquire is a no-op when a port is
+ * already held (the counter only emits `acquire` on the 0->1 transition, but
+ * the null-guard makes a stray double-acquire safe too).
+ */
+async function acquireOffscreenPin(): Promise<void> {
+  if (offscreenPinPort) return;
+  await ensureOffscreen();
+  offscreenPinPort = chrome.runtime.connect({ name: OFFSCREEN_PIN_PORT_NAME });
+  // A SW-restart or offscreen recreate can drop this port; clear the handle so
+  // a later acquire opens a fresh one rather than reusing a dead port.
+  offscreenPinPort.onDisconnect.addListener(() => {
+    offscreenPinPort = null;
+  });
+}
+
+/**
+ * Release the SW-to-offscreen pin port (Layer B, Phase 3). Guards on the
+ * existing `queryOffscreenBusy` round-trip: when a generation is in flight the
+ * release is DEFERRED (`pendingRelease = true`) and the next idle-alarm tick
+ * retries it (ADR-P7: never tear down a live stream). When not busy, the port
+ * is disconnected and Chrome's 30s reap can run normally. A null port (already
+ * released or dropped) just clears the pending flag.
+ */
+async function releaseOffscreenPin(): Promise<void> {
+  if (!offscreenPinPort) {
+    pendingRelease = false;
+    return;
+  }
+  const busy = await queryOffscreenBusy();
+  if (busy) {
+    pendingRelease = true;
+    return;
+  }
+  offscreenPinPort.disconnect();
+  offscreenPinPort = null;
+  pendingRelease = false;
+}
+
+/**
+ * Register a `chrome.runtime.onConnect` listener for the panel-pin port (Layer
+ * B, Phase 3, ADR-2). Each content-script panel that becomes visible opens a
+ * `PANEL_PIN_PORT_NAME` port; this listener feeds the pure panel-pin counter
+ * and acts on its action: open the offscreen pin port on the 0->1 transition,
+ * release it on the 1->0 transition (deferred while busy). Ports of any other
+ * name are ignored so the existing stream/progress ports are untouched.
+ *
+ * Call this once from `background.ts` at top level. Idempotent across SW
+ * restarts: Chrome dedupes addListener calls keyed by the function reference.
+ * The counter is rebuilt from the live `onConnect` re-fires after eviction,
+ * never persisted (Phase-0 constraint 9).
+ */
+export function installPanelPinListener(): void {
+  chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== PANEL_PIN_PORT_NAME) return;
+    const onConnectAction = onPanelConnect(panelPinState);
+    if (onConnectAction.kind === 'acquire-offscreen-pin') {
+      void acquireOffscreenPin();
+    }
+    port.onDisconnect.addListener(() => {
+      const onDisconnectAction = onPanelDisconnect(panelPinState);
+      if (onDisconnectAction.kind === 'release-offscreen-pin') {
+        void releaseOffscreenPin();
+      }
+    });
+  });
+}
+
+/**
  * SW-side `streamPrompt`. Uses `ensureOffscreen` directly (cheaper than a
  * round-trip sendMessage to itself, which doesn't fire its own
  * onMessage anyway). Suitable for the SW devtools smoke test.
@@ -329,4 +426,7 @@ export function _resetForTests(): void {
   documentReady = false;
   createInFlight = null;
   sessionPoisoned = false;
+  panelPinState = _newState();
+  offscreenPinPort = null;
+  pendingRelease = false;
 }

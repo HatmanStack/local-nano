@@ -4,6 +4,7 @@ import {
   ensureOffscreen,
   handleAlarm,
   installEnsureListener,
+  installPanelPinListener,
   recreateOffscreen,
   sendPrompt,
   streamPrompt,
@@ -16,6 +17,14 @@ export { closeOffscreen, ensureOffscreen, recreateOffscreen, sendPrompt, streamP
 // they open a streaming port. This listener also fields the touch-idle signal
 // that (re)schedules the idle-release alarm (Phase 4, ADR-P8).
 installEnsureListener();
+
+// Panel-pin lifetime (Layer B, Phase 3). A content-script panel that is visible
+// holds a port named PANEL_PIN_PORT_NAME open to the SW; while at least one is
+// open the SW holds its own port to the offscreen document, which keeps Chrome
+// from reaping the offscreen during a tab switch. Registered at top level so it
+// re-derives the count from live onConnect re-fires after SW eviction; Chrome
+// dedupes addListener by the function reference.
+installPanelPinListener();
 
 // Idle-release alarm (ADR-P8, P9). The single named alarm wakes the SW after
 // the configured inactivity timeout; the listener verifies idle then closes the

@@ -5,6 +5,7 @@ import {
   ensureOffscreen,
   handleAlarm,
   installEnsureListener,
+  installPanelPinListener,
   recreateOffscreen,
   scheduleIdleAlarm,
 } from '../src/background/offscreen.js';
@@ -14,6 +15,8 @@ import {
   ENSURE_OFFSCREEN_REQUEST,
   ENSURE_OFFSCREEN_RESPONSE,
   IS_BUSY_RESPONSE,
+  OFFSCREEN_PIN_PORT_NAME,
+  PANEL_PIN_PORT_NAME,
   RECREATE_OFFSCREEN_REQUEST,
   RECREATE_OFFSCREEN_RESPONSE,
   SESSION_POISONED_REQUEST,
@@ -21,7 +24,7 @@ import {
   TOUCH_IDLE_REQUEST,
   TOUCH_IDLE_RESPONSE,
 } from '../src/offscreen/protocol.js';
-import { chromeMock } from './setup.js';
+import { chromeMock, FakePort } from './setup.js';
 
 /** Seed the model preference so the scheduler/handler read a known timeout. */
 function seedIdleTimeout(minutes: number | null): void {
@@ -469,5 +472,152 @@ describe('handleAlarm (verify-idle close)', () => {
     await handleAlarm({ name: IDLE_ALARM_NAME });
     expect(chromeMock.offscreen.closeDocument).not.toHaveBeenCalled();
     expect(chromeMock.alarms.clear).toHaveBeenCalledWith(IDLE_ALARM_NAME);
+  });
+});
+
+describe('installPanelPinListener (offscreen pin lifetime)', () => {
+  type ConnectListener = (port: FakePort) => void;
+
+  beforeEach(() => {
+    _resetForTests();
+    chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+  });
+
+  function captureConnectListener(): ConnectListener {
+    const calls = chromeMock.runtime.onConnect.addListener.mock.calls;
+    return calls[calls.length - 1]?.[0] as ConnectListener;
+  }
+
+  /** Flush pending microtasks so an async connect/disconnect body settles. */
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+
+  /** Fire a fresh panel-pin connect and return the panel-side FakePort. */
+  async function connectPanel(listener: ConnectListener): Promise<FakePort> {
+    const port = new FakePort(PANEL_PIN_PORT_NAME);
+    listener(port);
+    await flush();
+    return port;
+  }
+
+  /** Mock the IS_BUSY round-trip the release path uses via sendMessage. */
+  function mockBusy(busy: boolean): void {
+    chromeMock.runtime.sendMessage.mockImplementation(async () => ({
+      type: IS_BUSY_RESPONSE,
+      ok: true,
+      busy,
+    }));
+  }
+
+  /** The FakePort the SW opened to the offscreen via chrome.runtime.connect. */
+  function lastOffscreenPin(): FakePort {
+    const result = chromeMock.runtime.connect.mock.results.at(-1)?.value as FakePort;
+    return result;
+  }
+
+  it('registers a chrome.runtime.onConnect listener', () => {
+    installPanelPinListener();
+    expect(chromeMock.runtime.onConnect.addListener).toHaveBeenCalled();
+  });
+
+  it('ignores connects whose port name is not the panel-pin port', async () => {
+    installPanelPinListener();
+    const listener = captureConnectListener();
+    listener(new FakePort('some-other-port'));
+    await flush();
+    expect(chromeMock.runtime.connect).not.toHaveBeenCalled();
+    expect(chromeMock.offscreen.createDocument).not.toHaveBeenCalled();
+  });
+
+  it('opens the offscreen pin port exactly once on the first panel-pin connect', async () => {
+    installPanelPinListener();
+    const listener = captureConnectListener();
+    await connectPanel(listener);
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(1);
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(1);
+    expect(chromeMock.runtime.connect).toHaveBeenCalledWith({ name: OFFSCREEN_PIN_PORT_NAME });
+  });
+
+  it('does not open a second offscreen pin port on the second panel-pin connect', async () => {
+    installPanelPinListener();
+    const listener = captureConnectListener();
+    await connectPanel(listener);
+    await connectPanel(listener);
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not disconnect the offscreen pin port on the first disconnect (2->1)', async () => {
+    mockBusy(false);
+    installPanelPinListener();
+    const listener = captureConnectListener();
+    const a = await connectPanel(listener);
+    await connectPanel(listener);
+    const offscreenPin = lastOffscreenPin();
+    a._emitDisconnect();
+    await flush();
+    expect(offscreenPin.disconnect).not.toHaveBeenCalled();
+    expect(offscreenPin.isConnected).toBe(true);
+  });
+
+  it('disconnects the offscreen pin port on the last disconnect (1->0) when not busy', async () => {
+    mockBusy(false);
+    installPanelPinListener();
+    const listener = captureConnectListener();
+    const a = await connectPanel(listener);
+    const offscreenPin = lastOffscreenPin();
+    a._emitDisconnect();
+    await flush();
+    expect(offscreenPin.disconnect).toHaveBeenCalledTimes(1);
+    expect(offscreenPin.isConnected).toBe(false);
+  });
+
+  it('defers the release while busy, then disconnects at the next idle alarm', async () => {
+    seedIdleTimeout(15);
+    mockBusy(true);
+    installPanelPinListener();
+    const listener = captureConnectListener();
+    const a = await connectPanel(listener);
+    const offscreenPin = lastOffscreenPin();
+    // Last panel closes while a generation is in flight: do NOT disconnect.
+    a._emitDisconnect();
+    await flush();
+    expect(offscreenPin.disconnect).not.toHaveBeenCalled();
+    expect(offscreenPin.isConnected).toBe(true);
+    // The idle alarm fires later; the offscreen is now idle, so the deferred
+    // release lands before the alarm decides the close/reschedule action.
+    mockBusy(false);
+    await handleAlarm({ name: IDLE_ALARM_NAME });
+    expect(offscreenPin.disconnect).toHaveBeenCalledTimes(1);
+    expect(offscreenPin.isConnected).toBe(false);
+  });
+
+  it('does not disconnect at the idle alarm when no release was deferred', async () => {
+    seedIdleTimeout(15);
+    mockBusy(false);
+    installPanelPinListener();
+    const listener = captureConnectListener();
+    await connectPanel(listener);
+    const offscreenPin = lastOffscreenPin();
+    // Panel still open (no disconnect). The idle alarm fires; the pin port
+    // stays open because no release was pending.
+    await handleAlarm({ name: IDLE_ALARM_NAME });
+    expect(offscreenPin.disconnect).not.toHaveBeenCalled();
+    expect(offscreenPin.isConnected).toBe(true);
+  });
+
+  it('re-acquires after a full close/reopen cycle (0->1 again)', async () => {
+    mockBusy(false);
+    installPanelPinListener();
+    const listener = captureConnectListener();
+    const a = await connectPanel(listener);
+    a._emitDisconnect();
+    await flush();
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(1);
+    // A fresh panel opens after the release: acquire fires again.
+    await connectPanel(listener);
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(2);
   });
 });
