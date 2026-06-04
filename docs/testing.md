@@ -40,6 +40,7 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 | `tests/offscreen-diagnostic.test.ts` | `buildDiagnostic`/`errorInfo` copy-only diagnostic builder |
 | `tests/offscreen-busy-gate.test.ts`  | `BusyGate` concurrent-stream rejection       |
 | `tests/offscreen-stream-finalize.test.ts` | `finalizeStreamDone`/`POISONED_STREAM_ERROR` zero-chunk vs aborted vs ok finalize decision |
+| `tests/offscreen-gpu-capture.test.ts` | navigator.gpu monkey-patch and device.lost listener wiring (Phase 2) |
 | `tests/docs-config.test.ts`          | Doc cross-references and test-file table drift |
 
 ## Coverage

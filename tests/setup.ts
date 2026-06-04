@@ -170,15 +170,29 @@ const gpuState: GpuState = {
   lastDevice: null,
 };
 
-const gpuMock: FakeGpu = {
-  requestAdapter: vi.fn(async () => {
+/** Build the default `requestAdapter` spy that records the resolved adapter. */
+function makeRequestAdapter(): FakeGpu['requestAdapter'] {
+  return vi.fn(async () => {
     gpuState.lastAdapter = gpuState.adapter;
     return gpuState.adapter;
-  }),
+  });
+}
+
+const gpuMock: FakeGpu = {
+  requestAdapter: makeRequestAdapter(),
   _setAdapter(adapter: FakeGpuAdapter | null) {
     gpuState.adapter = adapter;
   },
   _resetCaptures() {
+    // Reassign a fresh spy (rather than mockClear) so a prior test's
+    // gpu-capture install, which replaces requestAdapter with its wrapper, is
+    // fully reverted to the default spy here regardless of reset ordering. Also
+    // drop the gpu-capture install marker so the module's _resetForTests does
+    // not restore a stale wrapper over this fresh spy.
+    gpuMock.requestAdapter = makeRequestAdapter();
+    delete (gpuMock as unknown as Record<symbol, unknown>)[
+      Symbol.for('local-nano/gpu-capture-installed')
+    ];
     gpuState.adapter = makeFakeAdapter();
     gpuState.lastAdapter = null;
     gpuState.lastDevice = null;
@@ -293,8 +307,8 @@ beforeEach(() => {
   chromeMock.alarms.clear.mockImplementation(async (_name?: string) => true);
   chromeMock.alarms.onAlarm.addListener.mockClear();
   alarmListeners.length = 0;
-  // Reset the navigator.gpu mock to a fresh default adapter between tests.
-  (gpuMock.requestAdapter as ReturnType<typeof vi.fn>).mockClear();
+  // Reset the navigator.gpu mock to a fresh default adapter and a fresh
+  // requestAdapter spy between tests (reverts any prior gpu-capture install).
   gpuMock._resetCaptures();
   // Default tabs.query implementation — overridable per-test.
   chromeMock.tabs.query.mockImplementation(
