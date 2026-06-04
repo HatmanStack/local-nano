@@ -4,6 +4,7 @@ import {
   classifyLoadFailure,
   isTerminalFailure,
 } from '../src/offscreen/failure.js';
+import { POISONED_STREAM_ERROR } from '../src/offscreen/stream-finalize.js';
 
 describe('classifyFailure', () => {
   it('classifies the stream-client unknown-reason disconnect as terminal', () => {
@@ -28,6 +29,16 @@ describe('classifyFailure', () => {
     expect(
       classifyFailure(new Error('Could not establish connection. Receiving end does not exist.')),
     ).toBe('terminal');
+  });
+
+  it('classifies the poisoned-stream wire string as terminal', () => {
+    // The offscreen zero-chunk detector emits this exact string; classing it
+    // terminal routes it through the existing serialized re-warm primitive.
+    expect(classifyFailure(new Error(POISONED_STREAM_ERROR))).toBe('terminal');
+  });
+
+  it('classifies the poisoned-stream prefix as terminal even with a refined suffix', () => {
+    expect(classifyFailure(new Error('no tokens emitted; something rephrased'))).toBe('terminal');
   });
 
   it('classifies a generic port-disconnected message as terminal', () => {
