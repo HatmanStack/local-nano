@@ -9,7 +9,11 @@
  * Token streaming is the only transport: callers open a port named
  * `STREAM_PORT_NAME`, post a `StreamRequest`, and receive `StreamChunk`
  * frames until a `StreamDone` frame closes the exchange. Callers can
- * cancel mid-stream by posting `StreamAbort`.
+ * cancel mid-stream by posting `StreamAbort`. Two further ports are accepted
+ * without an inbound message protocol: the first-run progress port
+ * (`STREAM_PROGRESS_PORT`) and the SW pin port (`OFFSCREEN_PIN_PORT_NAME`, the
+ * Phase 3 lifetime guarantee that keeps Chrome from reaping this document while
+ * a panel is open).
  *
  * The heavy `@huggingface/transformers` import lives only here, in the
  * offscreen document — the chat layer (`src/session.ts`) holds no model and
@@ -35,6 +39,7 @@ import {
   type IsBusyResponse,
   isStreamAbort,
   isStreamRequest,
+  OFFSCREEN_PIN_PORT_NAME,
   type ProgressFrame,
   REBUILD_SESSION_RESPONSE,
   type RebuildSessionRequest,
@@ -107,6 +112,13 @@ const generationGate = new BusyGate();
 // event is forwarded to every connected port; a disconnected port is dropped
 // on its own onDisconnect and a postMessage to a stale port is swallowed.
 const progressPorts = new Set<chrome.runtime.Port>();
+
+// Connected SW pin ports (Layer B, Phase 3). The SW opens one
+// `OFFSCREEN_PIN_PORT_NAME` port while at least one panel is open; the port's
+// mere existence keeps Chrome from reaping this document during a tab switch.
+// The Set carries no inbound messages and never grows unbounded: each port is
+// added on connect and removed on its own onDisconnect.
+const pinPorts = new Set<chrome.runtime.Port>();
 
 // Device-loss state (Layer A, Phase 2). `sessionPoisoned` flips true when a
 // captured GPUDevice's `lost` event fires; `rebuildSession` clears it on a
@@ -675,6 +687,18 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     for (const ac of activeAborts.values()) ac.abort();
     activeAborts.clear();
+  });
+});
+
+// SW pin port (Layer B, Phase 3 lifetime guarantee). The SW opens this while a
+// panel is open; the offscreen just tracks it so the port is a live connection.
+// The port carries no inbound messages, its existence is what prevents Chrome's
+// 30-second no-port reap from closing this document mid-tab-switch.
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== OFFSCREEN_PIN_PORT_NAME) return;
+  pinPorts.add(port);
+  port.onDisconnect.addListener(() => {
+    pinPorts.delete(port);
   });
 });
 
