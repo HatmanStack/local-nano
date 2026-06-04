@@ -22,6 +22,7 @@ import transformersConfig from './.env.json';
 import { debugLog } from './src/debug.js';
 import { BusyGate } from './src/offscreen/busy-gate.js';
 import { classifyOffscreenMessage } from './src/offscreen/dispatch.js';
+import { type DeviceLostInfo, installGpuCapture } from './src/offscreen/gpu-capture.js';
 import { applyTierToConfig, type Tier, tierKey } from './src/offscreen/ladder.js';
 import {
   COUNT_TOKENS_RESPONSE,
@@ -38,6 +39,8 @@ import {
   REBUILD_SESSION_RESPONSE,
   type RebuildSessionRequest,
   type RebuildSessionResponse,
+  SESSION_POISONED_REQUEST,
+  type SessionPoisonedRequest,
   STREAM_CHUNK,
   STREAM_DONE,
   STREAM_PORT_NAME,
@@ -104,6 +107,60 @@ const generationGate = new BusyGate();
 // event is forwarded to every connected port; a disconnected port is dropped
 // on its own onDisconnect and a postMessage to a stale port is swallowed.
 const progressPorts = new Set<chrome.runtime.Port>();
+
+// Device-loss state (Layer A, Phase 2). `sessionPoisoned` flips true when a
+// captured GPUDevice's `lost` event fires; `rebuildSession` clears it on a
+// fresh session. `lastDeviceLostAt` records the ISO timestamp of the most
+// recent loss and stays populated across rebuilds as the historical record the
+// Phase 4 diagnostic reports. The SW owns the authoritative recovery decision;
+// this offscreen-side flag exists for the local rebuild reset.
+let sessionPoisoned = false;
+let lastDeviceLostAt: string | null = null;
+
+/**
+ * Handle a captured GPUDevice's `lost` event (ADR-0/ADR-1). Marks the session
+ * poisoned, records the loss timestamp, and pushes a fire-and-forget
+ * `SESSION_POISONED` to the service worker so the next ENSURE recreates the
+ * document on a healthy session. The push is best-effort: an SW evicted at this
+ * instant drops the message, and the outermost 0.4.2 empty-success retry is the
+ * safety net.
+ */
+function handleDeviceLost(info: DeviceLostInfo): void {
+  // Record the loss history regardless; the timestamp is the diagnostic record
+  // and updates to the most recent loss even on a repeat event.
+  lastDeviceLostAt = info.at;
+  // Sticky: only push on the first transition to poisoned for this session, so
+  // a second device.lost (a replaced handle gets its own listener) does not
+  // re-spam the SW with a redundant recreate request. rebuildSession clears the
+  // flag, re-arming the push for the next session's first loss.
+  const alreadyPoisoned = sessionPoisoned;
+  sessionPoisoned = true;
+  debugLog(
+    `[local-nano/offscreen] device.lost reason=${info.reason} at=${lastDeviceLostAt} already=${alreadyPoisoned}`,
+  );
+  if (alreadyPoisoned) return;
+  const push: SessionPoisonedRequest = {
+    type: SESSION_POISONED_REQUEST,
+    at: info.at,
+    reason: info.reason,
+    message: info.message,
+  };
+  try {
+    // Fire-and-forget: do not await the SW reply (ADR-1). The catch swallows a
+    // throw from an absent SW so it cannot escape into the global scope.
+    void chrome.runtime.sendMessage(push);
+  } catch {
+    // SW evicted at this instant; the message is dropped. The next device.lost
+    // (if any) re-sends, and the panel-side empty-success retry catches the gap.
+  }
+}
+
+// Install the transparent navigator.gpu capture at module top (ADR-0), before
+// loadHeavy, the gpu-info handler, or any other consumer runs. Installing here
+// makes the capture a property of the document, not of a particular code path,
+// so the gpu-info preflight cannot race the device capture. Idempotent: a
+// re-import or second call is a no-op.
+installGpuCapture({ onDeviceLost: handleDeviceLost });
 
 /**
  * Forward one progress event to every connected progress port. A disconnected
@@ -226,6 +283,9 @@ async function rebuildSession(history: HistoryTurn[]): Promise<void> {
   // destroy-guard (ADR-R1/R3) is ever reordered, a stale activeTier could skip
   // the destroy that prevents overlapping loads.
   activeTier = null;
+  // A rebuilt session is no longer poisoned (Layer A). lastDeviceLostAt stays
+  // populated as the historical record the Phase 4 diagnostic reports.
+  sessionPoisoned = false;
   await ensureSession(history);
 }
 

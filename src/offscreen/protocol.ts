@@ -243,6 +243,46 @@ export function isIsBusyResponse(value: unknown): value is IsBusyResponse {
   return false;
 }
 
+export const SESSION_POISONED_REQUEST = 'offscreen/session-poisoned-request' as const;
+export const SESSION_POISONED_RESPONSE = 'offscreen/session-poisoned-response' as const;
+
+/**
+ * Poisoned-session push (Layer A, ADR-1). The offscreen document sends this
+ * fire-and-forget to the service worker the moment a captured `GPUDevice`'s
+ * `lost` event fires. The SW flips a sticky `sessionPoisoned` flag and, on the
+ * next `ENSURE_OFFSCREEN_REQUEST`, recreates the offscreen document (when not
+ * busy) so the next user send runs on a healthy session. `at` is the ISO 8601
+ * loss timestamp; `reason`/`message` mirror the WebGPU `GPUDeviceLostInfo`
+ * fields for diagnostics. The offscreen does not await the reply (push, not
+ * pull); the ack exists for protocol uniformity and test observability.
+ */
+export interface SessionPoisonedRequest {
+  type: typeof SESSION_POISONED_REQUEST;
+  at: string;
+  reason: string;
+  message: string;
+}
+
+export type SessionPoisonedResponse =
+  | { type: typeof SESSION_POISONED_RESPONSE; ok: true }
+  | { type: typeof SESSION_POISONED_RESPONSE; ok: false; error: string };
+
+export function isSessionPoisonedRequest(value: unknown): value is SessionPoisonedRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== SESSION_POISONED_REQUEST) return false;
+  return typeof v.at === 'string' && typeof v.reason === 'string' && typeof v.message === 'string';
+}
+
+export function isSessionPoisonedResponse(value: unknown): value is SessionPoisonedResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.type !== SESSION_POISONED_RESPONSE) return false;
+  if (v.ok === true) return true;
+  if (v.ok === false) return typeof v.error === 'string';
+  return false;
+}
+
 export const COUNT_TOKENS_REQUEST = 'offscreen/count-tokens-request' as const;
 export const COUNT_TOKENS_RESPONSE = 'offscreen/count-tokens-response' as const;
 
