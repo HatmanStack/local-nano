@@ -5,6 +5,17 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-06-04
+
+Roots out the WebGPU device-loss failure that 0.4.2 caught reactively. Captures the GPUDevice handle through a transparent navigator.gpu monkey-patch in the offscreen document, listens for device.lost, marks the session poisoned, and rebuilds lazily on the next ensure. Pins the offscreen document open while any panel is visible so the 30-second no-port reap cannot close it across a tab switch. Promotes the offscreen's zero-chunk stream completion from a silent ok:true to a typed terminal failure so the existing reactive recovery runs.
+
+### Fixed
+
+- **Layer A: GPUDevice.lost listener.** The offscreen installs a transparent navigator.gpu monkey-patch at module top, captures the GPUDevice the polyfill flows through to, and attaches a .lost handler that marks the offscreen session poisoned and pushes SESSION_POISONED to the service worker. The next ENSURE_OFFSCREEN_REQUEST recreates the offscreen document (when not busy, per ADR-P7) before the user's send is dispatched.
+- **Layer B: SW-pinned offscreen port while panels are open.** The content script holds a long-lived port to the SW while the panel is visible; the SW holds a long-lived port to the offscreen while at least one panel-pin port is open. The pin port's existence prevents Chrome's 30-second no-port reap from closing the offscreen document across a tab switch.
+- **Layer C: authoritative zero-chunk stream detection.** A natural stream completion with zero tokens now surfaces as STREAM_DONE { ok: false, error: 'no tokens emitted; session may be poisoned' }. classifyFailure classes that as terminal so the existing reactive recovery in src/session.ts re-warms via the serialized primitive and retries the prompt once.
+- **Diagnostic.** The Copy diagnostic gains a new deviceLostAt field so future bug reports carry the ISO timestamp of the most recent device.lost event observed in the offscreen.
+
 ## [0.4.2] - 2026-06-04
 
 Fixes a "no response" failure that surfaced on ChromeOS integrated GPUs after switching tabs and reopening the panel. When the offscreen document was backgrounded across a tab switch, the WebGPU adapter could be lost; the freshly re-warmed session's first generation then ran on a broken GPU device, ORT threw inside WASM (`undefined.destroy()` on a `GPUBuffer` wrapper), Transformers.js swallowed the throw with a console-only "Generation error", and the stream completed with zero tokens. The panel rendered the benign `(no response — the model returned an empty answer)` fallback, leaving the user no recovery affordance.
