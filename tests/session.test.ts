@@ -1190,6 +1190,7 @@ describe('initSession — copy-diagnostic affordance', () => {
       isFallback: false,
       maxBufferSize: null,
       configuredThreshold: null,
+      lastDeviceLostAt: null,
     });
   });
 
@@ -1329,6 +1330,39 @@ describe('initSession — copy-diagnostic affordance', () => {
       expect(copied).toContain('errorMessage: VK_ERROR_OUT_OF_DEVICE_MEMORY');
       expect(copied).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q4f16 -> load-failure');
       expect(copied).toContain('chosenModel: onnx-community/gemma-4-E2B-it-ONNX');
+      // No device.lost observed in this run: the preflight reply carried null.
+      expect(copied).toContain('deviceLostAt: none');
+    } finally {
+      Reflect.deleteProperty(navigator, 'clipboard');
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('renders the device-loss timestamp from the gpu-info preflight', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const writeText = vi.fn((_t: string) => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    try {
+      getGpuInfoMock.mockResolvedValue({
+        device: 'webgpu' as const,
+        isFallback: false,
+        maxBufferSize: null,
+        configuredThreshold: null,
+        lastDeviceLostAt: '2026-06-04T12:00:00.000Z',
+      });
+      warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks(15);
+      const btn = findCopyButton(deps._root);
+      btn.click();
+      await flushMicrotasks();
+      const copied = writeText.mock.calls[0][0] as string;
+      expect(copied).toContain('deviceLostAt: 2026-06-04T12:00:00.000Z');
     } finally {
       Reflect.deleteProperty(navigator, 'clipboard');
       warnSpy.mockRestore();

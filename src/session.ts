@@ -1028,6 +1028,10 @@ export function initSession(deps: SessionDeps): SessionController {
       ladderPath: ladderPath.slice(),
       errorClass,
       errorMessage,
+      // The preflight gpu-info reply carries the most recent device.lost
+      // timestamp (ADR-3, pull-only). Map a null to 'none' so the renderer
+      // keeps a fixed output shape.
+      deviceLostAt: lastGpuInfo.lastDeviceLostAt ?? 'none',
       extensionVersion: safeManifestVersion(),
       userAgent: navigator.userAgent,
     };
