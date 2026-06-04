@@ -315,6 +315,63 @@ describe('installEnsureListener', () => {
     expect(chromeMock.offscreen.closeDocument.mock.calls.length).toBe(before);
   });
 
+  it('re-acquires the offscreen pin after a poisoned recreate while a panel is open', async () => {
+    chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+    installEnsureListener();
+    installPanelPinListener();
+    const listener = captureListener();
+    const connectCalls = chromeMock.runtime.onConnect.addListener.mock.calls;
+    const onConnect = connectCalls[connectCalls.length - 1]?.[0] as (port: FakePort) => void;
+
+    // A visible panel opens its pin: count 0->1 opens the SW->offscreen pin and
+    // builds the document.
+    onConnect(new FakePort(PANEL_PIN_PORT_NAME));
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(1);
+
+    // Poison the session.
+    await dispatch(listener, {
+      type: SESSION_POISONED_REQUEST,
+      at: 'a',
+      reason: 'destroyed',
+      message: 'lost',
+    });
+
+    // A real closeDocument disconnects the SW->offscreen pin port; the jsdom mock
+    // does not, so emit the disconnect to model the teardown the recreate causes.
+    const pin = chromeMock.runtime.connect.mock.results.at(-1)?.value as FakePort;
+    pin._emitDisconnect();
+
+    // Next ensure (idle) recreates; because the panel is still open (count > 0)
+    // the fresh document must get a NEW pin so Chrome's 30s reap cannot close it.
+    mockBusy(false);
+    await dispatch(listener, { type: ENSURE_OFFSCREEN_REQUEST });
+    expect(chromeMock.offscreen.closeDocument).toHaveBeenCalledTimes(1);
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(2);
+    // Pin re-acquired: a second connect to the offscreen pin port.
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(2);
+    expect(chromeMock.runtime.connect).toHaveBeenLastCalledWith({ name: OFFSCREEN_PIN_PORT_NAME });
+  });
+
+  it('does not re-acquire the offscreen pin on a poisoned recreate when no panel is open', async () => {
+    chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
+    installEnsureListener();
+    installPanelPinListener();
+    const listener = captureListener();
+    await dispatch(listener, { type: ENSURE_OFFSCREEN_REQUEST });
+    await dispatch(listener, {
+      type: SESSION_POISONED_REQUEST,
+      at: 'a',
+      reason: 'destroyed',
+      message: 'lost',
+    });
+    mockBusy(false);
+    await dispatch(listener, { type: ENSURE_OFFSCREEN_REQUEST });
+    expect(chromeMock.offscreen.createDocument).toHaveBeenCalledTimes(2);
+    // No panel pin open (count 0), so no offscreen pin is acquired.
+    expect(chromeMock.runtime.connect).not.toHaveBeenCalled();
+  });
+
   it('defers the recreate while busy, then recreates on the next ensure', async () => {
     chromeMock.offscreen.hasDocument.mockImplementation(async () => false);
     installEnsureListener();

@@ -157,13 +157,20 @@ function handleDeviceLost(info: DeviceLostInfo): void {
     reason: info.reason,
     message: info.message,
   };
+  // Fire-and-forget: do not await the SW reply (ADR-1). Two failure modes must
+  // not escape as errors. (1) `sendMessage` can THROW synchronously when the
+  // extension context is invalidated — the try/catch handles that. (2) It
+  // returns a Promise that REJECTS when no receiver is listening (SW evicted at
+  // this instant -> "Could not establish connection") — `.catch` handles that;
+  // try/catch alone would let it surface as an unhandled rejection. Either way
+  // the message is dropped: the next device.lost re-sends and the panel-side
+  // empty-success retry catches the gap.
   try {
-    // Fire-and-forget: do not await the SW reply (ADR-1). The catch swallows a
-    // throw from an absent SW so it cannot escape into the global scope.
-    void chrome.runtime.sendMessage(push);
+    void chrome.runtime.sendMessage(push).catch(() => {
+      // No receiver (SW evicted); drop.
+    });
   } catch {
-    // SW evicted at this instant; the message is dropped. The next device.lost
-    // (if any) re-sends, and the panel-side empty-success retry catches the gap.
+    // Synchronous failure (context invalidated); drop.
   }
 }
 

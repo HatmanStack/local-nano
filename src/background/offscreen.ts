@@ -208,6 +208,15 @@ async function ensurePossiblyRecreate(): Promise<void> {
     const busy = await queryOffscreenBusy();
     if (!busy) {
       await recreateOffscreen();
+      // recreateOffscreen closed the old document, which disconnected the SW->
+      // offscreen pin port (its onDisconnect nulled offscreenPinPort). If panels
+      // are still open, re-acquire the pin so the FRESH document is not reaped by
+      // Chrome's 30s no-port timer while a panel is visible (Layer B). The
+      // counter is the source of truth for "a panel is open"; acquireOffscreenPin
+      // is a no-op if a pin is somehow already held.
+      if (panelPinState.count > 0) {
+        await acquireOffscreenPin();
+      }
       sessionPoisoned = false;
       return;
     }
