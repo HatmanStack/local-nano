@@ -42,6 +42,7 @@ Tests target the modules under `src/`, which hold the testable logic extracted f
 | `tests/offscreen-stream-finalize.test.ts` | `finalizeStreamDone`/`POISONED_STREAM_ERROR` zero-chunk vs aborted vs ok finalize decision |
 | `tests/offscreen-gpu-capture.test.ts` | navigator.gpu monkey-patch and device.lost listener wiring (Phase 2) |
 | `tests/device-loss-recovery.test.ts` | device.lost end-to-end recovery wiring across offscreen and SW (Phase 2) |
+| `tests/panel-pin.test.ts`            | SW-side panel-pin counter state transitions (Phase 3) |
 | `tests/docs-config.test.ts`          | Doc cross-references and test-file table drift |
 
 ## Coverage
