@@ -30,10 +30,25 @@ describe('device-loss recovery (end-to-end wiring)', () => {
   async function dispatch(listener: Listener, msg: unknown): Promise<unknown> {
     const sendResponse = vi.fn();
     listener(msg, { id: chromeMock.runtime.id }, sendResponse);
-    for (let i = 0; i < 20 && sendResponse.mock.calls.length === 0; i++) {
+    await flushUntil(() => sendResponse.mock.calls.length > 0);
+    return sendResponse.mock.calls[0]?.[0];
+  }
+
+  /**
+   * Drain micro- and macro-tasks until `predicate()` holds, then return. Throws
+   * if the predicate never becomes true within a generous tick budget. This
+   * expresses the intent ("wait until X happened") rather than guessing a fixed
+   * number of `await Promise.resolve()` iterations, which is brittle against any
+   * change in async-chain depth or microtask-vs-task scheduling.
+   */
+  async function flushUntil(predicate: () => boolean, maxTicks = 50): Promise<void> {
+    for (let tick = 0; tick < maxTicks; tick++) {
+      if (predicate()) return;
       await new Promise((r) => setTimeout(r, 0));
     }
-    return sendResponse.mock.calls[0]?.[0];
+    if (!predicate()) {
+      throw new Error('flushUntil: predicate never became true within the tick budget');
+    }
   }
 
   beforeEach(() => {
@@ -87,9 +102,14 @@ describe('device-loss recovery (end-to-end wiring)', () => {
 
     // Fire device.lost; the listener pushes SESSION_POISONED into the SW.
     device._fireLost('destroyed', 'GPU device was lost');
-    // Let the .lost.then microtask and the routed dispatch settle.
-    for (let i = 0; i < 10; i++) await Promise.resolve();
-    await new Promise((r) => setTimeout(r, 0));
+    // Drain until the SESSION_POISONED push has actually been sent (its receipt
+    // sets the SW's sticky poisoned flag synchronously), rather than guessing a
+    // fixed microtask count.
+    await flushUntil(() =>
+      chromeMock.runtime.sendMessage.mock.calls.some(
+        (call) => (call[0] as { type?: string } | undefined)?.type === SESSION_POISONED_REQUEST,
+      ),
+    );
 
     // The next ensure recreates the document (close + create) on a healthy
     // session.

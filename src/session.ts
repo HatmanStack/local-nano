@@ -394,6 +394,9 @@ export function initSession(deps: SessionDeps): SessionController {
 
   function makeActionButton(label: string): HTMLButtonElement {
     const btn = window.document.createElement('button');
+    // <button> defaults to type="submit"; force "button" so a future <form>
+    // wrapper can never make these panel controls submit a form.
+    btn.type = 'button';
     btn.textContent = label;
     btn.style.cssText = BUTTON_CSS;
     return btn;
@@ -603,7 +606,12 @@ export function initSession(deps: SessionDeps): SessionController {
           stripper = createThinkStripper();
           modelText = '';
           shownFirstVisible = false;
-          await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+          // Assign the retry's accumulated value so `streamResult` consistently
+          // holds the final stream output regardless of which path produced it.
+          // The empty-success recovery below is already gated by
+          // `!alreadyRetried` (true here), so this does not re-trigger it; the
+          // assignment keeps the variable's meaning honest for future readers.
+          streamResult = await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
           succeeded = true;
         } catch (retryErr: unknown) {
           // The single retry also failed: surface it as the normal error UI.
@@ -855,6 +863,7 @@ export function initSession(deps: SessionDeps): SessionController {
       `Conversation history is around ${tokens} tokens. WebGPU memory pressure may cause the next turn to fail with an out-of-memory error. Click "Clear conversation" to start fresh — the model will reload (~15–40s).`,
     );
     const btn = window.document.createElement('button');
+    btn.type = 'button';
     btn.textContent = 'Clear conversation';
     btn.style.cssText = `margin-top: 6px; ${BUTTON_CSS}`;
     btn.addEventListener('click', () => {
@@ -1093,11 +1102,13 @@ export function initSession(deps: SessionDeps): SessionController {
     controls.style.cssText = 'margin-top: 6px; display: flex; gap: 6px;';
 
     const retryBtn = window.document.createElement('button');
+    retryBtn.type = 'button';
     retryBtn.textContent = 'Retry';
     retryBtn.style.cssText = BUTTON_CSS;
     retryBtn.addEventListener('click', () => rewalk(retryBtn, false));
 
     const resetBtn = window.document.createElement('button');
+    resetBtn.type = 'button';
     resetBtn.textContent = 'Reset and re-detect';
     resetBtn.style.cssText = BUTTON_CSS;
     resetBtn.addEventListener('click', () => rewalk(resetBtn, true));
@@ -1131,6 +1142,7 @@ export function initSession(deps: SessionDeps): SessionController {
     const controls = window.document.createElement('div');
     controls.style.cssText = 'margin-top: 6px; display: flex; gap: 6px;';
     const retryBtn = window.document.createElement('button');
+    retryBtn.type = 'button';
     retryBtn.textContent = 'Retry';
     retryBtn.style.cssText = BUTTON_CSS;
     retryBtn.addEventListener('click', () => {
@@ -1191,6 +1203,7 @@ export function initSession(deps: SessionDeps): SessionController {
    */
   function makeCopyDiagnosticAffordance(): HTMLButtonElement {
     const btn = window.document.createElement('button');
+    btn.type = 'button';
     btn.textContent = 'Copy diagnostic';
     btn.setAttribute('aria-label', 'Copy diagnostic to clipboard');
     // Muted, unobtrusive header control (inserted into the panel header, left of
@@ -1246,6 +1259,7 @@ export function initSession(deps: SessionDeps): SessionController {
     close: () => void;
   } {
     const gearBtn = window.document.createElement('button');
+    gearBtn.type = 'button';
     gearBtn.textContent = '⚙'; // gear glyph (U+2699)
     gearBtn.setAttribute('aria-label', 'Open model and idle settings');
     gearBtn.style.cssText = HEADER_CONTROL_CSS;
@@ -1746,6 +1760,7 @@ export function initSession(deps: SessionDeps): SessionController {
   // an unobtrusive note shown while a stream blocks the switch. Built once so the
   // refresh logic mutates one element rather than rebuilding it each render.
   const loadBtn = window.document.createElement('button');
+  loadBtn.type = 'button';
   loadBtn.textContent = 'Load';
   loadBtn.setAttribute('data-load-model', '');
   loadBtn.style.cssText = `margin-top: 10px; ${BUTTON_CSS}`;

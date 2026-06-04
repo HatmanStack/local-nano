@@ -97,13 +97,22 @@ function attachDeviceLost(device: GpuDeviceLike, opts: InstallGpuCaptureOptions)
   opts.onDeviceCaptured?.({ device, capturedAt: new Date().toISOString() });
   const lost = device.lost;
   if (!lost || typeof lost.then !== 'function') return;
-  lost.then((info) => {
-    opts.onDeviceLost({
-      reason: typeof info?.reason === 'string' ? info.reason : String(info?.reason ?? ''),
-      message: typeof info?.message === 'string' ? info.message : String(info?.message ?? ''),
-      at: new Date().toISOString(),
-    });
-  });
+  lost.then(
+    (info) => {
+      opts.onDeviceLost({
+        reason: typeof info?.reason === 'string' ? info.reason : String(info?.reason ?? ''),
+        message: typeof info?.message === 'string' ? info.message : String(info?.message ?? ''),
+        at: new Date().toISOString(),
+      });
+    },
+    () => {
+      // The WebGPU spec says `GPUDevice.lost` resolves and never rejects, so
+      // this arm should be unreachable. It exists only so a non-conforming
+      // engine or a test double that rejects the promise cannot surface as an
+      // unhandled rejection. Nothing to recover here: a rejected `lost` tells
+      // us nothing actionable about the device, so we drop it silently.
+    },
+  );
 }
 
 /**
@@ -132,6 +141,14 @@ export function installGpuCapture(opts: InstallGpuCaptureOptions): void {
  * Reset module state for tests: clears the device-dedup WeakSet, restores the
  * original `requestAdapter`, and removes the install marker so the next
  * `installGpuCapture` re-wraps a fresh surface.
+ *
+ * Scope limitation: this restores ONLY `navigator.gpu.requestAdapter`. It
+ * cannot un-wrap any adapter's `requestDevice`, because adapters are transient
+ * objects this module never retains (it marks them in place and lets them be
+ * GC'd, matching real WebGPU where adapters are short-lived). A test that
+ * REUSES the same fake adapter across a reset boundary would still see the
+ * wrapped `requestDevice`; the test harness avoids this by minting a fresh
+ * adapter per reset (see `gpuMock._resetCaptures` in `tests/setup.ts`).
  */
 export function _resetForTests(): void {
   capturedDevices = new WeakSet<object>();

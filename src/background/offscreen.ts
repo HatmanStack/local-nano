@@ -232,11 +232,16 @@ export async function handleAlarm(alarm: { name: string }): Promise<void> {
   // A panel-pin release deferred while the offscreen was busy (Phase 3) gets a
   // retry here, before the idle decision: the alarm fire is the next
   // opportunity to drop a pin port that the last panel-close could not release
-  // because a stream was in flight (ADR-P7).
-  if (pendingRelease) await releaseOffscreenPin();
+  // because a stream was in flight (ADR-P7). `releaseOffscreenPin` probes
+  // IS_BUSY when it has a port to drop; reuse that probe for the idle decision
+  // so a pending release costs ONE IS_BUSY round-trip per tick, not two.
+  let busy: boolean | null = null;
+  if (pendingRelease) busy = await releaseOffscreenPin();
   const pref = await loadModelPref();
   const timeoutMinutes = pref.idleTimeoutMinutes;
-  const busy = await queryOffscreenBusy();
+  // `null` means releaseOffscreenPin had no port to drop and probed nothing, so
+  // fall back to a fresh probe (also the path when no release was pending).
+  if (busy === null) busy = await queryOffscreenBusy();
   const action = decideIdleAction({ busy, timeoutMinutes });
   if (action.kind === 'close') {
     await closeOffscreen();
@@ -297,7 +302,11 @@ export function installEnsureListener(): void {
       sessionPoisoned = true;
       const ok: SessionPoisonedResponse = { type: SESSION_POISONED_RESPONSE, ok: true };
       sendResponse(ok);
-      return true; // keep the channel open for the (synchronous) reply
+      // `sendResponse` already fired synchronously, so the channel is resolved
+      // and `return true` is not strictly required here (it matters only for
+      // async replies). Kept for uniformity with the other owned-message
+      // branches, which DO reply asynchronously and must return true.
+      return true;
     }
     if (isRecreateOffscreenRequest(msg)) {
       recreateOffscreen().then(
@@ -363,20 +372,26 @@ async function acquireOffscreenPin(): Promise<void> {
  * retries it (ADR-P7: never tear down a live stream). When not busy, the port
  * is disconnected and Chrome's 30s reap can run normally. A null port (already
  * released or dropped) just clears the pending flag.
+ *
+ * Returns the busy state it observed so a caller already needing it (the idle
+ * alarm) can reuse this probe instead of issuing a second `IS_BUSY` round-trip
+ * in the same tick. Returns `null` when there was no port to drop, signalling
+ * that nothing was probed and the caller must query itself if it needs `busy`.
  */
-async function releaseOffscreenPin(): Promise<void> {
+async function releaseOffscreenPin(): Promise<boolean | null> {
   if (!offscreenPinPort) {
     pendingRelease = false;
-    return;
+    return null;
   }
   const busy = await queryOffscreenBusy();
   if (busy) {
     pendingRelease = true;
-    return;
+    return true;
   }
   offscreenPinPort.disconnect();
   offscreenPinPort = null;
   pendingRelease = false;
+  return false;
 }
 
 /**
