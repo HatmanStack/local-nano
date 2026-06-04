@@ -49,6 +49,7 @@ import {
   type WarmupRequest,
   type WarmupResponse,
 } from './src/offscreen/protocol.js';
+import { finalizeStreamDone } from './src/offscreen/stream-finalize.js';
 
 interface LanguageModelSession {
   promptStreaming(input: string, options?: { signal?: AbortSignal }): ReadableStream<string>;
@@ -577,9 +578,11 @@ chrome.runtime.onConnect.addListener((port) => {
         debugLog(
           `[local-nano/offscreen] stream/done id=${id} chunks=${chunkCount} chars=${totalChars} sessionMs=${tSession.toFixed(0)} totalMs=${(performance.now() - t0).toFixed(0)}`,
         );
-        const done: StreamDone = controller.signal.aborted
-          ? { type: STREAM_DONE, id, ok: false, error: 'aborted' }
-          : { type: STREAM_DONE, id, ok: true };
+        const done: StreamDone = finalizeStreamDone({
+          id,
+          aborted: controller.signal.aborted,
+          chunkCount,
+        });
         try {
           port.postMessage(done);
         } catch {
