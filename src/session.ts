@@ -58,6 +58,7 @@ import {
   type ProgressState,
 } from './offscreen/progress.js';
 import type { GpuInfoSnapshot, HistoryTurn } from './offscreen/protocol.js';
+import { PANEL_PIN_PORT_NAME } from './offscreen/protocol.js';
 import { pageContext } from './pageContext.js';
 import {
   buildAskPrompt,
@@ -1888,6 +1889,29 @@ export function initSession(deps: SessionDeps): SessionController {
 
   // ---- Toggle listener ----
   let convertedAnchor = false;
+
+  // Panel-pin port (Layer B, Phase 3). While the panel is visible the content
+  // script holds a long-lived port to the SW named PANEL_PIN_PORT_NAME; the SW
+  // counts these and keeps the offscreen document alive while any is open,
+  // shrinking the tab-switch window where the WebGPU device can be lost. The
+  // port carries no messages; its existence is the signal.
+  let pinPort: chrome.runtime.Port | null = null;
+
+  function acquirePinPort(): void {
+    if (pinPort !== null) return;
+    pinPort = chrome.runtime.connect({ name: PANEL_PIN_PORT_NAME });
+    // A SW restart can drop the port; null the local handle so the next open
+    // re-acquires rather than disconnecting a dead port.
+    pinPort.onDisconnect.addListener(() => {
+      pinPort = null;
+    });
+  }
+
+  function releasePinPort(): void {
+    pinPort?.disconnect();
+    pinPort = null;
+  }
+
   chrome.runtime.onMessage.addListener((m: typeof TOGGLE_MESSAGE) => {
     if (m.a !== TOGGLE_MESSAGE.a) return;
     if (root.style.display === 'none') {
@@ -1899,9 +1923,13 @@ export function initSession(deps: SessionDeps): SessionController {
         convertedAnchor = true;
       }
       i.focus();
+      // Pin the offscreen before warmup starts so the model load has a held
+      // document from the first instant the panel is open.
+      acquirePinPort();
       void ensureWarm();
     } else {
       root.style.display = 'none';
+      releasePinPort();
     }
   });
 

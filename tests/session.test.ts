@@ -6,6 +6,7 @@ import { DEFAULT_MODEL_ID } from '../src/offscreen/catalog.js';
 import * as ladderModule from '../src/offscreen/ladder.js';
 import { SMALLER_MODEL_CANDIDATE } from '../src/offscreen/ladder.js';
 import { MODEL_PREF_KEY } from '../src/offscreen/model-pref.js';
+import { PANEL_PIN_PORT_NAME } from '../src/offscreen/protocol.js';
 import { POISONED_STREAM_ERROR } from '../src/offscreen/stream-finalize.js';
 import type { SelectionSnapshot } from '../src/selection-rewrite.js';
 import {
@@ -14,7 +15,7 @@ import {
   preflightWarning,
   type SessionDeps,
 } from '../src/session.js';
-import { chromeMock } from './setup.js';
+import { chromeMock, type FakePort } from './setup.js';
 
 // ---------------------------------------------------------------------------
 // Mock the offscreen client
@@ -265,6 +266,63 @@ describe('initSession — toggle behavior', () => {
     deps._root.style.display = 'none';
     listener({ a: 'something-else' } as unknown as typeof TOGGLE_MESSAGE);
     expect(deps._root.style.display).toBe('none');
+  });
+
+  /** The FakePort the panel opened to the SW via chrome.runtime.connect. */
+  function lastPinPort(): FakePort {
+    return chromeMock.runtime.connect.mock.results.at(-1)?.value as FakePort;
+  }
+
+  it('opens a panel-pin port to the SW exactly once when the panel first opens', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    deps._root.style.display = 'none';
+    listener(TOGGLE_MESSAGE); // open
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(1);
+    expect(chromeMock.runtime.connect).toHaveBeenCalledWith({ name: PANEL_PIN_PORT_NAME });
+  });
+
+  it('disconnects the panel-pin port when the panel closes', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    deps._root.style.display = 'none';
+    listener(TOGGLE_MESSAGE); // open
+    const pinPort = lastPinPort();
+    listener(TOGGLE_MESSAGE); // close
+    expect(pinPort.disconnect).toHaveBeenCalledTimes(1);
+    expect(pinPort.isConnected).toBe(false);
+  });
+
+  it('re-acquires the panel-pin port on a second open after a close', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    deps._root.style.display = 'none';
+    listener(TOGGLE_MESSAGE); // open
+    listener(TOGGLE_MESSAGE); // close
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(1);
+    listener(TOGGLE_MESSAGE); // re-open
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(2);
+    expect(chromeMock.runtime.connect).toHaveBeenLastCalledWith({ name: PANEL_PIN_PORT_NAME });
+  });
+
+  it('re-acquires after the SW drops the pin port mid-life', () => {
+    const deps = makeDeps();
+    initSession(deps);
+    const listener = getToggleListener();
+    deps._root.style.display = 'none';
+    listener(TOGGLE_MESSAGE); // open
+    const pinPort = lastPinPort();
+    // SW restart drops the port mid-life; the onDisconnect handler nulls the
+    // local handle so the next open re-acquires rather than reusing a dead port.
+    pinPort._emitDisconnect();
+    listener(TOGGLE_MESSAGE); // close (no live port to disconnect)
+    listener(TOGGLE_MESSAGE); // re-open
+    expect(chromeMock.runtime.connect).toHaveBeenCalledTimes(2);
+    const fresh = lastPinPort();
+    expect(fresh.isConnected).toBe(true);
   });
 
   it('Enter key triggers send when input has content', async () => {
