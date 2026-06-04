@@ -94,6 +94,112 @@ export class FakePort {
   }
 }
 
+/**
+ * Programmable `navigator.gpu` mock (Phase 2 of the device-loss resilience
+ * plan). The offscreen-side `collectGpuInfo` and the new `gpu-capture` monkey-
+ * patch both read `navigator.gpu.requestAdapter`; this stand-in lets a test
+ * drive the adapter/device capture path and fire a synthetic `device.lost`
+ * event without a real WebGPU stack (CI has none).
+ *
+ * The CLIENT-boundary `getGpuInfoMock` in `tests/session.test.ts` mocks
+ * `getGpuInfo` from `src/offscreen/client.ts`, not this surface, so it stays
+ * independent of this mock.
+ */
+export interface FakeGpuDevice {
+  lost: Promise<{ reason: string; message: string }>;
+  /** Test helper: resolve the `lost` Promise to drive the device.lost listener. */
+  _fireLost(reason: string, message: string): void;
+}
+
+export interface FakeGpuAdapter {
+  isFallbackAdapter: boolean;
+  limits: { maxBufferSize: number | null };
+  requestDevice(): Promise<FakeGpuDevice>;
+}
+
+export interface FakeGpu {
+  requestAdapter(): Promise<FakeGpuAdapter | null>;
+  /** Test helper: set the adapter the next requestAdapter resolves to (null = no adapter). */
+  _setAdapter(adapter: FakeGpuAdapter | null): void;
+  /** Test helper: reset the captured adapter/device records to defaults. */
+  _resetCaptures(): void;
+  /** Test helper: the adapter most recently returned by requestAdapter. */
+  _lastAdapter(): FakeGpuAdapter | null;
+  /** Test helper: the device most recently returned by requestDevice. */
+  _lastDevice(): FakeGpuDevice | null;
+}
+
+/** Construct a fresh fake device with a settable `lost` Promise. */
+export function makeFakeDevice(): FakeGpuDevice {
+  let fire!: (payload: { reason: string; message: string }) => void;
+  const lost = new Promise<{ reason: string; message: string }>((resolve) => {
+    fire = resolve;
+  });
+  return {
+    lost,
+    _fireLost(reason: string, message: string) {
+      fire({ reason, message });
+    },
+  };
+}
+
+/** Construct a fresh fake adapter that yields a fresh device per requestDevice. */
+export function makeFakeAdapter(
+  overrides: Partial<Pick<FakeGpuAdapter, 'isFallbackAdapter' | 'limits'>> = {},
+): FakeGpuAdapter {
+  return {
+    isFallbackAdapter: overrides.isFallbackAdapter ?? false,
+    limits: overrides.limits ?? { maxBufferSize: 268435456 },
+    requestDevice: vi.fn(async () => {
+      const device = makeFakeDevice();
+      gpuState.lastDevice = device;
+      return device;
+    }),
+  };
+}
+
+interface GpuState {
+  adapter: FakeGpuAdapter | null;
+  lastAdapter: FakeGpuAdapter | null;
+  lastDevice: FakeGpuDevice | null;
+}
+
+const gpuState: GpuState = {
+  adapter: null,
+  lastAdapter: null,
+  lastDevice: null,
+};
+
+const gpuMock: FakeGpu = {
+  requestAdapter: vi.fn(async () => {
+    gpuState.lastAdapter = gpuState.adapter;
+    return gpuState.adapter;
+  }),
+  _setAdapter(adapter: FakeGpuAdapter | null) {
+    gpuState.adapter = adapter;
+  },
+  _resetCaptures() {
+    gpuState.adapter = makeFakeAdapter();
+    gpuState.lastAdapter = null;
+    gpuState.lastDevice = null;
+  },
+  _lastAdapter() {
+    return gpuState.lastAdapter;
+  },
+  _lastDevice() {
+    return gpuState.lastDevice;
+  },
+};
+
+// jsdom provides `navigator`, but its properties are read-only by default, so
+// install the mock through defineProperty (same pattern session.test.ts uses
+// for navigator.clipboard). `configurable: true` lets a test redefine it.
+Object.defineProperty(navigator, 'gpu', {
+  configurable: true,
+  writable: true,
+  value: gpuMock,
+});
+
 const local = new FakeStorageArea();
 
 /**
@@ -187,10 +293,13 @@ beforeEach(() => {
   chromeMock.alarms.clear.mockImplementation(async (_name?: string) => true);
   chromeMock.alarms.onAlarm.addListener.mockClear();
   alarmListeners.length = 0;
+  // Reset the navigator.gpu mock to a fresh default adapter between tests.
+  (gpuMock.requestAdapter as ReturnType<typeof vi.fn>).mockClear();
+  gpuMock._resetCaptures();
   // Default tabs.query implementation — overridable per-test.
   chromeMock.tabs.query.mockImplementation(
     (_q: unknown, cb: (tabs: Array<{ id?: number }>) => void) => cb([{ id: 1 }]),
   );
 });
 
-export { chromeMock };
+export { chromeMock, gpuMock };
