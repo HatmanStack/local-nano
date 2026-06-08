@@ -33,12 +33,6 @@ export interface DiagnosticInput {
   /** The error's `name` (e.g. 'TypeError') or 'Error'. */
   errorClass: string;
   errorMessage: string;
-  /**
-   * ISO 8601 timestamp of the most recent device.lost event, or 'none' when
-   * none has been observed in this offscreen lifetime. Always a string; the
-   * renderer does not branch on null.
-   */
-  deviceLostAt: string;
   extensionVersion: string;
   /** The raw `navigator.userAgent`, included verbatim (UA parsing is brittle). */
   userAgent: string;
@@ -95,7 +89,6 @@ export function buildDiagnostic(input: DiagnosticInput): string {
     formatLadderPath(input.ladderPath),
     `errorClass: ${input.errorClass}`,
     `errorMessage: ${input.errorMessage}`,
-    `deviceLostAt: ${input.deviceLostAt}`,
     `extensionVersion: ${input.extensionVersion}`,
     `chromeVersion: ${chromeVersion}`,
     `userAgent: ${input.userAgent}`,

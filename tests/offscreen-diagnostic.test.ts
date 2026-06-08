@@ -15,7 +15,6 @@ const base: DiagnosticInput = {
   ladderPath: [],
   errorClass: 'Error',
   errorMessage: 'offscreen port disconnected: unknown reason',
-  deviceLostAt: 'none',
   extensionVersion: '0.2.4',
   userAgent:
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -29,24 +28,6 @@ describe('buildDiagnostic', () => {
     expect(out).toContain('extensionVersion: 0.2.4');
     expect(out).toContain('errorClass: Error');
     expect(out).toContain('errorMessage: offscreen port disconnected: unknown reason');
-  });
-
-  it('renders deviceLostAt as none when no loss has been observed', () => {
-    const out = buildDiagnostic(base);
-    expect(out).toContain('deviceLostAt: none');
-  });
-
-  it('renders deviceLostAt with an ISO timestamp when a loss happened', () => {
-    const out = buildDiagnostic({ ...base, deviceLostAt: '2026-06-04T12:00:00.000Z' });
-    expect(out).toContain('deviceLostAt: 2026-06-04T12:00:00.000Z');
-  });
-
-  it('renders deviceLostAt immediately after errorMessage', () => {
-    const out = buildDiagnostic({ ...base, deviceLostAt: '2026-06-04T12:00:00.000Z' });
-    const lines = out.split('\n');
-    const errorIdx = lines.findIndex((l) => l.startsWith('errorMessage:'));
-    expect(errorIdx).toBeGreaterThanOrEqual(0);
-    expect(lines[errorIdx + 1]).toBe('deviceLostAt: 2026-06-04T12:00:00.000Z');
   });
 
   it('renders maxBufferSize as MiB when present', () => {

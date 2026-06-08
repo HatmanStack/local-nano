@@ -147,8 +147,6 @@ export interface GpuInfoSnapshot {
   isFallback: boolean;
   maxBufferSize: number | null;
   configuredThreshold: number | null;
-  /** ISO timestamp of the most recent device.lost event, or null. */
-  lastDeviceLostAt: string | null;
 }
 
 export interface GpuInfoRequest {
@@ -173,15 +171,6 @@ export function isGpuInfoResponse(value: unknown): value is GpuInfoResponse {
     if (typeof v.isFallback !== 'boolean') return false;
     if (v.maxBufferSize !== null && !Number.isFinite(v.maxBufferSize)) return false;
     if (v.configuredThreshold !== null && !Number.isFinite(v.configuredThreshold)) return false;
-    // Absent is treated as null for backward wire shape; the offscreen always
-    // populates the field after the Phase 4 device-loss diagnostic landed.
-    if (
-      v.lastDeviceLostAt !== undefined &&
-      v.lastDeviceLostAt !== null &&
-      typeof v.lastDeviceLostAt !== 'string'
-    ) {
-      return false;
-    }
     return true;
   }
   if (v.ok === false) return typeof v.error === 'string';
@@ -250,46 +239,6 @@ export function isIsBusyResponse(value: unknown): value is IsBusyResponse {
   const v = value as Record<string, unknown>;
   if (v.type !== IS_BUSY_RESPONSE) return false;
   if (v.ok === true) return typeof v.busy === 'boolean';
-  if (v.ok === false) return typeof v.error === 'string';
-  return false;
-}
-
-export const SESSION_POISONED_REQUEST = 'offscreen/session-poisoned-request' as const;
-export const SESSION_POISONED_RESPONSE = 'offscreen/session-poisoned-response' as const;
-
-/**
- * Poisoned-session push (Layer A, ADR-1). The offscreen document sends this
- * fire-and-forget to the service worker the moment a captured `GPUDevice`'s
- * `lost` event fires. The SW flips a sticky `sessionPoisoned` flag and, on the
- * next `ENSURE_OFFSCREEN_REQUEST`, recreates the offscreen document (when not
- * busy) so the next user send runs on a healthy session. `at` is the ISO 8601
- * loss timestamp; `reason`/`message` mirror the WebGPU `GPUDeviceLostInfo`
- * fields for diagnostics. The offscreen does not await the reply (push, not
- * pull); the ack exists for protocol uniformity and test observability.
- */
-export interface SessionPoisonedRequest {
-  type: typeof SESSION_POISONED_REQUEST;
-  at: string;
-  reason: string;
-  message: string;
-}
-
-export type SessionPoisonedResponse =
-  | { type: typeof SESSION_POISONED_RESPONSE; ok: true }
-  | { type: typeof SESSION_POISONED_RESPONSE; ok: false; error: string };
-
-export function isSessionPoisonedRequest(value: unknown): value is SessionPoisonedRequest {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  if (v.type !== SESSION_POISONED_REQUEST) return false;
-  return typeof v.at === 'string' && typeof v.reason === 'string' && typeof v.message === 'string';
-}
-
-export function isSessionPoisonedResponse(value: unknown): value is SessionPoisonedResponse {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  if (v.type !== SESSION_POISONED_RESPONSE) return false;
-  if (v.ok === true) return true;
   if (v.ok === false) return typeof v.error === 'string';
   return false;
 }
@@ -449,27 +398,6 @@ export function isStreamDone(value: unknown): value is StreamDone {
  */
 export const STREAM_PROGRESS_PORT = 'offscreen-progress' as const;
 export const STREAM_PROGRESS = 'stream/progress' as const;
-
-/**
- * Panel-pin port (Layer B, Phase 3, ADR-2). Content script -> service worker.
- * Lifetime is panel visibility: the content script opens this port when the
- * chat panel becomes visible and disconnects it when the panel hides. The SW
- * counts open ports of this name; the port carries no messages, its mere
- * existence is the "a panel is open" signal. The `local-nano-` prefix
- * disambiguates this content-side port from the offscreen-document-side ports
- * (offscreen-stream, offscreen-progress, offscreen-pin).
- */
-export const PANEL_PIN_PORT_NAME = 'local-nano-panel-pin' as const;
-
-/**
- * Offscreen-pin port (Layer B, Phase 3, ADR-2). Service worker -> offscreen
- * document. Lifetime is "any panel-pin open": the SW opens this port to the
- * offscreen on the 0->1 panel-pin transition and disconnects it on the 1->0
- * transition (deferred while the offscreen is busy). The open port prevents
- * Chrome's 30-second no-port reap from closing the offscreen document while a
- * panel is open. Carries no messages.
- */
-export const OFFSCREEN_PIN_PORT_NAME = 'offscreen-pin' as const;
 
 /**
  * One forwarded `downloadprogress` ProgressEvent. The polyfill dispatches

@@ -5,6 +5,18 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-06-08
+
+Reverts the reactive device-loss machinery added in 0.4.2 and 0.4.3 back to the simpler, proven 0.4.1 load and stream path, and arms idle resource release at model load. (0.4.4 was an internal rollback build and was never published.)
+
+### Changed
+
+- **Reverted the 0.4.2 and 0.4.3 device-loss layers.** Removed the `navigator.gpu` capture wrapper (`gpu-capture.ts`), the `SESSION_POISONED`-driven offscreen recreate, the panel/offscreen pin ports (`panel-pin.ts`), and the zero-chunk poisoned-stream detection (`stream-finalize.ts`); the load and stream path returns to 0.4.1 behavior. That machinery added offscreen-recreate churn and a GPU-device wrapper that ran before every load, and did not address the failure it was chasing — a device or tab low on RAM cannot allocate the multi-GB model regardless of session health, which is the actual cause of the load failures observed on constrained ChromeOS hardware. Device-loss handling will be reworked separately. The reverted code is preserved in history at tag `v0.4.3`.
+
+### Fixed
+
+- **Idle release now arms on model load, not only after a generation.** The panel auto-warms the model on open, so a user who loaded the model and walked away without sending a message previously left a multi-GB session resident with no release scheduled (`touchIdle` fired only at generation start and end). The inactivity countdown now starts at load completion, so an unused model is reclaimed after the configured timeout (default 15 min, configurable in settings) instead of staying resident until the next interaction.
+
 ## [0.4.3] - 2026-06-04
 
 Roots out the WebGPU device-loss failure that 0.4.2 caught reactively. Captures the GPUDevice handle through a transparent navigator.gpu monkey-patch in the offscreen document, listens for device.lost, marks the session poisoned, and rebuilds lazily on the next ensure. Pins the offscreen document open while any panel is visible so the 30-second no-port reap cannot close it across a tab switch. Promotes the offscreen's zero-chunk stream completion from a silent ok:true to a typed terminal failure so the existing reactive recovery runs.

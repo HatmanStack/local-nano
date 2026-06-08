@@ -58,7 +58,6 @@ import {
   type ProgressState,
 } from './offscreen/progress.js';
 import type { GpuInfoSnapshot, HistoryTurn } from './offscreen/protocol.js';
-import { PANEL_PIN_PORT_NAME } from './offscreen/protocol.js';
 import { pageContext } from './pageContext.js';
 import {
   buildAskPrompt,
@@ -394,9 +393,6 @@ export function initSession(deps: SessionDeps): SessionController {
 
   function makeActionButton(label: string): HTMLButtonElement {
     const btn = window.document.createElement('button');
-    // <button> defaults to type="submit"; force "button" so a future <form>
-    // wrapper can never make these panel controls submit a form.
-    btn.type = 'button';
     btn.textContent = label;
     btn.style.cssText = BUTTON_CSS;
     return btn;
@@ -573,15 +569,8 @@ export function initSession(deps: SessionDeps): SessionController {
     // document stream failure, then retries the same prompt exactly once; a
     // second failure surfaces the normal error UI (ADR-P10).
     let alreadyRetried = false;
-    // The server-side accumulated stream value. Empty string means the
-    // offscreen stream produced zero tokens — distinct from "produced tokens
-    // that the think-stripper hid", which leaves `modelText` empty but
-    // `streamResult` non-empty. Used by the poisoned-session recovery below
-    // so a reasoning model whose entire reply is a `<think>` block does not
-    // trigger a churny retry.
-    let streamResult = '';
     try {
-      streamResult = await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+      await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
       succeeded = true;
     } catch (err: unknown) {
       const name = (err as { name?: unknown })?.name;
@@ -606,12 +595,7 @@ export function initSession(deps: SessionDeps): SessionController {
           stripper = createThinkStripper();
           modelText = '';
           shownFirstVisible = false;
-          // Assign the retry's accumulated value so `streamResult` consistently
-          // holds the final stream output regardless of which path produced it.
-          // The empty-success recovery below is already gated by
-          // `!alreadyRetried` (true here), so this does not re-trigger it; the
-          // assignment keeps the variable's meaning honest for future readers.
-          streamResult = await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
+          await streamPrompt(prompt, { signal: activeAbort.signal, onChunk });
           succeeded = true;
         } catch (retryErr: unknown) {
           // The single retry also failed: surface it as the normal error UI.
@@ -631,92 +615,43 @@ export function initSession(deps: SessionDeps): SessionController {
         modelText = err instanceof Error ? err.message : String(err);
         responseEl.textContent = modelText;
       }
-    }
-
-    // Empty-success recovery (poisoned-session path). On ChromeOS the offscreen
-    // doc's WebGPU adapter can be lost when the panel is closed across a tab
-    // switch; the next generation runs on the freshly re-warmed session but
-    // ORT throws inside WASM (`undefined.destroy()` on a GPUBuffer wrapper),
-    // Transformers.js swallows the throw (logs `Generation error` to the
-    // console) and yields zero tokens. Without this block the stream looks
-    // like a clean empty completion and the finally below renders the benign
-    // "(no response)" fallback — leaving no recovery affordance. Treat
-    // succeeded-but-empty as the same class of recoverable failure the
-    // terminal catch handles: drop the dead session, re-warm once, retry the
-    // same prompt exactly once. A second empty result drops through to the
-    // failure message in the finally below.
-    if (succeeded && !streamResult && !alreadyRetried) {
-      alreadyRetried = true;
-      succeeded = false;
-      try {
-        activeAbort = null;
-        await reloadModel();
-        activeAbort = new AbortController();
-        stripper = createThinkStripper();
-        modelText = '';
-        shownFirstVisible = false;
-        streamResult = await streamPrompt(prompt, {
-          signal: activeAbort.signal,
-          onChunk,
-        });
-        succeeded = true;
-      } catch (retryErr: unknown) {
-        const retryName = (retryErr as { name?: unknown })?.name;
-        if (retryName === 'AbortError') {
-          modelText = modelText + (modelText ? '\n\n[stopped]' : '[stopped]');
-        } else {
-          modelText = retryErr instanceof Error ? retryErr.message : String(retryErr);
+    } finally {
+      if (indicator.parentNode) indicator.remove();
+      if (preHint?.parentNode) preHint.remove();
+      if (!modelText) {
+        responseEl.textContent = '(no response — the model returned an empty answer)';
+      }
+      if (modelText) {
+        pushEntry({ role: 'model', text: modelText });
+        persist();
+      }
+      if (succeeded) {
+        // A throwing success tail (e.g. rewrite's DOM action-bar attach) must
+        // not skip the cleanup below, or the Send button stays stuck in the
+        // generating state and activeAbort dangles.
+        try {
+          onSuccess?.(modelText, prompt.length, responseEl);
+        } catch (e) {
+          console.error('[local-nano] onSuccess handler threw:', e);
         }
-        responseEl.textContent = modelText;
       }
-    }
-
-    // Cleanup (originally the try/finally pair was a single try-catch-finally;
-    // the catch above never re-throws — all paths set modelText — so the
-    // finally is unnecessary, and removing it lets the empty-success recovery
-    // block above run cleanly between the stream attempt and the cleanup).
-    if (indicator.parentNode) indicator.remove();
-    if (preHint?.parentNode) preHint.remove();
-    if (!modelText) {
-      // After a retry attempt (terminal-error path OR poisoned-session path)
-      // an empty result is NOT a legitimate empty answer — the model state
-      // was lost and recovery did not bring it back. Surface that plainly
-      // so the user knows to send again rather than seeing the benign
-      // "no response" string.
-      responseEl.textContent = alreadyRetried
-        ? 'Generation failed — the model state was lost (often a ChromeOS tab-switch quirk). Please try again.'
-        : '(no response — the model returned an empty answer)';
-    }
-    if (modelText) {
-      pushEntry({ role: 'model', text: modelText });
-      persist();
-    }
-    if (succeeded) {
-      // A throwing success tail (e.g. rewrite's DOM action-bar attach) must
-      // not skip the cleanup below, or the Send button stays stuck in the
-      // generating state and activeAbort dangles.
+      setIdleState(actionBtn, i);
+      activeAbort = null;
+      // Re-arm the idle-release window after the LAST token (decision 9): the
+      // inactivity countdown starts from the END of generation, not the start.
+      // The SW verify-idle reschedules if a stream is still in flight when the
+      // alarm fires, so this post-completion touch is what opens the real
+      // window. Fire-and-forget; self-swallowing.
+      void touchIdle();
+      // Re-enable a Load the user queued while this stream was in flight (ADR-P7).
+      refreshPopoverControls();
       try {
-        onSuccess?.(modelText, prompt.length, responseEl);
+        onFinally?.();
       } catch (e) {
-        console.error('[local-nano] onSuccess handler threw:', e);
+        console.error('[local-nano] onFinally handler threw:', e);
       }
+      i.focus();
     }
-    setIdleState(actionBtn, i);
-    activeAbort = null;
-    // Re-arm the idle-release window after the LAST token (decision 9): the
-    // inactivity countdown starts from the END of generation, not the start.
-    // The SW verify-idle reschedules if a stream is still in flight when the
-    // alarm fires, so this post-completion touch is what opens the real
-    // window. Fire-and-forget; self-swallowing.
-    void touchIdle();
-    // Re-enable a Load the user queued while this stream was in flight (ADR-P7).
-    refreshPopoverControls();
-    try {
-      onFinally?.();
-    } catch (e) {
-      console.error('[local-nano] onFinally handler threw:', e);
-    }
-    i.focus();
   }
 
   async function sendChat(text: string): Promise<void> {
@@ -863,7 +798,6 @@ export function initSession(deps: SessionDeps): SessionController {
       `Conversation history is around ${tokens} tokens. WebGPU memory pressure may cause the next turn to fail with an out-of-memory error. Click "Clear conversation" to start fresh — the model will reload (~15–40s).`,
     );
     const btn = window.document.createElement('button');
-    btn.type = 'button';
     btn.textContent = 'Clear conversation';
     btn.style.cssText = `margin-top: 6px; ${BUTTON_CSS}`;
     btn.addEventListener('click', () => {
@@ -961,7 +895,6 @@ export function initSession(deps: SessionDeps): SessionController {
     isFallback: false,
     maxBufferSize: null,
     configuredThreshold: null,
-    lastDeviceLostAt: null,
   };
   // The tier last attempted and the ordered list of tiers tried this walk with
   // their per-tier outcomes (ADR-R1: the panel owns ladder state). The
@@ -1037,10 +970,6 @@ export function initSession(deps: SessionDeps): SessionController {
       ladderPath: ladderPath.slice(),
       errorClass,
       errorMessage,
-      // The preflight gpu-info reply carries the most recent device.lost
-      // timestamp (ADR-3, pull-only). Map a null to 'none' so the renderer
-      // keeps a fixed output shape.
-      deviceLostAt: lastGpuInfo.lastDeviceLostAt ?? 'none',
       extensionVersion: safeManifestVersion(),
       userAgent: navigator.userAgent,
     };
@@ -1102,13 +1031,11 @@ export function initSession(deps: SessionDeps): SessionController {
     controls.style.cssText = 'margin-top: 6px; display: flex; gap: 6px;';
 
     const retryBtn = window.document.createElement('button');
-    retryBtn.type = 'button';
     retryBtn.textContent = 'Retry';
     retryBtn.style.cssText = BUTTON_CSS;
     retryBtn.addEventListener('click', () => rewalk(retryBtn, false));
 
     const resetBtn = window.document.createElement('button');
-    resetBtn.type = 'button';
     resetBtn.textContent = 'Reset and re-detect';
     resetBtn.style.cssText = BUTTON_CSS;
     resetBtn.addEventListener('click', () => rewalk(resetBtn, true));
@@ -1142,7 +1069,6 @@ export function initSession(deps: SessionDeps): SessionController {
     const controls = window.document.createElement('div');
     controls.style.cssText = 'margin-top: 6px; display: flex; gap: 6px;';
     const retryBtn = window.document.createElement('button');
-    retryBtn.type = 'button';
     retryBtn.textContent = 'Retry';
     retryBtn.style.cssText = BUTTON_CSS;
     retryBtn.addEventListener('click', () => {
@@ -1203,7 +1129,6 @@ export function initSession(deps: SessionDeps): SessionController {
    */
   function makeCopyDiagnosticAffordance(): HTMLButtonElement {
     const btn = window.document.createElement('button');
-    btn.type = 'button';
     btn.textContent = 'Copy diagnostic';
     btn.setAttribute('aria-label', 'Copy diagnostic to clipboard');
     // Muted, unobtrusive header control (inserted into the panel header, left of
@@ -1259,7 +1184,6 @@ export function initSession(deps: SessionDeps): SessionController {
     close: () => void;
   } {
     const gearBtn = window.document.createElement('button');
-    gearBtn.type = 'button';
     gearBtn.textContent = '⚙'; // gear glyph (U+2699)
     gearBtn.setAttribute('aria-label', 'Open model and idle settings');
     gearBtn.style.cssText = HEADER_CONTROL_CSS;
@@ -1523,6 +1447,14 @@ export function initSession(deps: SessionDeps): SessionController {
 
       if (loaded) {
         modelReady = true;
+        // Arm the idle-release window on LOAD, not just on generation. The panel
+        // auto-warms on open, so a user who loads the model and walks away
+        // WITHOUT chatting would otherwise leave a multi-GB session resident with
+        // no release scheduled (touchIdle is also fired on generation start/end).
+        // Firing here starts the inactivity countdown from load completion, so an
+        // unused model is reclaimed after the configured timeout. Fire-and-forget;
+        // touchIdle swallows its own errors so a failed schedule cannot break load.
+        void touchIdle();
         // A successful load clears any prior failure from the on-demand
         // diagnostic (the Copy affordance now reports a healthy state).
         lastWarmError = null;
@@ -1760,7 +1692,6 @@ export function initSession(deps: SessionDeps): SessionController {
   // an unobtrusive note shown while a stream blocks the switch. Built once so the
   // refresh logic mutates one element rather than rebuilding it each render.
   const loadBtn = window.document.createElement('button');
-  loadBtn.type = 'button';
   loadBtn.textContent = 'Load';
   loadBtn.setAttribute('data-load-model', '');
   loadBtn.style.cssText = `margin-top: 10px; ${BUTTON_CSS}`;
@@ -1909,29 +1840,6 @@ export function initSession(deps: SessionDeps): SessionController {
 
   // ---- Toggle listener ----
   let convertedAnchor = false;
-
-  // Panel-pin port (Layer B, Phase 3). While the panel is visible the content
-  // script holds a long-lived port to the SW named PANEL_PIN_PORT_NAME; the SW
-  // counts these and keeps the offscreen document alive while any is open,
-  // shrinking the tab-switch window where the WebGPU device can be lost. The
-  // port carries no messages; its existence is the signal.
-  let pinPort: chrome.runtime.Port | null = null;
-
-  function acquirePinPort(): void {
-    if (pinPort !== null) return;
-    pinPort = chrome.runtime.connect({ name: PANEL_PIN_PORT_NAME });
-    // A SW restart can drop the port; null the local handle so the next open
-    // re-acquires rather than disconnecting a dead port.
-    pinPort.onDisconnect.addListener(() => {
-      pinPort = null;
-    });
-  }
-
-  function releasePinPort(): void {
-    pinPort?.disconnect();
-    pinPort = null;
-  }
-
   chrome.runtime.onMessage.addListener((m: typeof TOGGLE_MESSAGE) => {
     if (m.a !== TOGGLE_MESSAGE.a) return;
     if (root.style.display === 'none') {
@@ -1943,13 +1851,9 @@ export function initSession(deps: SessionDeps): SessionController {
         convertedAnchor = true;
       }
       i.focus();
-      // Pin the offscreen before warmup starts so the model load has a held
-      // document from the first instant the panel is open.
-      acquirePinPort();
       void ensureWarm();
     } else {
       root.style.display = 'none';
-      releasePinPort();
     }
   });
 

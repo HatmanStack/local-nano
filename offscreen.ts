@@ -9,11 +9,7 @@
  * Token streaming is the only transport: callers open a port named
  * `STREAM_PORT_NAME`, post a `StreamRequest`, and receive `StreamChunk`
  * frames until a `StreamDone` frame closes the exchange. Callers can
- * cancel mid-stream by posting `StreamAbort`. Two further ports are accepted
- * without an inbound message protocol: the first-run progress port
- * (`STREAM_PROGRESS_PORT`) and the SW pin port (`OFFSCREEN_PIN_PORT_NAME`, the
- * Phase 3 lifetime guarantee that keeps Chrome from reaping this document while
- * a panel is open).
+ * cancel mid-stream by posting `StreamAbort`.
  *
  * The heavy `@huggingface/transformers` import lives only here, in the
  * offscreen document — the chat layer (`src/session.ts`) holds no model and
@@ -26,7 +22,6 @@ import transformersConfig from './.env.json';
 import { debugLog } from './src/debug.js';
 import { BusyGate } from './src/offscreen/busy-gate.js';
 import { classifyOffscreenMessage } from './src/offscreen/dispatch.js';
-import { type DeviceLostInfo, installGpuCapture } from './src/offscreen/gpu-capture.js';
 import { applyTierToConfig, type Tier, tierKey } from './src/offscreen/ladder.js';
 import {
   COUNT_TOKENS_RESPONSE,
@@ -39,13 +34,10 @@ import {
   type IsBusyResponse,
   isStreamAbort,
   isStreamRequest,
-  OFFSCREEN_PIN_PORT_NAME,
   type ProgressFrame,
   REBUILD_SESSION_RESPONSE,
   type RebuildSessionRequest,
   type RebuildSessionResponse,
-  SESSION_POISONED_REQUEST,
-  type SessionPoisonedRequest,
   STREAM_CHUNK,
   STREAM_DONE,
   STREAM_PORT_NAME,
@@ -57,7 +49,6 @@ import {
   type WarmupRequest,
   type WarmupResponse,
 } from './src/offscreen/protocol.js';
-import { finalizeStreamDone } from './src/offscreen/stream-finalize.js';
 
 interface LanguageModelSession {
   promptStreaming(input: string, options?: { signal?: AbortSignal }): ReadableStream<string>;
@@ -112,74 +103,6 @@ const generationGate = new BusyGate();
 // event is forwarded to every connected port; a disconnected port is dropped
 // on its own onDisconnect and a postMessage to a stale port is swallowed.
 const progressPorts = new Set<chrome.runtime.Port>();
-
-// Connected SW pin ports (Layer B, Phase 3). The SW opens one
-// `OFFSCREEN_PIN_PORT_NAME` port while at least one panel is open; the port's
-// mere existence keeps Chrome from reaping this document during a tab switch.
-// The Set carries no inbound messages and never grows unbounded: each port is
-// added on connect and removed on its own onDisconnect.
-const pinPorts = new Set<chrome.runtime.Port>();
-
-// Device-loss state (Layer A, Phase 2). `sessionPoisoned` flips true when a
-// captured GPUDevice's `lost` event fires; `rebuildSession` clears it on a
-// fresh session. `lastDeviceLostAt` records the ISO timestamp of the most
-// recent loss and stays populated across rebuilds as the historical record the
-// Phase 4 diagnostic reports. The SW owns the authoritative recovery decision;
-// this offscreen-side flag exists for the local rebuild reset.
-let sessionPoisoned = false;
-let lastDeviceLostAt: string | null = null;
-
-/**
- * Handle a captured GPUDevice's `lost` event (ADR-0/ADR-1). Marks the session
- * poisoned, records the loss timestamp, and pushes a fire-and-forget
- * `SESSION_POISONED` to the service worker so the next ENSURE recreates the
- * document on a healthy session. The push is best-effort: an SW evicted at this
- * instant drops the message, and the outermost 0.4.2 empty-success retry is the
- * safety net.
- */
-function handleDeviceLost(info: DeviceLostInfo): void {
-  // Record the loss history regardless; the timestamp is the diagnostic record
-  // and updates to the most recent loss even on a repeat event.
-  lastDeviceLostAt = info.at;
-  // Sticky: only push on the first transition to poisoned for this session, so
-  // a second device.lost (a replaced handle gets its own listener) does not
-  // re-spam the SW with a redundant recreate request. rebuildSession clears the
-  // flag, re-arming the push for the next session's first loss.
-  const alreadyPoisoned = sessionPoisoned;
-  sessionPoisoned = true;
-  debugLog(
-    `[local-nano/offscreen] device.lost reason=${info.reason} at=${lastDeviceLostAt} already=${alreadyPoisoned}`,
-  );
-  if (alreadyPoisoned) return;
-  const push: SessionPoisonedRequest = {
-    type: SESSION_POISONED_REQUEST,
-    at: info.at,
-    reason: info.reason,
-    message: info.message,
-  };
-  // Fire-and-forget: do not await the SW reply (ADR-1). Two failure modes must
-  // not escape as errors. (1) `sendMessage` can THROW synchronously when the
-  // extension context is invalidated — the try/catch handles that. (2) It
-  // returns a Promise that REJECTS when no receiver is listening (SW evicted at
-  // this instant -> "Could not establish connection") — `.catch` handles that;
-  // try/catch alone would let it surface as an unhandled rejection. Either way
-  // the message is dropped: the next device.lost re-sends and the panel-side
-  // empty-success retry catches the gap.
-  try {
-    void chrome.runtime.sendMessage(push).catch(() => {
-      // No receiver (SW evicted); drop.
-    });
-  } catch {
-    // Synchronous failure (context invalidated); drop.
-  }
-}
-
-// Install the transparent navigator.gpu capture at module top (ADR-0), before
-// loadHeavy, the gpu-info handler, or any other consumer runs. Installing here
-// makes the capture a property of the document, not of a particular code path,
-// so the gpu-info preflight cannot race the device capture. Idempotent: a
-// re-import or second call is a no-op.
-installGpuCapture({ onDeviceLost: handleDeviceLost });
 
 /**
  * Forward one progress event to every connected progress port. A disconnected
@@ -302,9 +225,6 @@ async function rebuildSession(history: HistoryTurn[]): Promise<void> {
   // destroy-guard (ADR-R1/R3) is ever reordered, a stale activeTier could skip
   // the destroy that prevents overlapping loads.
   activeTier = null;
-  // A rebuilt session is no longer poisoned (Layer A). lastDeviceLostAt stays
-  // populated as the historical record the Phase 4 diagnostic reports.
-  sessionPoisoned = false;
   await ensureSession(history);
 }
 
@@ -330,8 +250,6 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: false,
       maxBufferSize: null,
       configuredThreshold,
-      // WASM has no WebGPU device to lose.
-      lastDeviceLostAt: null,
     };
   }
 
@@ -346,7 +264,6 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: true,
       maxBufferSize: null,
       configuredThreshold,
-      lastDeviceLostAt,
     };
   }
   try {
@@ -359,7 +276,6 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
         isFallback: true,
         maxBufferSize: null,
         configuredThreshold,
-        lastDeviceLostAt,
       };
     }
     const maxBufferSize =
@@ -371,7 +287,6 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: Boolean(adapter.isFallbackAdapter),
       maxBufferSize,
       configuredThreshold,
-      lastDeviceLostAt,
     };
   } catch {
     return {
@@ -381,7 +296,6 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: false,
       maxBufferSize: null,
       configuredThreshold,
-      lastDeviceLostAt,
     };
   }
 }
@@ -663,11 +577,9 @@ chrome.runtime.onConnect.addListener((port) => {
         debugLog(
           `[local-nano/offscreen] stream/done id=${id} chunks=${chunkCount} chars=${totalChars} sessionMs=${tSession.toFixed(0)} totalMs=${(performance.now() - t0).toFixed(0)}`,
         );
-        const done: StreamDone = finalizeStreamDone({
-          id,
-          aborted: controller.signal.aborted,
-          chunkCount,
-        });
+        const done: StreamDone = controller.signal.aborted
+          ? { type: STREAM_DONE, id, ok: false, error: 'aborted' }
+          : { type: STREAM_DONE, id, ok: true };
         try {
           port.postMessage(done);
         } catch {
@@ -700,18 +612,6 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     for (const ac of activeAborts.values()) ac.abort();
     activeAborts.clear();
-  });
-});
-
-// SW pin port (Layer B, Phase 3 lifetime guarantee). The SW opens this while a
-// panel is open; the offscreen just tracks it so the port is a live connection.
-// The port carries no inbound messages, its existence is what prevents Chrome's
-// 30-second no-port reap from closing this document mid-tab-switch.
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== OFFSCREEN_PIN_PORT_NAME) return;
-  pinPorts.add(port);
-  port.onDisconnect.addListener(() => {
-    pinPorts.delete(port);
   });
 });
 

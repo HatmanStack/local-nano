@@ -21,8 +21,6 @@ import {
   isRebuildSessionResponse,
   isRecreateOffscreenRequest,
   isRecreateOffscreenResponse,
-  isSessionPoisonedRequest,
-  isSessionPoisonedResponse,
   isStreamAbort,
   isStreamChunk,
   isStreamDone,
@@ -35,8 +33,6 @@ import {
   REBUILD_SESSION_RESPONSE,
   RECREATE_OFFSCREEN_REQUEST,
   RECREATE_OFFSCREEN_RESPONSE,
-  SESSION_POISONED_REQUEST,
-  SESSION_POISONED_RESPONSE,
   STREAM_ABORT,
   STREAM_CHUNK,
   STREAM_DONE,
@@ -102,92 +98,6 @@ describe('protocol discriminators', () => {
   it('keeps is-busy constants stable', () => {
     expect(IS_BUSY_REQUEST).toBe('idle/is-busy-request');
     expect(IS_BUSY_RESPONSE).toBe('idle/is-busy-response');
-  });
-
-  it('keeps session-poisoned constants stable', () => {
-    expect(SESSION_POISONED_REQUEST).toBe('offscreen/session-poisoned-request');
-    expect(SESSION_POISONED_RESPONSE).toBe('offscreen/session-poisoned-response');
-  });
-});
-
-describe('isSessionPoisonedRequest', () => {
-  it('accepts a well-formed request', () => {
-    expect(
-      isSessionPoisonedRequest({
-        type: SESSION_POISONED_REQUEST,
-        at: '2026-06-04T00:00:00.000Z',
-        reason: 'destroyed',
-        message: 'GPU device was lost',
-      }),
-    ).toBe(true);
-  });
-
-  it('rejects a request missing at, reason, or message', () => {
-    expect(
-      isSessionPoisonedRequest({ type: SESSION_POISONED_REQUEST, reason: 'r', message: 'm' }),
-    ).toBe(false);
-    expect(
-      isSessionPoisonedRequest({ type: SESSION_POISONED_REQUEST, at: 'a', message: 'm' }),
-    ).toBe(false);
-    expect(isSessionPoisonedRequest({ type: SESSION_POISONED_REQUEST, at: 'a', reason: 'r' })).toBe(
-      false,
-    );
-  });
-
-  it('rejects non-string at, reason, or message', () => {
-    expect(
-      isSessionPoisonedRequest({
-        type: SESSION_POISONED_REQUEST,
-        at: 1,
-        reason: 'r',
-        message: 'm',
-      }),
-    ).toBe(false);
-    expect(
-      isSessionPoisonedRequest({
-        type: SESSION_POISONED_REQUEST,
-        at: 'a',
-        reason: 2,
-        message: 'm',
-      }),
-    ).toBe(false);
-    expect(
-      isSessionPoisonedRequest({
-        type: SESSION_POISONED_REQUEST,
-        at: 'a',
-        reason: 'r',
-        message: 3,
-      }),
-    ).toBe(false);
-  });
-
-  it('rejects wrong discriminator and primitives', () => {
-    expect(isSessionPoisonedRequest(null)).toBe(false);
-    expect(isSessionPoisonedRequest('foo')).toBe(false);
-    expect(isSessionPoisonedRequest({ type: 'other', at: 'a', reason: 'r', message: 'm' })).toBe(
-      false,
-    );
-  });
-});
-
-describe('isSessionPoisonedResponse', () => {
-  it('accepts ok:true and ok:false with error string', () => {
-    expect(isSessionPoisonedResponse({ type: SESSION_POISONED_RESPONSE, ok: true })).toBe(true);
-    expect(
-      isSessionPoisonedResponse({ type: SESSION_POISONED_RESPONSE, ok: false, error: 'boom' }),
-    ).toBe(true);
-  });
-
-  it('rejects ok:false without an error string', () => {
-    expect(isSessionPoisonedResponse({ type: SESSION_POISONED_RESPONSE, ok: false })).toBe(false);
-    expect(
-      isSessionPoisonedResponse({ type: SESSION_POISONED_RESPONSE, ok: false, error: 42 }),
-    ).toBe(false);
-  });
-
-  it('rejects wrong discriminator and primitives', () => {
-    expect(isSessionPoisonedResponse(null)).toBe(false);
-    expect(isSessionPoisonedResponse({ type: 'other', ok: true })).toBe(false);
   });
 });
 
@@ -434,7 +344,6 @@ describe('isGpuInfoResponse', () => {
         isFallback: false,
         maxBufferSize: 2147483648,
         configuredThreshold: 1500,
-        lastDeviceLostAt: '2026-06-04T00:00:00.000Z',
       }),
     ).toBe(true);
   });
@@ -448,50 +357,8 @@ describe('isGpuInfoResponse', () => {
         isFallback: false,
         maxBufferSize: null,
         configuredThreshold: null,
-        lastDeviceLostAt: null,
       }),
     ).toBe(true);
-  });
-
-  it('accepts a null lastDeviceLostAt', () => {
-    expect(
-      isGpuInfoResponse({
-        type: GPU_INFO_RESPONSE,
-        ok: true,
-        device: 'webgpu',
-        isFallback: false,
-        maxBufferSize: null,
-        configuredThreshold: null,
-        lastDeviceLostAt: null,
-      }),
-    ).toBe(true);
-  });
-
-  it('accepts an absent lastDeviceLostAt for backward shape', () => {
-    expect(
-      isGpuInfoResponse({
-        type: GPU_INFO_RESPONSE,
-        ok: true,
-        device: 'webgpu',
-        isFallback: false,
-        maxBufferSize: null,
-        configuredThreshold: null,
-      }),
-    ).toBe(true);
-  });
-
-  it('rejects a non-string, non-null lastDeviceLostAt', () => {
-    expect(
-      isGpuInfoResponse({
-        type: GPU_INFO_RESPONSE,
-        ok: true,
-        device: 'webgpu',
-        isFallback: false,
-        maxBufferSize: null,
-        configuredThreshold: null,
-        lastDeviceLostAt: 1717459200000,
-      }),
-    ).toBe(false);
   });
 
   it('rejects unknown device strings', () => {

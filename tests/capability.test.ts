@@ -12,7 +12,6 @@ function snapshot(overrides: Partial<GpuInfoSnapshot>): GpuInfoSnapshot {
     isFallback: false,
     maxBufferSize: 4 * 1024 * 1024 * 1024,
     configuredThreshold: null,
-    lastDeviceLostAt: null,
     ...overrides,
   };
 }

@@ -490,7 +490,6 @@ describe('getGpuInfo (content-script client)', () => {
           isFallback: false,
           maxBufferSize: 2147483648,
           configuredThreshold: null,
-          lastDeviceLostAt: '2026-06-04T00:00:00.000Z',
         };
       }
       return undefined;
@@ -500,7 +499,6 @@ describe('getGpuInfo (content-script client)', () => {
       isFallback: false,
       maxBufferSize: 2147483648,
       configuredThreshold: null,
-      lastDeviceLostAt: '2026-06-04T00:00:00.000Z',
     });
     expect(seen[0]).toEqual({ type: ENSURE_OFFSCREEN_REQUEST });
     expect(seen[1]).toEqual({ type: GPU_INFO_REQUEST });
@@ -515,7 +513,6 @@ describe('getGpuInfo (content-script client)', () => {
     isFallback: false,
     maxBufferSize: null,
     configuredThreshold: null,
-    lastDeviceLostAt: null,
   };
 
   it('resolves the conservative shape when the offscreen reply is ok:false', async () => {

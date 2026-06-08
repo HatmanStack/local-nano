@@ -80,13 +80,6 @@ const TERMINAL_SIGNALS: readonly string[] = [
   // chrome.runtime.sendMessage when no offscreen document is listening: the
   // document is gone.
   'receiving end does not exist',
-  // The offscreen handler's authoritative zero-chunk detector emits a string
-  // starting with this prefix (POISONED_STREAM_ERROR in stream-finalize.ts)
-  // when a natural completion yielded no tokens, the signature of a poisoned
-  // WebGPU session. Classing it terminal routes it through the existing
-  // serialized re-warm primitive (recreate + single retry). Prefix-matched so a
-  // later refinement of the suffix wording does not silently stop matching.
-  'no tokens emitted',
 ];
 
 /**
