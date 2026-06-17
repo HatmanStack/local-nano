@@ -122,3 +122,46 @@ export function classifyLoadFailure(error: unknown): LoadFailureClass {
   }
   return 'transient';
 }
+
+/**
+ * Memory-exhaustion signals. A failed allocation of the multi-GB weights buffer
+ * surfaces with these. The error NAME (`RangeError`, `QuotaExceededError`) is
+ * matched alongside the message because the canonical V8 wording is
+ * `RangeError: Array buffer allocation failed` — the bare message is just
+ * "Array buffer allocation failed", so we fold the name in too.
+ */
+const MEMORY_SIGNALS: readonly string[] = [
+  'array buffer allocation failed',
+  'allocation failed',
+  'out of memory',
+  'rangeerror',
+  'quotaexceeded',
+];
+
+/**
+ * Map a load failure to one short, human-readable sentence: the likely cause and
+ * what the user can do. Pure; the raw error still goes in the copyable
+ * diagnostic. Categories mirror the real failures on constrained devices:
+ *
+ * - memory exhaustion (the allocation crash, the dominant real cause),
+ * - a terminal/interrupted offscreen document (often itself memory pressure),
+ * - a weights-download/network failure,
+ * - everything else (generic retry).
+ */
+export function explainLoadFailure(error: unknown): string {
+  const text = (
+    error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+  ).toLowerCase();
+  for (const signal of MEMORY_SIGNALS) {
+    if (text.includes(signal)) {
+      return 'Your device looks low on memory. Close other tabs and try again, restart the browser or device, or pick a smaller model in settings.';
+    }
+  }
+  if (classifyFailure(error) === 'terminal') {
+    return 'The model loader was interrupted before it finished (often low memory). Try again, or pick a smaller model in settings.';
+  }
+  if (classifyLoadFailure(error) === 'network') {
+    return 'The model download did not complete. Check your connection and try again.';
+  }
+  return 'The model failed to load on this device. Try again, or pick a smaller model in settings.';
+}

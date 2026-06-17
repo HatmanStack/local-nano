@@ -147,6 +147,14 @@ export interface GpuInfoSnapshot {
   isFallback: boolean;
   maxBufferSize: number | null;
   configuredThreshold: number | null;
+  /**
+   * Approximate system RAM in GiB from `navigator.deviceMemory` (coarse:
+   * 0.25/0.5/1/2/4/8, upper-bounded at 8; null when unsupported). This is system
+   * memory, NOT GPU memory — the constraint that actually decides whether a
+   * multi-GB model can be allocated. Optional so an older offscreen build that
+   * omits it is read as "unknown" rather than rejected by the wire guard.
+   */
+  deviceMemory?: number | null;
 }
 
 export interface GpuInfoRequest {
@@ -171,6 +179,10 @@ export function isGpuInfoResponse(value: unknown): value is GpuInfoResponse {
     if (typeof v.isFallback !== 'boolean') return false;
     if (v.maxBufferSize !== null && !Number.isFinite(v.maxBufferSize)) return false;
     if (v.configuredThreshold !== null && !Number.isFinite(v.configuredThreshold)) return false;
+    // Optional and tolerant of absence (older offscreen builds omit it): only
+    // reject a present-but-non-numeric value.
+    if (v.deviceMemory !== undefined && v.deviceMemory !== null && !Number.isFinite(v.deviceMemory))
+      return false;
     return true;
   }
   if (v.ok === false) return typeof v.error === 'string';

@@ -5,6 +5,20 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] - 2026-06-17
+
+Auto-selects a model that fits the device's memory, and turns cryptic load failures into plain-language guidance. On a memory-constrained device (for example a 4 GiB ChromeOS box) the ~2B default model fails to allocate and the offscreen renderer is killed mid-load; the device classifier previously read only the GPU buffer ceiling, missed the low system RAM, and confidently loaded a model that could not fit. System RAM now drives the choice.
+
+### Fixed
+
+- **Capability classification reads system RAM.** `classifyCapability` now factors in `navigator.deviceMemory`: a device with 4 GiB or less RAM is classified weak even when its WebGPU buffer ceiling is large (the reported case showed a 4096 MiB buffer yet still OOM'd). System memory, not GPU buffer size, is what decides whether a multi-GB model can be allocated. The GPU snapshot and the copyable diagnostic carry a new `deviceMemory` line.
+- **The diagnostic is no longer blank after a failure.** The load error is captured on every tier failure, not only at terminal exhaustion, so the diagnostic always reports the real `errorClass`/`errorMessage` instead of `none` when copied during or after a failed walk.
+
+### Added
+
+- **Memory-aware default model.** With no explicit model preference, a weak device auto-loads a model that fits: `Qwen3-0.6B` on a real WebGPU adapter (~0.5 GB, confirmed loading on the 4 GiB ChromeOS GPU), or `Qwen2.5-0.5B` on WASM/CPU, instead of the ~2B `gemma-4-E2B` default. An explicit pick in the settings picker is always honored, and capable devices keep the gemma default. A one-line note explains the downsize and points to settings; an explicit large pick on a constrained device gets an up-front advisory.
+- **Plain-language load failures.** A failed load now shows the likely cause and a concrete action: "Your device looks low on memory … pick a smaller model in settings" for an allocation/OOM crash, an interrupted-loader message for a killed offscreen document, or a connection message for a download failure. The raw diagnostic is still available to copy.
+
 ## [0.4.5] - 2026-06-08
 
 Reverts the reactive device-loss machinery added in 0.4.2 and 0.4.3 back to the simpler, proven 0.4.1 load and stream path, and arms idle resource release at model load. (0.4.4 was an internal rollback build and was never published.)

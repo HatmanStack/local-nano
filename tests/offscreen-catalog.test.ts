@@ -3,6 +3,7 @@ import * as catalogModule from '../src/offscreen/catalog.js';
 import {
   type CatalogEntry,
   DEFAULT_MODEL_ID,
+  defaultModelForCapability,
   findCatalogEntry,
   isLargerModelEnabled,
   LARGER_MODEL_ENABLED,
@@ -132,6 +133,43 @@ describe('vetted-cell discipline', () => {
       expect(entry.note.length).toBeGreaterThan(0);
       expect(Array.isArray(entry.tiers)).toBe(true);
       expect(entry.tiers.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('defaultModelForCapability', () => {
+  it('returns null for a capable device (keep the gemma default)', () => {
+    expect(
+      defaultModelForCapability('capable', { device: 'webgpu', isFallback: false }),
+    ).toBeNull();
+    // Even a wasm-configured capable device keeps the default (capability wins).
+    expect(defaultModelForCapability('capable', { device: 'wasm', isFallback: false })).toBeNull();
+  });
+
+  it('picks the small WebGPU model for a weak real WebGPU adapter', () => {
+    expect(defaultModelForCapability('weak', { device: 'webgpu', isFallback: false })).toBe(
+      QWEN3_06B,
+    );
+  });
+
+  it('picks the small WASM model for a weak software-fallback or wasm device', () => {
+    expect(defaultModelForCapability('weak', { device: 'webgpu', isFallback: true })).toBe(
+      QWEN25_05B,
+    );
+    expect(defaultModelForCapability('weak', { device: 'wasm', isFallback: false })).toBe(
+      QWEN25_05B,
+    );
+  });
+
+  it('only ever returns ids that resolve to live (non-gated) catalog entries', () => {
+    for (const info of [
+      { device: 'webgpu' as const, isFallback: false },
+      { device: 'webgpu' as const, isFallback: true },
+      { device: 'wasm' as const, isFallback: false },
+    ]) {
+      const id = defaultModelForCapability('weak', info);
+      expect(id).not.toBeNull();
+      expect(findCatalogEntry(id as string)).not.toBeNull();
     }
   });
 });

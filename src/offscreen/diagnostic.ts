@@ -24,6 +24,8 @@ export interface DiagnosticInput {
   isFallback: boolean;
   /** WebGPU adapter single-allocation ceiling in bytes, or null when unknown. */
   maxBufferSize: number | null;
+  /** Approximate system RAM in GiB (navigator.deviceMemory), or null/undefined when unknown. */
+  deviceMemory?: number | null;
   /** The model the ladder selected (chosen up front). Null when no walk has run. */
   chosenModel: string | null;
   /** The tier being loaded when the failure happened. Null when no tier was attempted. */
@@ -43,6 +45,11 @@ const BYTES_PER_MIB = 1024 * 1024;
 function formatBufferSize(maxBufferSize: number | null): string {
   if (maxBufferSize === null) return 'n/a';
   return `${Math.round(maxBufferSize / BYTES_PER_MIB)} MiB`;
+}
+
+function formatDeviceMemory(deviceMemory: number | null | undefined): string {
+  if (deviceMemory == null) return 'n/a';
+  return `${deviceMemory} GB`;
 }
 
 function formatTier(activeTier: DiagnosticInput['activeTier']): string {
@@ -83,6 +90,7 @@ export function buildDiagnostic(input: DiagnosticInput): string {
     `device: ${input.device}`,
     `isFallback: ${input.isFallback}`,
     `maxBufferSize: ${formatBufferSize(input.maxBufferSize)}`,
+    `deviceMemory: ${formatDeviceMemory(input.deviceMemory)}`,
     `chosenModel: ${input.chosenModel ?? 'n/a'}`,
     `activeTier: ${formatTier(input.activeTier)}`,
     'ladderPath:',

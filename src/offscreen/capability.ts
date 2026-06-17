@@ -27,17 +27,31 @@ export type DeviceCapability = 'capable' | 'weak';
 export const CAPABLE_MIN_BUFFER_BYTES = 1024 * 1024 * 1024;
 
 /**
+ * System-RAM boundary (GiB) from `navigator.deviceMemory`. At or below this a
+ * device is `weak` regardless of GPU buffer size: the multi-GB default model is
+ * allocated in SYSTEM memory before/while it reaches the GPU, so a box with a
+ * roomy WebGPU buffer limit but little RAM still OOMs on the load (observed on a
+ * 4 GiB ChromeOS device that reported maxBufferSize 4096 MiB yet failed to
+ * allocate the 2B model). `maxBufferSize` alone cannot see this — system RAM is
+ * the missing signal.
+ */
+export const LOW_MEMORY_GB = 4;
+
+/**
  * Classify a GPU snapshot per ADR-R9:
  *
  * - `wasm` device → `weak` (CPU path).
  * - `webgpu` with a software fallback adapter → `weak` (heavily constrained).
+ * - a known `deviceMemory` at or below 4 GiB → `weak` (system RAM too small for
+ *   the multi-GB default, independent of GPU buffer size).
  * - `webgpu`, not fallback, a known `maxBufferSize` below 1 GiB → `weak`.
- * - otherwise → `capable` (including a `null` buffer on a real adapter, treated
- *   optimistically because the ladder will catch a genuine failure).
+ * - otherwise → `capable` (including unknown buffer/memory on a real adapter,
+ *   treated optimistically because the ladder will catch a genuine failure).
  */
 export function classifyCapability(info: GpuInfoSnapshot): DeviceCapability {
   if (info.device === 'wasm') return 'weak';
   if (info.isFallback) return 'weak';
+  if (info.deviceMemory != null && info.deviceMemory <= LOW_MEMORY_GB) return 'weak';
   if (info.maxBufferSize !== null && info.maxBufferSize < CAPABLE_MIN_BUFFER_BYTES) {
     return 'weak';
   }

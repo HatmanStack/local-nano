@@ -241,6 +241,11 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
     Number.isFinite(cfg.historyTokenWarnThreshold)
       ? cfg.historyTokenWarnThreshold
       : null;
+  // Approximate system RAM (GiB). The constraint that decides whether a multi-GB
+  // model fits is system memory, not the WebGPU buffer ceiling, so the panel's
+  // capability classifier reads this.
+  const dm = (navigator as unknown as { deviceMemory?: number }).deviceMemory;
+  const deviceMemory = typeof dm === 'number' && Number.isFinite(dm) ? dm : null;
 
   if (device === 'wasm') {
     return {
@@ -250,6 +255,7 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: false,
       maxBufferSize: null,
       configuredThreshold,
+      deviceMemory,
     };
   }
 
@@ -264,6 +270,7 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: true,
       maxBufferSize: null,
       configuredThreshold,
+      deviceMemory,
     };
   }
   try {
@@ -276,6 +283,7 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
         isFallback: true,
         maxBufferSize: null,
         configuredThreshold,
+        deviceMemory,
       };
     }
     const maxBufferSize =
@@ -287,6 +295,7 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: Boolean(adapter.isFallbackAdapter),
       maxBufferSize,
       configuredThreshold,
+      deviceMemory,
     };
   } catch {
     return {
@@ -296,6 +305,7 @@ async function collectGpuInfo(): Promise<GpuInfoResponse & { ok: true }> {
       isFallback: false,
       maxBufferSize: null,
       configuredThreshold,
+      deviceMemory,
     };
   }
 }

@@ -28,6 +28,7 @@
  * accessors.
  */
 
+import type { DeviceCapability } from './capability.js';
 import * as self from './catalog.js';
 import { PRIMARY_LADDER, PRIMARY_MODEL, type Tier } from './ladder.js';
 
@@ -202,4 +203,28 @@ export function listCatalog(opts: GateOpts = {}): CatalogEntry[] {
  */
 export function findCatalogEntry(id: string, opts: GateOpts = {}): CatalogEntry | null {
   return listCatalog(opts).find((e) => e.id === id) ?? null;
+}
+
+/**
+ * The model id to auto-default to when the user has set NO preference, given the
+ * device capability (ADR-P4 + ADR-R9). Returns `null` for a `capable` device,
+ * meaning "keep today's default" (the gemma primary ladder). A memory-constrained
+ * `weak` device gets a small model that actually fits:
+ *
+ * - real WebGPU adapter → `onnx-community/Qwen3-0.6B-ONNX` (~0.5 GB, webgpu/q4f16,
+ *   confirmed loading on the 4 GiB CrOS GPU in docs/models.md), faster than CPU.
+ * - WASM / software-fallback adapter → `onnx-community/Qwen2.5-0.5B-Instruct`
+ *   (~0.5 GB, wasm/q8), the documented "smallest that answers" CPU pick.
+ *
+ * An explicit user preference bypasses this (the caller only consults it when no
+ * preference is stored), so a deliberate choice of a larger model is honored.
+ * Pure: maps a verdict + device facts to a catalog id.
+ */
+export function defaultModelForCapability(
+  capability: DeviceCapability,
+  info: { device: 'webgpu' | 'wasm'; isFallback: boolean },
+): string | null {
+  if (capability === 'capable') return null;
+  if (info.device === 'webgpu' && !info.isFallback) return QWEN3_06B_ENTRY.id;
+  return SMALLER_ENTRY.id;
 }

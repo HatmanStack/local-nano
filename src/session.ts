@@ -19,6 +19,7 @@ import {
 import {
   type CatalogEntry,
   DEFAULT_MODEL_ID,
+  defaultModelForCapability,
   findCatalogEntry,
   isLargerModelEnabled,
   listCatalog,
@@ -34,7 +35,7 @@ import {
   warmupSession,
 } from './offscreen/client.js';
 import { buildDiagnostic, errorInfo, type LadderPathEntry } from './offscreen/diagnostic.js';
-import { classifyFailure, classifyLoadFailure } from './offscreen/failure.js';
+import { classifyFailure, classifyLoadFailure, explainLoadFailure } from './offscreen/failure.js';
 import {
   assembleLadderForModel,
   firstTierIndex,
@@ -895,6 +896,7 @@ export function initSession(deps: SessionDeps): SessionController {
     isFallback: false,
     maxBufferSize: null,
     configuredThreshold: null,
+    deviceMemory: null,
   };
   // The tier last attempted and the ordered list of tiers tried this walk with
   // their per-tier outcomes (ADR-R1: the panel owns ladder state). The
@@ -959,6 +961,7 @@ export function initSession(deps: SessionDeps): SessionController {
       device: lastGpuInfo.device,
       isFallback: lastGpuInfo.isFallback,
       maxBufferSize: lastGpuInfo.maxBufferSize,
+      deviceMemory: lastGpuInfo.deviceMemory,
       chosenModel,
       // The last tier attempted (null only if the walk never started a tier,
       // e.g. a recreate failure before the first load, or no walk has run).
@@ -1001,7 +1004,9 @@ export function initSession(deps: SessionDeps): SessionController {
       'system',
       [
         "Couldn't load the model on this device.",
-        'Try Retry below; if it keeps failing, set "device": "wasm" in .env.json for a slower CPU fallback.',
+        // Translate the raw failure into a likely cause + concrete action (the
+        // raw error stays in the diagnostic block below for bug reports).
+        explainLoadFailure(err),
         ...(pathLine ? [pathLine] : []),
         '',
         diagnostic,
@@ -1351,10 +1356,18 @@ export function initSession(deps: SessionDeps): SessionController {
       // resolve.
       const pref = await loadModelPref();
       const prefId = resolveModelId(pref);
+      // With NO stored preference, auto-pick by capability: a memory-constrained
+      // device gets a small model that fits instead of OOMing on the 2B default
+      // (the missing piece behind the ChromeOS load failures). An EXPLICIT user
+      // pick (prefId !== null) is always honored — capability never overrides a
+      // deliberate choice.
+      const autoId = prefId === null ? defaultModelForCapability(capability, lastGpuInfo) : null;
+      const resolvedId = prefId ?? autoId;
+      const autoDownsized = prefId === null && autoId !== null;
       const entry =
-        prefId === null
+        resolvedId === null
           ? null
-          : findCatalogEntry(prefId, {
+          : findCatalogEntry(resolvedId, {
               largerEnabled: isLargerModelEnabled(),
             });
       const ladder = assembleLadderForModel({
@@ -1364,9 +1377,24 @@ export function initSession(deps: SessionDeps): SessionController {
       });
       // The model the ladder selected: the model of the first tier it will
       // walk. Surfaced in the diagnostic so a bug report names the model even
-      // when the walk crashes before recording an outcome. With the flag off
-      // this is always the primary model.
+      // when the walk crashes before recording an outcome.
       chosenModel = ladder.length > 0 ? ladder[0].modelName : null;
+      // Tell the user when we auto-downsized so the smaller model isn't a
+      // mystery, and how to override it. Only on an auto-pick (never when the
+      // user chose the model themselves).
+      if (autoDownsized && entry) {
+        addMessage(
+          'system',
+          `This device looks memory-constrained, so a smaller model (${entry.displayName}) was selected. You can choose a larger one in settings.`,
+        );
+      } else if (!autoDownsized && capability === 'weak' && resolvedId === DEFAULT_MODEL_ID) {
+        // The user explicitly chose the large default on a constrained device:
+        // warn up front that it may not load, before the long download begins.
+        addMessage(
+          'system',
+          'Heads up: this device looks memory-constrained and the selected model is large, so it may fail to load. A smaller model is available in settings.',
+        );
+      }
 
       // Drive the pure ladder reducer (ADR-R1/R6). On cold start, skip straight
       // to the persisted known-good tier (or the first non-known-bad tier); on a
@@ -1412,6 +1440,10 @@ export function initSession(deps: SessionDeps): SessionController {
           break;
         } catch (err) {
           lastError = err;
+          // Record immediately so the always-available Copy diagnostic carries
+          // the real error even if it is copied mid-walk (the cause of the prior
+          // `errorMessage: none` reports — the error was only stored at terminal).
+          lastWarmError = err;
           const loadClass = classifyLoadFailure(err);
           if (loadClass === 'network') {
             // The device is fine; the download failed. Do NOT record known-bad,

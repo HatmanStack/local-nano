@@ -559,8 +559,10 @@ describe('initSession — toggle behavior', () => {
       );
       expect(terminal).toBeTruthy();
       const txt = terminal?.textContent ?? '';
-      // Headline + guidance + diagnostic block embedded.
-      expect(txt).toContain('set "device": "wasm" in .env.json');
+      // Headline + translated cause/action + diagnostic block embedded. A
+      // "port disconnected" failure classes terminal → the interrupted-loader
+      // guidance.
+      expect(txt).toContain('The model loader was interrupted before it finished');
       expect(txt).toContain('device: webgpu');
       expect(txt).toContain('errorMessage: offscreen port disconnected: unknown reason');
       expect(txt).toContain('extensionVersion: 0.2.4');
@@ -836,10 +838,42 @@ describe('initSession — fallback ladder', () => {
     expect((warmupSessionMock.mock.calls[0][0] as { dtype: string }).dtype).toBe('q8');
   });
 
-  it('flag OFF: a weak-classified device still walks only the primary ladder', async () => {
-    // A weak snapshot (software fallback) classifies as weak, but with
-    // SMALLER_MODEL_ENABLED off the assembled ladder is the primary ladder, so
-    // the first tier is still the primary model at q4f16 (Phase 2 behavior).
+  it('no preference + low-RAM WebGPU device auto-selects the small WebGPU model', async () => {
+    // The reported failure: a real WebGPU adapter with a large buffer ceiling
+    // but only 4 GiB system RAM. classifyCapability now reads deviceMemory, so
+    // this is weak and the no-preference auto-default picks Qwen3-0.6B (fits,
+    // vetted on this GPU class) instead of OOMing on the 2B gemma default.
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: 4096 * 1024 * 1024,
+      configuredThreshold: null,
+      deviceMemory: 4,
+    });
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    const firstTier = warmupSessionMock.mock.calls[0][0] as {
+      modelName: string;
+      device: string;
+      dtype: string;
+    };
+    expect(firstTier.modelName).toBe('onnx-community/Qwen3-0.6B-ONNX');
+    expect(firstTier.device).toBe('webgpu');
+    expect(firstTier.dtype).toBe('q4f16');
+    // The user is told why a smaller model was chosen.
+    const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+    expect(texts.some((t) => t.includes('memory-constrained') && t.includes('smaller model'))).toBe(
+      true,
+    );
+  });
+
+  it('no preference + software-fallback device auto-selects the small WASM model', async () => {
+    // A software-fallback adapter is weak with no usable WebGPU, so the
+    // auto-default is the CPU/WASM small model rather than a WebGPU one.
     getGpuInfoMock.mockResolvedValue({
       device: 'webgpu' as const,
       isFallback: true,
@@ -852,9 +886,54 @@ describe('initSession — fallback ladder', () => {
     getToggleListener()(TOGGLE_MESSAGE);
     await flushMicrotasks();
     expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+    const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; device: string };
+    expect(firstTier.modelName).toBe('onnx-community/Qwen2.5-0.5B-Instruct');
+    expect(firstTier.device).toBe('wasm');
+  });
+
+  it('no preference + capable device keeps the gemma default (no downsize note)', async () => {
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: 4096 * 1024 * 1024,
+      configuredThreshold: null,
+      deviceMemory: 8,
+    });
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
     const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
     expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
     expect(firstTier.dtype).toBe('q4f16');
+    const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+    expect(texts.some((t) => t.includes('memory-constrained'))).toBe(false);
+  });
+
+  it('an explicit model choice is honored on a weak device (with an advisory)', async () => {
+    // A deliberate pick of the large default on a constrained device is NOT
+    // overridden; the user gets an up-front advisory but their choice stands.
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: 'onnx-community/gemma-4-E2B-it-ONNX',
+      idleTimeoutMinutes: 15,
+    };
+    getGpuInfoMock.mockResolvedValue({
+      device: 'webgpu' as const,
+      isFallback: false,
+      maxBufferSize: 4096 * 1024 * 1024,
+      configuredThreshold: null,
+      deviceMemory: 4,
+    });
+    warmupSessionMock.mockResolvedValue(undefined);
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string };
+    expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
+    const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+    expect(texts.some((t) => t.includes('selected model is large'))).toBe(true);
   });
 
   it('flag ON (forced in test): a weak device tries the smaller model first', async () => {

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { CAPABLE_MIN_BUFFER_BYTES, classifyCapability } from '../src/offscreen/capability.js';
+import {
+  CAPABLE_MIN_BUFFER_BYTES,
+  classifyCapability,
+  LOW_MEMORY_GB,
+} from '../src/offscreen/capability.js';
 import type { GpuInfoSnapshot } from '../src/offscreen/protocol.js';
 
 /**
@@ -47,5 +51,28 @@ describe('classifyCapability (ADR-R9)', () => {
 
   it('treats a null max buffer on a real (non-fallback) adapter as capable', () => {
     expect(classifyCapability(snapshot({ maxBufferSize: null }))).toBe('capable');
+  });
+
+  it('classifies a low-RAM device as weak even with a large GPU buffer', () => {
+    // The reported case: big maxBufferSize (4 GiB), real adapter, but only
+    // 4 GiB system RAM. maxBufferSize alone misses this; deviceMemory catches it.
+    expect(
+      classifyCapability(
+        snapshot({ maxBufferSize: 4 * 1024 * 1024 * 1024, deviceMemory: LOW_MEMORY_GB }),
+      ),
+    ).toBe('weak');
+  });
+
+  it('treats deviceMemory above the boundary as capable', () => {
+    expect(classifyCapability(snapshot({ deviceMemory: 8 }))).toBe('capable');
+  });
+
+  it('ignores an absent (undefined/null) deviceMemory, falling back to buffer-based verdict', () => {
+    expect(classifyCapability(snapshot({ deviceMemory: undefined }))).toBe('capable');
+    expect(classifyCapability(snapshot({ deviceMemory: null }))).toBe('capable');
+  });
+
+  it('LOW_MEMORY_GB is 4 GiB', () => {
+    expect(LOW_MEMORY_GB).toBe(4);
   });
 });

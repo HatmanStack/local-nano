@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyFailure,
   classifyLoadFailure,
+  explainLoadFailure,
   isTerminalFailure,
 } from '../src/offscreen/failure.js';
 
@@ -130,5 +131,31 @@ describe('isTerminalFailure', () => {
   it('returns false for transient failures', () => {
     expect(isTerminalFailure(new Error('busy: another generation is in progress'))).toBe(false);
     expect(isTerminalFailure('plain string')).toBe(false);
+  });
+});
+
+describe('explainLoadFailure', () => {
+  it('explains an out-of-memory allocation crash (the dominant real cause)', () => {
+    // V8 names this RangeError; the bare message is "Array buffer allocation
+    // failed". Both the name and the message should route to the memory case.
+    const rangeErr = new RangeError('Array buffer allocation failed');
+    expect(explainLoadFailure(rangeErr).toLowerCase()).toContain('low on memory');
+    expect(explainLoadFailure(new Error('Out of memory')).toLowerCase()).toContain('low on memory');
+  });
+
+  it('explains an interrupted/terminal offscreen document', () => {
+    const msg = explainLoadFailure(new Error('Offscreen document closed: port disconnected'));
+    expect(msg.toLowerCase()).toContain('interrupted');
+  });
+
+  it('explains a weights-download/network failure', () => {
+    const msg = explainLoadFailure(new Error('Failed to fetch'));
+    expect(msg.toLowerCase()).toContain('download');
+  });
+
+  it('falls back to a generic retry message for an unrecognised error', () => {
+    const msg = explainLoadFailure(new Error('something unexpected'));
+    expect(msg.toLowerCase()).toContain('failed to load');
+    expect(msg.toLowerCase()).toContain('smaller model');
   });
 });
