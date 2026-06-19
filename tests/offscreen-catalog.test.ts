@@ -3,7 +3,7 @@ import * as catalogModule from '../src/offscreen/catalog.js';
 import {
   type CatalogEntry,
   DEFAULT_MODEL_ID,
-  defaultModelForCapability,
+  defaultModelForDevice,
   findCatalogEntry,
   isLargerModelEnabled,
   LARGER_MODEL_ENABLED,
@@ -137,28 +137,24 @@ describe('vetted-cell discipline', () => {
   });
 });
 
-describe('defaultModelForCapability', () => {
-  it('returns null for a capable device (keep the gemma default)', () => {
-    expect(
-      defaultModelForCapability('capable', { device: 'webgpu', isFallback: false }),
-    ).toBeNull();
-    // Even a wasm-configured capable device keeps the default (capability wins).
-    expect(defaultModelForCapability('capable', { device: 'wasm', isFallback: false })).toBeNull();
+describe('defaultModelForDevice', () => {
+  it('never returns the gemma default — always a small model that fits', () => {
+    for (const info of [
+      { device: 'webgpu' as const, isFallback: false },
+      { device: 'webgpu' as const, isFallback: true },
+      { device: 'wasm' as const, isFallback: false },
+    ]) {
+      expect(defaultModelForDevice(info)).not.toBe(DEFAULT_MODEL_ID);
+    }
   });
 
-  it('picks the small WebGPU model for a weak real WebGPU adapter', () => {
-    expect(defaultModelForCapability('weak', { device: 'webgpu', isFallback: false })).toBe(
-      QWEN3_06B,
-    );
+  it('picks the small WebGPU model for a real WebGPU adapter', () => {
+    expect(defaultModelForDevice({ device: 'webgpu', isFallback: false })).toBe(QWEN3_06B);
   });
 
-  it('picks the small WASM model for a weak software-fallback or wasm device', () => {
-    expect(defaultModelForCapability('weak', { device: 'webgpu', isFallback: true })).toBe(
-      QWEN25_05B,
-    );
-    expect(defaultModelForCapability('weak', { device: 'wasm', isFallback: false })).toBe(
-      QWEN25_05B,
-    );
+  it('picks the small WASM model for a software-fallback or wasm device', () => {
+    expect(defaultModelForDevice({ device: 'webgpu', isFallback: true })).toBe(QWEN25_05B);
+    expect(defaultModelForDevice({ device: 'wasm', isFallback: false })).toBe(QWEN25_05B);
   });
 
   it('only ever returns ids that resolve to live (non-gated) catalog entries', () => {
@@ -167,9 +163,7 @@ describe('defaultModelForCapability', () => {
       { device: 'webgpu' as const, isFallback: true },
       { device: 'wasm' as const, isFallback: false },
     ]) {
-      const id = defaultModelForCapability('weak', info);
-      expect(id).not.toBeNull();
-      expect(findCatalogEntry(id as string)).not.toBeNull();
+      expect(findCatalogEntry(defaultModelForDevice(info))).not.toBeNull();
     }
   });
 });

@@ -28,7 +28,6 @@
  * accessors.
  */
 
-import type { DeviceCapability } from './capability.js';
 import * as self from './catalog.js';
 import { PRIMARY_LADDER, PRIMARY_MODEL, type Tier } from './ladder.js';
 
@@ -142,7 +141,7 @@ const DEFAULT_ENTRY: InternalEntry = {
   id: PRIMARY_MODEL,
   displayName: 'Gemma 4 E2B Instruct',
   downloadSize: '~1.5 GB',
-  note: 'default; WebGPU, ~5-15 tok/s on Iris Xe',
+  note: 'largest; best answers but needs a strong/discrete GPU — may fail to load on integrated GPUs',
   tiers: PRIMARY_LADDER,
   gated: false,
   isVisible: () => true,
@@ -206,25 +205,26 @@ export function findCatalogEntry(id: string, opts: GateOpts = {}): CatalogEntry 
 }
 
 /**
- * The model id to auto-default to when the user has set NO preference, given the
- * device capability (ADR-P4 + ADR-R9). Returns `null` for a `capable` device,
- * meaning "keep today's default" (the gemma primary ladder). A memory-constrained
- * `weak` device gets a small model that actually fits:
+ * The model id to auto-default to when the user has set NO preference (ADR-P4,
+ * revised 0.4.7). ALWAYS a small model that fits the common case — never the
+ * 2B gemma default. No WebGPU adapter limit reliably predicts whether gemma's
+ * GPU allocations will fit (maxBufferSize is a per-buffer cap, not usable VRAM;
+ * deviceMemory is system RAM), so rather than speculatively load the big model
+ * and hope, we default small and let the user opt UP to gemma in the picker.
  *
  * - real WebGPU adapter → `onnx-community/Qwen3-0.6B-ONNX` (~0.5 GB, webgpu/q4f16,
- *   confirmed loading on the 4 GiB CrOS GPU in docs/models.md), faster than CPU.
+ *   confirmed loading on the dev integrated GPU in docs/models.md), faster than CPU.
  * - WASM / software-fallback adapter → `onnx-community/Qwen2.5-0.5B-Instruct`
  *   (~0.5 GB, wasm/q8), the documented "smallest that answers" CPU pick.
  *
  * An explicit user preference bypasses this (the caller only consults it when no
- * preference is stored), so a deliberate choice of a larger model is honored.
- * Pure: maps a verdict + device facts to a catalog id.
+ * valid preference is stored), so a deliberate choice of gemma is honored. Pure:
+ * maps device facts to a catalog id; never returns null.
  */
-export function defaultModelForCapability(
-  capability: DeviceCapability,
-  info: { device: 'webgpu' | 'wasm'; isFallback: boolean },
-): string | null {
-  if (capability === 'capable') return null;
+export function defaultModelForDevice(info: {
+  device: 'webgpu' | 'wasm';
+  isFallback: boolean;
+}): string {
   if (info.device === 'webgpu' && !info.isFallback) return QWEN3_06B_ENTRY.id;
   return SMALLER_ENTRY.id;
 }

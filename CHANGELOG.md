@@ -5,6 +5,20 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.7] - 2026-06-17
+
+Defaults to a small model that loads on the common case, makes gemma an opt-in choice, and makes any load interruptible. The 0.4.6 RAM check could not catch a device with plenty of system RAM but a small GPU memory budget (16 GB RAM, hardware WebGPU, `maxBufferSize` 4096 MiB) where gemma-4-E2B still dies with `VK_ERROR_OUT_OF_DEVICE_MEMORY`. No WebGPU adapter limit predicts that (`maxBufferSize` is a per-buffer ceiling, not usable VRAM; `deviceMemory` is system RAM), so rather than speculatively load the 2B model and hope, the auto-default is now a small model and gemma is selected explicitly.
+
+### Changed
+
+- **Small model by default; gemma is opt-in.** With no stored preference, a real WebGPU device auto-loads `Qwen3-0.6B` (~0.5 GB, confirmed loading on the dev integrated GPU) and a WASM/software-fallback device auto-loads `Qwen2.5-0.5B`; the ~2B `gemma-4-E2B` is never loaded speculatively. An explicit pick in the settings picker is always honored, and the picker marks the small model as the default and labels gemma as the larger, strong-GPU option. Choosing gemma shows an up-front advisory that it may not fit an integrated GPU.
+- **Dropped the `webgpu/fp16` gemma rung.** The gemma ladder is now `webgpu/q4f16 → webgpu/q8 → wasm/q8`. fp16 was ~2x q8, so on any device where q8 failed for memory it could not succeed either; removing it makes an opt-in gemma that cannot fit fail fast instead of churning.
+
+### Added
+
+- **Stop button on the loading bubble.** Any in-flight model load can be interrupted: Stop force-recreates the offscreen document (freeing the partial GPU allocation) and cancels the walk cleanly — no tier recorded known-bad, no advance, no terminal bubble — returning the panel to idle and unlocking the picker. It stops a model LOAD only; a live generation is still stopped via the action button (ADR-P7).
+- **A model switch no longer deadlocks behind a hung load.** A load that hangs (e.g. an opt-in gemma whose GPU OOM surfaces as an uncaptured device error, never a rejection) previously blocked any switch forever; a switch now supersedes the hung load and proceeds to the chosen model.
+
 ## [0.4.6] - 2026-06-17
 
 Auto-selects a model that fits the device's memory, and turns cryptic load failures into plain-language guidance. On a memory-constrained device (for example a 4 GiB ChromeOS box) the ~2B default model fails to allocate and the offscreen renderer is killed mid-load; the device classifier previously read only the GPU buffer ceiling, missed the low system RAM, and confidently loaded a model that could not fit. System RAM now drives the choice.

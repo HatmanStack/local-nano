@@ -508,10 +508,15 @@ describe('initSession — toggle behavior', () => {
 
   it('resets warmStarted after a full ladder failure so a reopen re-runs ensureWarm', async () => {
     // Reject every tier on the first walk so the panel reaches the terminal
-    // bubble. Persistence records all four tiers known-bad, so the reopen
-    // re-runs the ladder but skips every (known-bad) tier and re-exhausts
-    // immediately, re-rendering the terminal bubble — proving warmStarted was
-    // reset and the cycle is not dead.
+    // bubble. Persistence records all tiers known-bad, so the reopen re-runs the
+    // ladder but skips every (known-bad) tier and re-exhausts immediately,
+    // re-rendering the terminal bubble — proving warmStarted was reset and the
+    // cycle is not dead. Pin gemma explicitly so this exercises the multi-tier
+    // gemma ladder (cold-start with no preference now loads the small model).
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: 'onnx-community/gemma-4-E2B-it-ONNX',
+      idleTimeoutMinutes: 15,
+    };
     warmupSessionMock.mockRejectedValue(new Error('offscreen unavailable'));
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
@@ -520,8 +525,8 @@ describe('initSession — toggle behavior', () => {
       const listener = getToggleListener();
       listener(TOGGLE_MESSAGE);
       await flushMicrotasks(15);
-      // One full ladder walk = PRIMARY_LADDER.length attempts.
-      expect(warmupSessionMock).toHaveBeenCalledTimes(4);
+      // One full ladder walk = PRIMARY_LADDER.length attempts (q4f16, q8, wasm/q8).
+      expect(warmupSessionMock).toHaveBeenCalledTimes(3);
       // After full failure the button is back to idle (not stuck on Loading…).
       expect(deps._actionBtn.disabled).toBe(false);
       const terminalCount = () =>
@@ -535,7 +540,7 @@ describe('initSession — toggle behavior', () => {
       listener(TOGGLE_MESSAGE);
       await flushMicrotasks(15);
       // No additional warmup attempts (every tier is known-bad).
-      expect(warmupSessionMock).toHaveBeenCalledTimes(4);
+      expect(warmupSessionMock).toHaveBeenCalledTimes(3);
       // The reopen re-rendered a terminal bubble (warmStarted was reset).
       expect(terminalCount()).toBe(2);
     } finally {
@@ -586,7 +591,13 @@ describe('initSession — toggle behavior', () => {
   it('embeds the full ladder path with per-tier outcomes, the chosen model, and the UA in the terminal diagnostic', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      // Reject every tier so the whole primary ladder is walked and recorded.
+      // Pin gemma so the diagnostic records the multi-tier gemma walk (cold-start
+      // with no preference now loads the small model). Reject every tier so the
+      // whole gemma ladder is walked and recorded.
+      chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+        modelId: 'onnx-community/gemma-4-E2B-it-ONNX',
+        idleTimeoutMinutes: 15,
+      };
       warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
       const deps = makeDeps();
       initSession(deps);
@@ -602,7 +613,6 @@ describe('initSession — toggle behavior', () => {
       expect(txt).toContain('ladderPath:');
       expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q4f16 -> load-failure');
       expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q8 -> load-failure');
-      expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/fp16 -> load-failure');
       expect(txt).toContain('onnx-community/gemma-4-E2B-it-ONNX/wasm/q8 -> load-failure');
       // jsdom supplies a userAgent; it is included verbatim.
       expect(txt).toContain(`userAgent: ${navigator.userAgent}`);
@@ -780,30 +790,39 @@ describe('initSession — fallback ladder', () => {
   it('recreates the document between every failed rung and never overlaps loads', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      // All tiers fail.
+      // Pin gemma so this exercises the multi-tier gemma ladder. All tiers fail.
+      chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+        modelId: 'onnx-community/gemma-4-E2B-it-ONNX',
+        idleTimeoutMinutes: 15,
+      };
       warmupSessionMock.mockRejectedValue(new Error('crash'));
       const deps = makeDeps();
       initSession(deps);
       getToggleListener()(TOGGLE_MESSAGE);
       await flushMicrotasks();
-      // Four attempts (the whole ladder).
-      expect(warmupSessionMock).toHaveBeenCalledTimes(4);
-      // recreate fires between rungs: 3 times for 4 failed attempts.
-      expect(recreateOffscreenMock).toHaveBeenCalledTimes(3);
+      // Three attempts (the whole ladder: q4f16, q8, wasm/q8).
+      expect(warmupSessionMock).toHaveBeenCalledTimes(3);
+      // recreate fires between rungs: 2 times for 3 failed attempts.
+      expect(recreateOffscreenMock).toHaveBeenCalledTimes(2);
     } finally {
       warnSpy.mockRestore();
     }
   });
 
   it('a subsequent cold start with a persisted known-good skips straight to that tier', async () => {
-    // Seed a known-good of tier 2 (fp16) under the live extension version.
+    // Pin gemma (the known-good record is per-model) and seed a known-good of
+    // tier 1 (webgpu/q8) under the live extension version.
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: 'onnx-community/gemma-4-E2B-it-ONNX',
+      idleTimeoutMinutes: 15,
+    };
     chromeMock.storage.local.store[CAPABILITY_KEY] = {
       schemaVersion: 1,
       extensionVersion: '0.2.4',
       knownGood: {
         modelName: 'onnx-community/gemma-4-E2B-it-ONNX',
         device: 'webgpu',
-        dtype: 'fp16',
+        dtype: 'q8',
       },
       knownBad: [],
       capability: { device: 'webgpu', isFallback: false, maxBufferSize: null },
@@ -815,11 +834,15 @@ describe('initSession — fallback ladder', () => {
     await flushMicrotasks();
     // The first warmup is for the known-good tier, not tier 0.
     expect(warmupSessionMock).toHaveBeenCalledTimes(1);
-    expect((warmupSessionMock.mock.calls[0][0] as { dtype: string }).dtype).toBe('fp16');
+    expect((warmupSessionMock.mock.calls[0][0] as { dtype: string }).dtype).toBe('q8');
   });
 
   it('skips a persisted known-bad tier on a cold-start walk', async () => {
-    // Tier 0 known-bad; no known-good. The walk should start at tier 1.
+    // Pin gemma; tier 0 known-bad, no known-good. The walk should start at tier 1.
+    chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+      modelId: 'onnx-community/gemma-4-E2B-it-ONNX',
+      idleTimeoutMinutes: 15,
+    };
     chromeMock.storage.local.store[CAPABILITY_KEY] = {
       schemaVersion: 1,
       extensionVersion: '0.2.4',
@@ -838,11 +861,10 @@ describe('initSession — fallback ladder', () => {
     expect((warmupSessionMock.mock.calls[0][0] as { dtype: string }).dtype).toBe('q8');
   });
 
-  it('no preference + low-RAM WebGPU device auto-selects the small WebGPU model', async () => {
-    // The reported failure: a real WebGPU adapter with a large buffer ceiling
-    // but only 4 GiB system RAM. classifyCapability now reads deviceMemory, so
-    // this is weak and the no-preference auto-default picks Qwen3-0.6B (fits,
-    // vetted on this GPU class) instead of OOMing on the 2B gemma default.
+  it('no preference on a real WebGPU device auto-selects the small WebGPU model', async () => {
+    // 0.4.7: with no stored preference, a real WebGPU adapter auto-loads
+    // Qwen3-0.6B (fits the common case) rather than the 2B gemma default —
+    // gemma is opt-in, since no adapter limit predicts whether it will fit.
     getGpuInfoMock.mockResolvedValue({
       device: 'webgpu' as const,
       isFallback: false,
@@ -864,11 +886,6 @@ describe('initSession — fallback ladder', () => {
     expect(firstTier.modelName).toBe('onnx-community/Qwen3-0.6B-ONNX');
     expect(firstTier.device).toBe('webgpu');
     expect(firstTier.dtype).toBe('q4f16');
-    // The user is told why a smaller model was chosen.
-    const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
-    expect(texts.some((t) => t.includes('memory-constrained') && t.includes('smaller model'))).toBe(
-      true,
-    );
   });
 
   it('no preference + software-fallback device auto-selects the small WASM model', async () => {
@@ -891,13 +908,16 @@ describe('initSession — fallback ladder', () => {
     expect(firstTier.device).toBe('wasm');
   });
 
-  it('no preference + capable device keeps the gemma default (no downsize note)', async () => {
+  it('no preference on a high-RAM device still auto-selects the small model (gemma is opt-in)', async () => {
+    // Even a roomy device (16 GB) gets the small default: no adapter limit
+    // predicts whether gemma's GPU allocations fit, so we never speculatively
+    // load it. The user opts up to gemma explicitly.
     getGpuInfoMock.mockResolvedValue({
       device: 'webgpu' as const,
       isFallback: false,
       maxBufferSize: 4096 * 1024 * 1024,
       configuredThreshold: null,
-      deviceMemory: 8,
+      deviceMemory: 16,
     });
     warmupSessionMock.mockResolvedValue(undefined);
     const deps = makeDeps();
@@ -905,10 +925,8 @@ describe('initSession — fallback ladder', () => {
     getToggleListener()(TOGGLE_MESSAGE);
     await flushMicrotasks();
     const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
-    expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
+    expect(firstTier.modelName).toBe('onnx-community/Qwen3-0.6B-ONNX');
     expect(firstTier.dtype).toBe('q4f16');
-    const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
-    expect(texts.some((t) => t.includes('memory-constrained'))).toBe(false);
   });
 
   it('an explicit model choice is honored on a weak device (with an advisory)', async () => {
@@ -933,7 +951,101 @@ describe('initSession — fallback ladder', () => {
     const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string };
     expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
     const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
-    expect(texts.some((t) => t.includes('selected model is large'))).toBe(true);
+    expect(texts.some((t) => t.includes('Gemma is large and may fail to load'))).toBe(true);
+  });
+
+  it('shows a Stop button in the loading bubble while a load is in flight', async () => {
+    // A churning load: the warmup never resolves on its own.
+    warmupSessionMock.mockImplementation(() => new Promise<void>(() => undefined));
+    const deps = makeDeps();
+    initSession(deps);
+    getToggleListener()(TOGGLE_MESSAGE);
+    await flushMicrotasks();
+    const loadingBubble = Array.from(deps._messages.children).find((c) =>
+      (c.textContent ?? '').includes('Loading model…'),
+    );
+    expect(loadingBubble).toBeTruthy();
+    // The Stop affordance lives inside the loading bubble.
+    expect(loadingBubble?.querySelector('button[data-stop-load]')).toBeTruthy();
+  });
+
+  it('Stop cancels the in-flight load cleanly without advancing the ladder or recording known-bad', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      // A churning load whose reject the test captures, to model the offscreen
+      // teardown that Stop triggers (recreate -> warmup rejects).
+      let rejectWarm: (err: unknown) => void = () => undefined;
+      warmupSessionMock.mockImplementation(
+        () =>
+          new Promise<void>((_, rej) => {
+            rejectWarm = rej;
+          }),
+      );
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+      const stopBtn = deps._messages.querySelector(
+        'button[data-stop-load]',
+      ) as HTMLButtonElement | null;
+      expect(stopBtn).toBeTruthy();
+
+      // Click Stop: stopLoad sets the abort flag and recreates the document.
+      stopBtn?.click();
+      await flushMicrotasks();
+      expect(recreateOffscreenMock).toHaveBeenCalledTimes(1);
+      // The teardown rejects the in-flight warmup (modelled here).
+      rejectWarm(new Error('the message channel closed before a response was received'));
+      await flushMicrotasks();
+
+      const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      // Neutral stopped note, NOT the terminal failure bubble.
+      expect(texts.some((t) => t.includes('Model load stopped'))).toBe(true);
+      expect(texts.some((t) => t.includes("Couldn't load the model on this device."))).toBe(false);
+      // The walk did NOT advance to a second tier.
+      expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+      // No known-bad recorded — the tier did not fail, the user interrupted it.
+      expect(chromeMock.storage.local.store[CAPABILITY_KEY]).toBeUndefined();
+      // The action button is back to idle, not stuck on Loading.
+      expect(deps._actionBtn.disabled).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('after Stop, reopening the panel runs a fresh load (the user is not locked out)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      let rejectWarm: (err: unknown) => void = () => undefined;
+      warmupSessionMock.mockImplementation(
+        () =>
+          new Promise<void>((_, rej) => {
+            rejectWarm = rej;
+          }),
+      );
+      const deps = makeDeps();
+      initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE);
+      await flushMicrotasks();
+      (deps._messages.querySelector('button[data-stop-load]') as HTMLButtonElement | null)?.click();
+      await flushMicrotasks();
+      rejectWarm(new Error('the message channel closed'));
+      await flushMicrotasks();
+      expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+
+      // A fresh load now succeeds; reopening re-runs ensureWarm (warmStarted reset).
+      warmupSessionMock.mockReset();
+      warmupSessionMock.mockResolvedValue(undefined);
+      getToggleListener()(TOGGLE_MESSAGE); // close
+      getToggleListener()(TOGGLE_MESSAGE); // reopen
+      await flushMicrotasks();
+      expect(warmupSessionMock).toHaveBeenCalled();
+      const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
+      expect(texts.some((t) => t.includes("Couldn't load the model on this device."))).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('flag ON (forced in test): a weak device tries the smaller model first', async () => {
@@ -1010,16 +1122,16 @@ describe('initSession — model preference resolves the chosen-model ladder', ()
     });
   });
 
-  it('with an empty preference store walks the same primary ladder as before', async () => {
+  it('with an empty preference store auto-loads the small WebGPU model (gemma is opt-in)', async () => {
     warmupSessionMock.mockResolvedValue(undefined);
     const deps = makeDeps();
     initSession(deps);
     getToggleListener()(TOGGLE_MESSAGE);
     await flushMicrotasks();
-    // No preference: tier 0 is the primary model at q4f16 (today's behavior).
+    // No preference: the auto-default is the small WebGPU model, not gemma (0.4.7).
     expect(warmupSessionMock).toHaveBeenCalledTimes(1);
     const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
-    expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
+    expect(firstTier.modelName).toBe('onnx-community/Qwen3-0.6B-ONNX');
     expect(firstTier.dtype).toBe('q4f16');
   });
 
@@ -1051,10 +1163,10 @@ describe('initSession — model preference resolves the chosen-model ladder', ()
     initSession(deps);
     getToggleListener()(TOGGLE_MESSAGE);
     await flushMicrotasks();
-    // Unknown id resolves to null -> no-preference path -> primary tier 0.
+    // Unknown id resolves to null -> no-preference path -> small WebGPU default.
     expect(warmupSessionMock).toHaveBeenCalledTimes(1);
     const firstTier = warmupSessionMock.mock.calls[0][0] as { modelName: string; dtype: string };
-    expect(firstTier.modelName).toBe('onnx-community/gemma-4-E2B-it-ONNX');
+    expect(firstTier.modelName).toBe('onnx-community/Qwen3-0.6B-ONNX');
     expect(firstTier.dtype).toBe('q4f16');
   });
 
@@ -1131,8 +1243,9 @@ describe('initSession — network/download failure', () => {
       // attempted tier and the chosen model named.
       const bubble = texts.find((t) => t.includes(networkText)) ?? '';
       expect(bubble).toContain('device: webgpu');
-      expect(bubble).toContain('chosenModel: onnx-community/gemma-4-E2B-it-ONNX');
-      expect(bubble).toContain('onnx-community/gemma-4-E2B-it-ONNX/webgpu/q4f16 -> network');
+      // No preference → the small WebGPU model heads the walk.
+      expect(bubble).toContain('chosenModel: onnx-community/Qwen3-0.6B-ONNX');
+      expect(bubble).toContain('onnx-community/Qwen3-0.6B-ONNX/webgpu/q4f16 -> network');
       // Back to idle.
       expect(deps._actionBtn.disabled).toBe(false);
     } finally {
@@ -1176,15 +1289,19 @@ describe('initSession — network/download failure', () => {
   it('a device-incapability failure still advances the ladder (not the network path)', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      // A non-network load failure walks the full ladder as in Phase 2.
+      // Pin gemma so a non-network failure walks the full multi-tier ladder.
+      chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+        modelId: 'onnx-community/gemma-4-E2B-it-ONNX',
+        idleTimeoutMinutes: 15,
+      };
       warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
       const deps = makeDeps();
       initSession(deps);
       getToggleListener()(TOGGLE_MESSAGE);
       await flushMicrotasks(15);
-      // The whole ladder was walked (4 tiers) and recreates fired between rungs.
-      expect(warmupSessionMock).toHaveBeenCalledTimes(4);
-      expect(recreateOffscreenMock).toHaveBeenCalledTimes(3);
+      // The whole ladder was walked (3 tiers) and recreates fired between rungs.
+      expect(warmupSessionMock).toHaveBeenCalledTimes(3);
+      expect(recreateOffscreenMock).toHaveBeenCalledTimes(2);
       // The terminal device message is shown, not the connection one.
       const texts = Array.from(deps._messages.children).map((c) => c.textContent ?? '');
       expect(texts.some((t) => t.includes("Couldn't load the model on this device."))).toBe(true);
@@ -1336,6 +1453,12 @@ describe('initSession — copy-diagnostic affordance', () => {
       value: { writeText },
     });
     try {
+      // Pin gemma so the diagnostic records the gemma walk (cold-start with no
+      // preference now loads the small model).
+      chromeMock.storage.local.store[MODEL_PREF_KEY] = {
+        modelId: 'onnx-community/gemma-4-E2B-it-ONNX',
+        idleTimeoutMinutes: 15,
+      };
       warmupSessionMock.mockRejectedValue(new Error('VK_ERROR_OUT_OF_DEVICE_MEMORY'));
       const deps = makeDeps();
       initSession(deps);
@@ -2692,18 +2815,19 @@ describe('initSession — popover model list', () => {
     );
   });
 
-  it('marks the default model as the current selection when no preference is stored', async () => {
+  it('marks the auto-default (small) model as the current selection when no preference is stored', async () => {
     const deps = makeDepsWithHeader();
     initSession(deps);
     findGearButton(deps._header).click();
     await flushMicrotasks();
     const popover = findPopover(deps._root);
-    const defaultRow = rowFor(popover, DEFAULT_MODEL_ID);
+    // No preference → the small WebGPU model is the device auto-default (0.4.7),
+    // so it is the marked/checked "default" row, not gemma.
+    const defaultRow = rowFor(popover, 'onnx-community/Qwen3-0.6B-ONNX');
     expect(defaultRow.getAttribute('aria-checked')).toBe('true');
-    // The default row is labeled as the default (ADR-P4).
     expect(defaultRow.textContent).toContain('default');
-    // The other row is not marked.
-    expect(rowFor(popover, QWEN25_05B).getAttribute('aria-checked')).toBe('false');
+    // gemma is the opt-in larger model, not the auto-default.
+    expect(rowFor(popover, DEFAULT_MODEL_ID).getAttribute('aria-checked')).toBe('false');
   });
 
   it('marks the stored preference as the current selection', async () => {
