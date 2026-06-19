@@ -225,6 +225,10 @@ export function defaultModelForDevice(info: {
   device: 'webgpu' | 'wasm';
   isFallback: boolean;
 }): string {
+  // deviceMemory is deliberately NOT an input: the WebGPU pick (Qwen3-0.6B, ~0.5
+  // GB) fits even a memory-constrained WebGPU device, so a low-RAM box still gets
+  // the faster GPU model rather than the slower WASM one. Routing is purely by
+  // execution path (real WebGPU vs WASM/software-fallback).
   if (info.device === 'webgpu' && !info.isFallback) return QWEN3_06B_ENTRY.id;
   return SMALLER_ENTRY.id;
 }

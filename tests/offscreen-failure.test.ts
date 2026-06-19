@@ -143,6 +143,13 @@ describe('explainLoadFailure', () => {
     expect(explainLoadFailure(new Error('Out of memory')).toLowerCase()).toContain('low on memory');
   });
 
+  it('explains a Vulkan/Dawn GPU out-of-device-memory error', () => {
+    const msg = explainLoadFailure(
+      new Error('vkAllocateMemory failed with VK_ERROR_OUT_OF_DEVICE_MEMORY'),
+    );
+    expect(msg.toLowerCase()).toContain('low on memory');
+  });
+
   it('explains an interrupted/terminal offscreen document', () => {
     const msg = explainLoadFailure(new Error('Offscreen document closed: port disconnected'));
     expect(msg.toLowerCase()).toContain('interrupted');

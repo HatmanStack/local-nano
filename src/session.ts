@@ -1410,17 +1410,10 @@ export function initSession(deps: SessionDeps): SessionController {
       // walk. Surfaced in the diagnostic so a bug report names the model even
       // when the walk crashes before recording an outcome.
       chosenModel = ladder.length > 0 ? ladder[0].modelName : null;
-      // No auto-default note: a no-preference load silently picks the small model
-      // (the picker shows what loaded and labels gemma as the larger opt-in). But
-      // when the user EXPLICITLY chose gemma, warn it is large and may not fit an
-      // integrated GPU before the long download begins (we cannot detect VRAM
-      // budget up front, so this fires on every explicit gemma pick).
-      if (!autoDefaulted && entry?.id === DEFAULT_MODEL_ID) {
-        addMessage(
-          'system',
-          'Heads up: Gemma is large and may fail to load on integrated GPUs. If it does, Stop the load and pick a smaller model in settings.',
-        );
-      }
+      // (No auto-default note: a no-preference load silently picks the small
+      // model — the picker shows what loaded and labels gemma as the larger
+      // opt-in. The explicit-gemma advisory is emitted below, once we know
+      // whether gemma already has a proven-good tier on this device.)
 
       // Drive the pure ladder reducer (ADR-R1/R6). On cold start, skip straight
       // to the persisted known-good tier (or the first non-known-bad tier); on a
@@ -1445,6 +1438,18 @@ export function initSession(deps: SessionDeps): SessionController {
         !entry.tiers.some((t) => tierKey(t) === knownGoodKey)
           ? null
           : knownGoodKey;
+
+      // Explicit-gemma advisory: gemma is large and may not fit an integrated
+      // GPU (we cannot detect VRAM budget up front). Only warn while gemma has
+      // NOT yet proven it loads on this device — once a known-good gemma tier
+      // exists (effectiveKnownGoodKey !== null), it works here, so the warning
+      // would be spurious noise on every session.
+      if (!autoDefaulted && entry?.id === DEFAULT_MODEL_ID && effectiveKnownGoodKey === null) {
+        addMessage(
+          'system',
+          'Heads up: Gemma is large and may fail to load on integrated GPUs. If it does, Stop the load and pick a smaller model in settings.',
+        );
+      }
 
       let attemptedIndex = firstTierIndex(ladder, effectiveKnownGoodKey, knownBadKeys);
       let lastError: unknown = null;
@@ -1624,6 +1629,13 @@ export function initSession(deps: SessionDeps): SessionController {
       // deadlock this switch forever. Mark it superseded and recreate to settle
       // it, then await so two loads never overlap (constraint 1 / ADR-P6). The
       // superseded warm cancels silently; this switch renders its own hint.
+      //
+      // Trade-off: this recreate plus the unconditional recreate below (and a
+      // possible inter-rung recreate inside the canceled walk) can fire two-to-
+      // three recreates in tight succession on the switch path. They are
+      // idempotent (close + create), so this is correctness-safe; skipping the
+      // inter-rung recreate when warmAbort is set would be a latency optimization
+      // only, not a fix, so it is intentionally left simple.
       if (warmInFlight) {
         warmAbort = 'supersede';
         try {

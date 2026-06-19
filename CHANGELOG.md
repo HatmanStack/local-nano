@@ -11,7 +11,7 @@ Defaults to a small model that loads on the common case, makes gemma an opt-in c
 
 ### Changed
 
-- **Small model by default; gemma is opt-in.** With no stored preference, a real WebGPU device auto-loads `Qwen3-0.6B` (~0.5 GB, confirmed loading on the dev integrated GPU) and a WASM/software-fallback device auto-loads `Qwen2.5-0.5B`; the ~2B `gemma-4-E2B` is never loaded speculatively. An explicit pick in the settings picker is always honored, and the picker marks the small model as the default and labels gemma as the larger, strong-GPU option. Choosing gemma shows an up-front advisory that it may not fit an integrated GPU.
+- **Small model by default; gemma is opt-in.** With no stored preference, a real WebGPU device auto-loads `Qwen3-0.6B` (~0.5 GB, confirmed loading on the dev integrated GPU) and a WASM/software-fallback device auto-loads `Qwen2.5-0.5B`; the ~2B `gemma-4-E2B` is never loaded speculatively. An explicit pick in the settings picker is always honored, and the picker marks the small model as the default and labels gemma as the larger, strong-GPU option. Choosing gemma shows an up-front advisory that it may not fit an integrated GPU — shown only until gemma has loaded successfully once on this device, so a working setup is not nagged.
 - **Dropped the `webgpu/fp16` gemma rung.** The gemma ladder is now `webgpu/q4f16 → webgpu/q8 → wasm/q8`. fp16 was ~2x q8, so on any device where q8 failed for memory it could not succeed either; removing it makes an opt-in gemma that cannot fit fail fast instead of churning.
 
 ### Added

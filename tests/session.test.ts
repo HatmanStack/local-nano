@@ -1881,6 +1881,44 @@ describe('initSession — serialized reloadModel primitive', () => {
     expect(recreateOffscreenMock.mock.calls.length).toBe(afterFirst + 1);
   });
 
+  it('supersedes a hung in-flight load instead of deadlocking the switch', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      // The first warm hangs (models a load whose GPU OOM surfaces as an
+      // uncaptured device error and never rejects); later warms resolve.
+      let rejectFirst: (err: unknown) => void = () => undefined;
+      let firstCall = true;
+      warmupSessionMock.mockImplementation(() => {
+        if (firstCall) {
+          firstCall = false;
+          return new Promise<void>((_, rej) => {
+            rejectFirst = rej;
+          });
+        }
+        return Promise.resolve();
+      });
+      const deps = makeDeps();
+      const controller = initSession(deps);
+      getToggleListener()(TOGGLE_MESSAGE); // panel open → first warm (hangs)
+      await flushMicrotasks();
+      expect(warmupSessionMock).toHaveBeenCalledTimes(1);
+
+      // Switch models while the first load is hung. reloadModel must not block
+      // forever on the hung warm.
+      const switchPromise = controller.reloadModel();
+      await flushMicrotasks();
+      // reloadModel marked it superseded and recreated; model the teardown
+      // rejecting the hung warmup so the canceled walk can settle.
+      rejectFirst(new Error('the message channel closed'));
+      await switchPromise; // resolves → the switch did NOT deadlock
+      await flushMicrotasks();
+      // A fresh warm ran after the superseded one (the switch completed).
+      expect(warmupSessionMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('reloadModel({ resetCapability: true }) clears the capability record before recreating', async () => {
     // Seed a record so the reset has something to clear.
     chromeMock.storage.local.store[CAPABILITY_KEY] = {

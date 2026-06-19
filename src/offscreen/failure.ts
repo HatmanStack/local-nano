@@ -131,9 +131,13 @@ export function classifyLoadFailure(error: unknown): LoadFailureClass {
  * "Array buffer allocation failed", so we fold the name in too.
  */
 const MEMORY_SIGNALS: readonly string[] = [
-  'array buffer allocation failed',
-  'allocation failed',
+  // Catches V8's "Array buffer allocation failed" and a GPU "buffer allocation
+  // failed" — both memory. Deliberately NOT the bare "allocation failed", which
+  // would also match unrelated cases like "texture allocation failed".
+  'buffer allocation failed',
   'out of memory',
+  // Dawn/Vulkan GPU out-of-device-memory (the integrated-GPU budget OOM).
+  'out_of_device_memory',
   'rangeerror',
   'quotaexceeded',
 ];
