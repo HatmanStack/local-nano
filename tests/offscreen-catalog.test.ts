@@ -3,6 +3,7 @@ import * as catalogModule from '../src/offscreen/catalog.js';
 import {
   type CatalogEntry,
   DEFAULT_MODEL_ID,
+  defaultModelForDevice,
   findCatalogEntry,
   isLargerModelEnabled,
   LARGER_MODEL_ENABLED,
@@ -132,6 +133,37 @@ describe('vetted-cell discipline', () => {
       expect(entry.note.length).toBeGreaterThan(0);
       expect(Array.isArray(entry.tiers)).toBe(true);
       expect(entry.tiers.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('defaultModelForDevice', () => {
+  it('never returns the gemma default — always a small model that fits', () => {
+    for (const info of [
+      { device: 'webgpu' as const, isFallback: false },
+      { device: 'webgpu' as const, isFallback: true },
+      { device: 'wasm' as const, isFallback: false },
+    ]) {
+      expect(defaultModelForDevice(info)).not.toBe(DEFAULT_MODEL_ID);
+    }
+  });
+
+  it('picks the small WebGPU model for a real WebGPU adapter', () => {
+    expect(defaultModelForDevice({ device: 'webgpu', isFallback: false })).toBe(QWEN3_06B);
+  });
+
+  it('picks the small WASM model for a software-fallback or wasm device', () => {
+    expect(defaultModelForDevice({ device: 'webgpu', isFallback: true })).toBe(QWEN25_05B);
+    expect(defaultModelForDevice({ device: 'wasm', isFallback: false })).toBe(QWEN25_05B);
+  });
+
+  it('only ever returns ids that resolve to live (non-gated) catalog entries', () => {
+    for (const info of [
+      { device: 'webgpu' as const, isFallback: false },
+      { device: 'webgpu' as const, isFallback: true },
+      { device: 'wasm' as const, isFallback: false },
+    ]) {
+      expect(findCatalogEntry(defaultModelForDevice(info))).not.toBeNull();
     }
   });
 });

@@ -36,7 +36,6 @@ describe('PRIMARY_LADDER', () => {
     expect(PRIMARY_LADDER).toEqual([
       { modelName: PRIMARY_MODEL, device: 'webgpu', dtype: 'q4f16' },
       { modelName: PRIMARY_MODEL, device: 'webgpu', dtype: 'q8' },
-      { modelName: PRIMARY_MODEL, device: 'webgpu', dtype: 'fp16' },
       { modelName: PRIMARY_MODEL, device: 'wasm', dtype: 'q8' },
     ]);
   });

@@ -5,6 +5,34 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.7] - 2026-06-17
+
+Defaults to a small model that loads on the common case, makes gemma an opt-in choice, and makes any load interruptible. The 0.4.6 RAM check could not catch a device with plenty of system RAM but a small GPU memory budget (16 GB RAM, hardware WebGPU, `maxBufferSize` 4096 MiB) where gemma-4-E2B still dies with `VK_ERROR_OUT_OF_DEVICE_MEMORY`. No WebGPU adapter limit predicts that (`maxBufferSize` is a per-buffer ceiling, not usable VRAM; `deviceMemory` is system RAM), so rather than speculatively load the 2B model and hope, the auto-default is now a small model and gemma is selected explicitly.
+
+### Changed
+
+- **Small model by default; gemma is opt-in.** With no stored preference, a real WebGPU device auto-loads `Qwen3-0.6B` (~0.5 GB, confirmed loading on the dev integrated GPU) and a WASM/software-fallback device auto-loads `Qwen2.5-0.5B`; the ~2B `gemma-4-E2B` is never loaded speculatively. An explicit pick in the settings picker is always honored, and the picker marks the small model as the default and labels gemma as the larger, strong-GPU option. Choosing gemma shows an up-front advisory that it may not fit an integrated GPU — shown only until gemma has loaded successfully once on this device, so a working setup is not nagged.
+- **Dropped the `webgpu/fp16` gemma rung.** The gemma ladder is now `webgpu/q4f16 → webgpu/q8 → wasm/q8`. fp16 was ~2x q8, so on any device where q8 failed for memory it could not succeed either; removing it makes an opt-in gemma that cannot fit fail fast instead of churning.
+
+### Added
+
+- **Stop button on the loading bubble.** Any in-flight model load can be interrupted: Stop force-recreates the offscreen document (freeing the partial GPU allocation) and cancels the walk cleanly — no tier recorded known-bad, no advance, no terminal bubble — returning the panel to idle and unlocking the picker. It stops a model LOAD only; a live generation is still stopped via the action button (ADR-P7).
+- **A model switch no longer deadlocks behind a hung load.** A load that hangs (e.g. an opt-in gemma whose GPU OOM surfaces as an uncaptured device error, never a rejection) previously blocked any switch forever; a switch now supersedes the hung load and proceeds to the chosen model.
+
+## [0.4.6] - 2026-06-17
+
+Auto-selects a model that fits the device's memory, and turns cryptic load failures into plain-language guidance. On a memory-constrained device (for example a 4 GiB ChromeOS box) the ~2B default model fails to allocate and the offscreen renderer is killed mid-load; the device classifier previously read only the GPU buffer ceiling, missed the low system RAM, and confidently loaded a model that could not fit. System RAM now drives the choice.
+
+### Fixed
+
+- **Capability classification reads system RAM.** `classifyCapability` now factors in `navigator.deviceMemory`: a device with 4 GiB or less RAM is classified weak even when its WebGPU buffer ceiling is large (the reported case showed a 4096 MiB buffer yet still OOM'd). System memory, not GPU buffer size, is what decides whether a multi-GB model can be allocated. The GPU snapshot and the copyable diagnostic carry a new `deviceMemory` line.
+- **The diagnostic is no longer blank after a failure.** The load error is captured on every tier failure, not only at terminal exhaustion, so the diagnostic always reports the real `errorClass`/`errorMessage` instead of `none` when copied during or after a failed walk.
+
+### Added
+
+- **Memory-aware default model.** With no explicit model preference, a weak device auto-loads a model that fits: `Qwen3-0.6B` on a real WebGPU adapter (~0.5 GB, confirmed loading on the 4 GiB ChromeOS GPU), or `Qwen2.5-0.5B` on WASM/CPU, instead of the ~2B `gemma-4-E2B` default. An explicit pick in the settings picker is always honored, and capable devices keep the gemma default. A one-line note explains the downsize and points to settings; an explicit large pick on a constrained device gets an up-front advisory.
+- **Plain-language load failures.** A failed load now shows the likely cause and a concrete action: "Your device looks low on memory … pick a smaller model in settings" for an allocation/OOM crash, an interrupted-loader message for a killed offscreen document, or a connection message for a download failure. The raw diagnostic is still available to copy.
+
 ## [0.4.5] - 2026-06-08
 
 Reverts the reactive device-loss machinery added in 0.4.2 and 0.4.3 back to the simpler, proven 0.4.1 load and stream path, and arms idle resource release at model load. (0.4.4 was an internal rollback build and was never published.)

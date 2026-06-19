@@ -206,6 +206,7 @@ export async function getGpuInfo(): Promise<GpuInfoSnapshot> {
     isFallback: false,
     maxBufferSize: null,
     configuredThreshold: null,
+    deviceMemory: null,
   };
   try {
     await ensureViaServiceWorker();
@@ -227,6 +228,8 @@ export async function getGpuInfo(): Promise<GpuInfoSnapshot> {
       isFallback: reply.isFallback,
       maxBufferSize: reply.maxBufferSize,
       configuredThreshold: reply.configuredThreshold,
+      // Absent on the wire (older offscreen) is read as unknown.
+      deviceMemory: reply.deviceMemory ?? null,
     };
   } catch (err) {
     console.warn('[local-nano] getGpuInfo failed; using conservative defaults:', err);

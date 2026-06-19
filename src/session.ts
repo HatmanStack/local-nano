@@ -19,6 +19,7 @@ import {
 import {
   type CatalogEntry,
   DEFAULT_MODEL_ID,
+  defaultModelForDevice,
   findCatalogEntry,
   isLargerModelEnabled,
   listCatalog,
@@ -34,7 +35,7 @@ import {
   warmupSession,
 } from './offscreen/client.js';
 import { buildDiagnostic, errorInfo, type LadderPathEntry } from './offscreen/diagnostic.js';
-import { classifyFailure, classifyLoadFailure } from './offscreen/failure.js';
+import { classifyFailure, classifyLoadFailure, explainLoadFailure } from './offscreen/failure.js';
 import {
   assembleLadderForModel,
   firstTierIndex,
@@ -887,6 +888,14 @@ export function initSession(deps: SessionDeps): SessionController {
   // in-flight panel-open warm before tearing the document down, so two loads
   // never overlap (constraint 1 / ADR-P6).
   let warmInFlight: Promise<void> | null = null;
+  // Set when an in-flight warm must be cancelled. `'stop'` = the user clicked
+  // Stop on the loading bubble (show a "stopped" note); `'supersede'` = a model
+  // switch is replacing a hung load (silent — the switch renders its own hint).
+  // The in-flight `runWarm` reads it after each interruptible await and, when
+  // set, ends the walk as a clean cancel (no known-bad, no advance, no terminal
+  // bubble). `runWarm` clears it at the top of every walk so a leftover abort
+  // can never cancel the next load.
+  let warmAbort: 'stop' | 'supersede' | null = null;
   // Captured during the ensureWarm preflight so the failure path can feed the
   // diagnostic the same adapter snapshot the load saw. Conservative default
   // (ADR-R11 / Task 1.4) until the preflight resolves.
@@ -895,6 +904,7 @@ export function initSession(deps: SessionDeps): SessionController {
     isFallback: false,
     maxBufferSize: null,
     configuredThreshold: null,
+    deviceMemory: null,
   };
   // The tier last attempted and the ordered list of tiers tried this walk with
   // their per-tier outcomes (ADR-R1: the panel owns ladder state). The
@@ -959,6 +969,7 @@ export function initSession(deps: SessionDeps): SessionController {
       device: lastGpuInfo.device,
       isFallback: lastGpuInfo.isFallback,
       maxBufferSize: lastGpuInfo.maxBufferSize,
+      deviceMemory: lastGpuInfo.deviceMemory,
       chosenModel,
       // The last tier attempted (null only if the walk never started a tier,
       // e.g. a recreate failure before the first load, or no walk has run).
@@ -1001,7 +1012,9 @@ export function initSession(deps: SessionDeps): SessionController {
       'system',
       [
         "Couldn't load the model on this device.",
-        'Try Retry below; if it keeps failing, set "device": "wasm" in .env.json for a slower CPU fallback.',
+        // Translate the raw failure into a likely cause + concrete action (the
+        // raw error stays in the diagnostic block below for bug reports).
+        explainLoadFailure(err),
         ...(pathLine ? [pathLine] : []),
         '',
         diagnostic,
@@ -1259,6 +1272,9 @@ export function initSession(deps: SessionDeps): SessionController {
 
   async function runWarm(): Promise<void> {
     warmStarted = true;
+    // Clear any abort left set by a prior Stop/supersede so it cannot cancel
+    // this walk before it is re-requested.
+    warmAbort = null;
     setLoadingState(actionBtn, i);
     // A live elapsed counter while the model loads. We deliberately do
     // NOT auto-fail on a timer: the first run downloads multi-GB weights
@@ -1271,6 +1287,25 @@ export function initSession(deps: SessionDeps): SessionController {
     // the user sees one continuous proof-of-life and never learns about tier
     // internals. A fully exhausted ladder surfaces the terminal bubble below.
     const warmHint = addMessage('system', 'Loading model… 0s');
+    // Give the loading bubble a text span we rewrite each tick, plus a Stop
+    // button so the user can abort a churning or slow load and free the model
+    // picker (ADR-P7: this stops a model LOAD only — a live generation is
+    // stopped via the action button). renderHint writes the span's text, not the
+    // bubble's textContent, so the per-second update never clobbers the button.
+    warmHint.textContent = '';
+    const hintText = window.document.createElement('span');
+    warmHint.appendChild(hintText);
+    const stopBtn = window.document.createElement('button');
+    stopBtn.type = 'button';
+    stopBtn.textContent = 'Stop';
+    stopBtn.setAttribute('data-stop-load', '');
+    stopBtn.style.cssText = `display: block; margin-top: 6px; ${BUTTON_CSS}`;
+    stopBtn.addEventListener('click', () => {
+      stopBtn.disabled = true;
+      stopBtn.textContent = 'Stopping…';
+      void stopLoad();
+    });
+    warmHint.appendChild(stopBtn);
     const startedAt = Date.now();
     // Phased first-run progress (ADR-R10). `progressPhase` tracks where we are:
     // - 'none': no download frame seen yet; the elapsed counter is the hint
@@ -1291,12 +1326,12 @@ export function initSession(deps: SessionDeps): SessionController {
     };
     const renderHint = () => {
       if (progressPhase === 'downloading') {
-        warmHint.textContent = formatProgressText(progress.percent);
+        hintText.textContent = formatProgressText(progress.percent);
       } else if (progressPhase === 'gpu-loading') {
         const secs = Math.round((Date.now() - startedAt) / 1000);
-        warmHint.textContent = `${GPU_LOADING_TEXT} ${secs}s`;
+        hintText.textContent = `${GPU_LOADING_TEXT} ${secs}s`;
       } else {
-        warmHint.textContent = elapsedHint();
+        hintText.textContent = elapsedHint();
       }
     };
     renderHint();
@@ -1351,12 +1386,21 @@ export function initSession(deps: SessionDeps): SessionController {
       // resolve.
       const pref = await loadModelPref();
       const prefId = resolveModelId(pref);
+      // Honor an explicit, still-valid stored preference. Otherwise auto-default
+      // to a small model that fits the common case (0.4.7): we never
+      // speculatively load the 2B gemma default, because no adapter limit
+      // predicts whether its GPU allocations will fit. gemma loads only when the
+      // user picks it.
+      const prefEntry =
+        prefId !== null
+          ? findCatalogEntry(prefId, { largerEnabled: isLargerModelEnabled() })
+          : null;
+      const autoDefaulted = prefEntry === null;
       const entry =
-        prefId === null
-          ? null
-          : findCatalogEntry(prefId, {
-              largerEnabled: isLargerModelEnabled(),
-            });
+        prefEntry ??
+        findCatalogEntry(defaultModelForDevice(lastGpuInfo), {
+          largerEnabled: isLargerModelEnabled(),
+        });
       const ladder = assembleLadderForModel({
         entry,
         capability,
@@ -1364,9 +1408,12 @@ export function initSession(deps: SessionDeps): SessionController {
       });
       // The model the ladder selected: the model of the first tier it will
       // walk. Surfaced in the diagnostic so a bug report names the model even
-      // when the walk crashes before recording an outcome. With the flag off
-      // this is always the primary model.
+      // when the walk crashes before recording an outcome.
       chosenModel = ladder.length > 0 ? ladder[0].modelName : null;
+      // (No auto-default note: a no-preference load silently picks the small
+      // model — the picker shows what loaded and labels gemma as the larger
+      // opt-in. The explicit-gemma advisory is emitted below, once we know
+      // whether gemma already has a proven-good tier on this device.)
 
       // Drive the pure ladder reducer (ADR-R1/R6). On cold start, skip straight
       // to the persisted known-good tier (or the first non-known-bad tier); on a
@@ -1392,9 +1439,25 @@ export function initSession(deps: SessionDeps): SessionController {
           ? null
           : knownGoodKey;
 
+      // Explicit-gemma advisory: gemma is large and may not fit an integrated
+      // GPU (we cannot detect VRAM budget up front). Only warn while gemma has
+      // NOT yet proven it loads on this device — once a known-good gemma tier
+      // exists (effectiveKnownGoodKey !== null), it works here, so the warning
+      // would be spurious noise on every session.
+      if (!autoDefaulted && entry?.id === DEFAULT_MODEL_ID && effectiveKnownGoodKey === null) {
+        addMessage(
+          'system',
+          'Heads up: Gemma is large and may fail to load on integrated GPUs. If it does, Stop the load and pick a smaller model in settings.',
+        );
+      }
+
       let attemptedIndex = firstTierIndex(ladder, effectiveKnownGoodKey, knownBadKeys);
       let lastError: unknown = null;
       let loaded = false;
+      // Set when the user clicked Stop mid-walk (stopLoad recreated the document,
+      // rejecting the in-flight warmup). A cancel is NOT a tier failure: the walk
+      // ends without recording known-bad, advancing, or showing a terminal bubble.
+      let canceled = false;
       // Set when a tier's failure was a weights-download/network error
       // (constraint 2 + ADR-R10): the device is capable, only the fetch failed,
       // so we show a distinct retryable connection message instead of advancing
@@ -1411,7 +1474,18 @@ export function initSession(deps: SessionDeps): SessionController {
           loaded = true;
           break;
         } catch (err) {
+          if (warmAbort) {
+            // Stop or a superseding switch recreated the document, which rejected
+            // this warmup. Clean cancel — the tier did not fail, it was
+            // interrupted, so do not record known-bad or advance.
+            canceled = true;
+            break;
+          }
           lastError = err;
+          // Record immediately so the always-available Copy diagnostic carries
+          // the real error even if it is copied mid-walk (the cause of the prior
+          // `errorMessage: none` reports — the error was only stored at terminal).
+          lastWarmError = err;
           const loadClass = classifyLoadFailure(err);
           if (loadClass === 'network') {
             // The device is fine; the download failed. Do NOT record known-bad,
@@ -1441,11 +1515,27 @@ export function initSession(deps: SessionDeps): SessionController {
           // attempt so the crashed/poisoned document never blocks it and two
           // loads never overlap (ADR-R3/R4). A recreate failure ends the walk.
           await recreateOffscreen();
+          // A Stop/supersede during the inter-rung recreate also cancels
+          // cleanly, before the next tier is attempted.
+          if (warmAbort) {
+            canceled = true;
+            break;
+          }
           attemptedIndex = ladder.indexOf(action.tier);
         }
       }
 
-      if (loaded) {
+      if (canceled) {
+        // Stop or supersede: drop the loading bubble, leave the model not-ready,
+        // and reset warmStarted so a later toggle/Load can retry. warmInFlight
+        // clears when this walk settles, re-enabling the picker. Only an explicit
+        // Stop shows a note; a superseding switch renders its own loading hint.
+        if (warmHint.parentNode) warmHint.remove();
+        warmStarted = false;
+        if (warmAbort === 'stop') {
+          addMessage('system', 'Model load stopped. Open settings to pick a model and load again.');
+        }
+      } else if (loaded) {
         modelReady = true;
         // Arm the idle-release window on LOAD, not just on generation. The panel
         // auto-warms on open, so a user who loads the model and walks away
@@ -1533,15 +1623,30 @@ export function initSession(deps: SessionDeps): SessionController {
     if (activeAbort) return Promise.resolve();
     const resetCapability = opts?.resetCapability ?? false;
     reWarmInFlight = (async () => {
-      // Serialize against an in-flight panel-open/proactive warm: wait for it to
-      // settle before tearing the document down, or the recreate below would
-      // overlap a walk in progress (two concurrent loads, the v0.2.0 OOM). The
-      // in-flight warm renders its own failure UI, so swallow its rejection here.
+      // Cancel any in-flight warm rather than blocking on it. A load that hangs
+      // (e.g. opt-in gemma on an integrated GPU: the GPU OOM surfaces as an
+      // uncaptured device error, never a promise rejection) would otherwise
+      // deadlock this switch forever. Mark it superseded and recreate to settle
+      // it, then await so two loads never overlap (constraint 1 / ADR-P6). The
+      // superseded warm cancels silently; this switch renders its own hint.
+      //
+      // Trade-off: this recreate plus the unconditional recreate below (and a
+      // possible inter-rung recreate inside the canceled walk) can fire two-to-
+      // three recreates in tight succession on the switch path. They are
+      // idempotent (close + create), so this is correctness-safe; skipping the
+      // inter-rung recreate when warmAbort is set would be a latency optimization
+      // only, not a fix, so it is intentionally left simple.
       if (warmInFlight) {
+        warmAbort = 'supersede';
+        try {
+          await recreateOffscreen();
+        } catch {
+          // A fresh document is ensured below; ignore.
+        }
         try {
           await warmInFlight;
         } catch {
-          // In-flight warm failed and surfaced its own UI; proceed to re-warm.
+          // In-flight warm failed/canceled and surfaced its own UI; proceed.
         }
       }
       // Reset so ensureWarm runs a true re-walk (not a no-op) and the model is
@@ -1555,6 +1660,29 @@ export function initSession(deps: SessionDeps): SessionController {
       reWarmInFlight = null;
     });
     return reWarmInFlight;
+  }
+
+  /**
+   * Stop an in-flight model LOAD (the user clicked Stop on the loading bubble).
+   * Marks the abort `'stop'`, then force-recreates the offscreen document — which
+   * tears down the document hosting the hung/churning `LanguageModel.create()`
+   * (freeing its partial GPU allocation) and rejects the panel's pending warmup,
+   * unsticking `runWarm`. Because the flag is set first, `runWarm` ends the walk
+   * as a clean cancel (with a "stopped" note) instead of marching to the next
+   * tier. When the walk settles, `warmInFlight` clears, so the model picker
+   * unlocks and the user can choose a smaller model. NEVER touches a live
+   * generation (ADR-P7); a no-op when nothing is loading.
+   */
+  async function stopLoad(): Promise<void> {
+    if (activeAbort) return; // a generation is streaming, not loading — ADR-P7
+    if (!warmInFlight && !reWarmInFlight) return; // nothing is loading
+    warmAbort = 'stop';
+    try {
+      await recreateOffscreen();
+    } catch {
+      // A crashed/absent document can make the recreate reject; the next load
+      // ensures a fresh one. The abort flag still ends the current walk.
+    }
   }
 
   // ---- Always-available copy-diagnostic affordance (ADR-R11, Task 5.3) ----
@@ -1615,7 +1743,9 @@ export function initSession(deps: SessionDeps): SessionController {
     const name = window.document.createElement('div');
     name.style.cssText = 'font-weight: 600;';
     name.textContent =
-      entry.id === DEFAULT_MODEL_ID ? `${entry.displayName} (default)` : entry.displayName;
+      entry.id === defaultModelForDevice(lastGpuInfo)
+        ? `${entry.displayName} (default)`
+        : entry.displayName;
 
     const meta = window.document.createElement('div');
     meta.style.cssText = 'color: #aaa; font-size: 11px; margin-top: 2px;';
@@ -1817,7 +1947,7 @@ export function initSession(deps: SessionDeps): SessionController {
         largerEnabled: isLargerModelEnabled(),
       }) !== null
         ? storedId
-        : DEFAULT_MODEL_ID;
+        : defaultModelForDevice(lastGpuInfo);
     currentModelId = resolved;
     pendingModelId = resolved;
     // Use the loaded value directly: `loadModelPref` already returns the default

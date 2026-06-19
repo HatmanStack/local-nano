@@ -141,7 +141,7 @@ const DEFAULT_ENTRY: InternalEntry = {
   id: PRIMARY_MODEL,
   displayName: 'Gemma 4 E2B Instruct',
   downloadSize: '~1.5 GB',
-  note: 'default; WebGPU, ~5-15 tok/s on Iris Xe',
+  note: 'largest; best answers but needs a strong/discrete GPU — may fail to load on integrated GPUs',
   tiers: PRIMARY_LADDER,
   gated: false,
   isVisible: () => true,
@@ -202,4 +202,33 @@ export function listCatalog(opts: GateOpts = {}): CatalogEntry[] {
  */
 export function findCatalogEntry(id: string, opts: GateOpts = {}): CatalogEntry | null {
   return listCatalog(opts).find((e) => e.id === id) ?? null;
+}
+
+/**
+ * The model id to auto-default to when the user has set NO preference (ADR-P4,
+ * revised 0.4.7). ALWAYS a small model that fits the common case — never the
+ * 2B gemma default. No WebGPU adapter limit reliably predicts whether gemma's
+ * GPU allocations will fit (maxBufferSize is a per-buffer cap, not usable VRAM;
+ * deviceMemory is system RAM), so rather than speculatively load the big model
+ * and hope, we default small and let the user opt UP to gemma in the picker.
+ *
+ * - real WebGPU adapter → `onnx-community/Qwen3-0.6B-ONNX` (~0.5 GB, webgpu/q4f16,
+ *   confirmed loading on the dev integrated GPU in docs/models.md), faster than CPU.
+ * - WASM / software-fallback adapter → `onnx-community/Qwen2.5-0.5B-Instruct`
+ *   (~0.5 GB, wasm/q8), the documented "smallest that answers" CPU pick.
+ *
+ * An explicit user preference bypasses this (the caller only consults it when no
+ * valid preference is stored), so a deliberate choice of gemma is honored. Pure:
+ * maps device facts to a catalog id; never returns null.
+ */
+export function defaultModelForDevice(info: {
+  device: 'webgpu' | 'wasm';
+  isFallback: boolean;
+}): string {
+  // deviceMemory is deliberately NOT an input: the WebGPU pick (Qwen3-0.6B, ~0.5
+  // GB) fits even a memory-constrained WebGPU device, so a low-RAM box still gets
+  // the faster GPU model rather than the slower WASM one. Routing is purely by
+  // execution path (real WebGPU vs WASM/software-fallback).
+  if (info.device === 'webgpu' && !info.isFallback) return QWEN3_06B_ENTRY.id;
+  return SMALLER_ENTRY.id;
 }

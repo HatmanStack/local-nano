@@ -39,10 +39,16 @@ export const PRIMARY_MODEL = 'onnx-community/gemma-4-E2B-it-ONNX';
  * concat so Phase 3 can append the smaller-model ladder without rewriting this
  * module: `[...primaryLadder, ...optionalSmallerLadder]`.
  */
+// `webgpu/fp16` was REMOVED from between webgpu/q8 and wasm/q8. fp16 is ~2x q8
+// for this model, so on any device where q8 fails for memory it cannot succeed
+// either — it only downloads/allocates multi-GB weights that never fit and
+// churns, starving the wasm last resort. WebGPU implements GatherBlockQuantized
+// (docs/models.md), so fp16 carried no op-compat justification here. gemma is
+// now an opt-in pick (0.4.7); when it IS chosen and can't fit, this fails fast
+// to wasm or the terminal bubble instead of hanging.
 const primaryLadder: Tier[] = [
   { modelName: PRIMARY_MODEL, device: 'webgpu', dtype: 'q4f16' },
   { modelName: PRIMARY_MODEL, device: 'webgpu', dtype: 'q8' },
-  { modelName: PRIMARY_MODEL, device: 'webgpu', dtype: 'fp16' },
   { modelName: PRIMARY_MODEL, device: 'wasm', dtype: 'q8' },
 ];
 
