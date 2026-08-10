@@ -16,11 +16,11 @@
     "lint:ci": "biome check ."
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.5",
-    "@types/chrome": "^0.2.2",
+    "@biomejs/biome": "^2.5.7",
+    "@types/chrome": "^0.2.5",
     "@vitest/coverage-v8": "^4.1.10",
     "esbuild": "^0.28.1",
-    "jsdom": "^29.1.1",
+    "jsdom": "^30.0.1",
     "onnxruntime-web": "1.27.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.8"
