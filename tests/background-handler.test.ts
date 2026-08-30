@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CONTENT_SCRIPT_FILE,
   handleActionClick,
   handleCommand,
+  isNoReceiverError,
   refreshActionTitle,
   TOGGLE_COMMAND,
   TOGGLE_MESSAGE,
@@ -84,5 +86,101 @@ describe('refreshActionTitle', () => {
     expect(chromeMock.action.setTitle).toHaveBeenCalledWith({
       title: 'Toggle Local Nano — set a shortcut at chrome://extensions/shortcuts',
     });
+  });
+});
+
+describe('isNoReceiverError', () => {
+  it('recognizes the message Chrome sends when a tab has no content script', () => {
+    expect(
+      isNoReceiverError({
+        message: 'Could not establish connection. Receiving end does not exist.',
+      }),
+    ).toBe(true);
+  });
+
+  it('recognizes the bare "Receiving end does not exist" form', () => {
+    expect(isNoReceiverError({ message: 'Receiving end does not exist.' })).toBe(true);
+  });
+
+  it('does not claim unrelated errors', () => {
+    expect(isNoReceiverError({ message: 'The tab was closed.' })).toBe(false);
+    expect(isNoReceiverError({})).toBe(false);
+    expect(isNoReceiverError(undefined)).toBe(false);
+  });
+});
+
+/**
+ * A tab that predates the install or auto-update has no content script, so the
+ * toggle send fails. The click must still open the panel rather than being
+ * dropped — see `injectAndRetry` in src/background/handler.ts.
+ */
+describe('toggling a tab whose content script is missing', () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  /** Drive the sendMessage callback with a chrome.runtime.lastError set. */
+  function failNextSendWith(message: string): void {
+    chromeMock.tabs.sendMessage.mockImplementationOnce(
+      (_id: number, _msg: unknown, cb?: () => void) => {
+        chromeMock.runtime.lastError = { message };
+        cb?.();
+        chromeMock.runtime.lastError = undefined;
+      },
+    );
+  }
+
+  it('injects the content script and retries the toggle', async () => {
+    failNextSendWith('Could not establish connection. Receiving end does not exist.');
+    handleActionClick({ id: 7 } as chrome.tabs.Tab);
+    await flush();
+
+    expect(chromeMock.scripting.executeScript).toHaveBeenCalledWith({
+      target: { tabId: 7 },
+      files: [CONTENT_SCRIPT_FILE],
+    });
+    // Once for the failed send, once for the retry after injection.
+    expect(chromeMock.tabs.sendMessage).toHaveBeenCalledTimes(2);
+    expect(chromeMock.tabs.sendMessage).toHaveBeenLastCalledWith(
+      7,
+      TOGGLE_MESSAGE,
+      expect.any(Function),
+    );
+  });
+
+  it('heals the keyboard-command path too, not just the toolbar click', async () => {
+    failNextSendWith('Could not establish connection. Receiving end does not exist.');
+    handleCommand(TOGGLE_COMMAND);
+    await flush();
+
+    expect(chromeMock.scripting.executeScript).toHaveBeenCalledWith({
+      target: { tabId: 1 },
+      files: [CONTENT_SCRIPT_FILE],
+    });
+  });
+
+  it('does not inject when the send succeeded', async () => {
+    handleActionClick({ id: 7 } as chrome.tabs.Tab);
+    await flush();
+    expect(chromeMock.scripting.executeScript).not.toHaveBeenCalled();
+  });
+
+  it('does not inject on an unrelated send failure', async () => {
+    failNextSendWith('The tab was closed.');
+    handleActionClick({ id: 7 } as chrome.tabs.Tab);
+    await flush();
+    expect(chromeMock.scripting.executeScript).not.toHaveBeenCalled();
+    expect(chromeMock.tabs.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays quiet on a tab it may never script (chrome://, the Web Store)', async () => {
+    failNextSendWith('Could not establish connection. Receiving end does not exist.');
+    chromeMock.scripting.executeScript.mockRejectedValueOnce(
+      new Error('Cannot access a chrome:// URL'),
+    );
+    handleActionClick({ id: 7 } as chrome.tabs.Tab);
+    await flush();
+
+    // Injection was attempted and refused; no retry, and nothing thrown.
+    expect(chromeMock.scripting.executeScript).toHaveBeenCalledTimes(1);
+    expect(chromeMock.tabs.sendMessage).toHaveBeenCalledTimes(1);
   });
 });

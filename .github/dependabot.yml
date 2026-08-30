@@ -5,6 +5,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    ignore:
+      # Pinned to the exact onnxruntime-web that @huggingface/transformers
+      # depends on. build.mjs ships that copy's .wasm files while esbuild
+      # bundles its JS glue, and the two must be the same ORT build. This pin
+      # tracks Transformers.js, not the npm registry, so bump it only when
+      # Transformers.js changes its own onnxruntime-web dependency.
+      - dependency-name: onnxruntime-web
     groups:
       dev-dependencies:
         dependency-type: development
