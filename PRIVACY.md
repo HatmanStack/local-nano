@@ -36,7 +36,7 @@ personal information, and we do not track you in any way.
 
 The single network request Local Nano makes is a **one-time download of the
 open model's weight files from Hugging Face** (`huggingface.co`,
-`*.huggingface.co`, `cdn-lfs.huggingface.co`), which are then cached on your
+`*.huggingface.co`, and its CDN on `*.hf.co`), which are then cached on your
 device. That request downloads model data only — it sends none of your content,
 prompts, or browsing information.
 
@@ -61,6 +61,11 @@ cloud backends removed, so it cannot reach a remote LLM provider.)
 - **Content script on the pages where you open the panel** — to read the visible
   page text (to answer questions about it) and apply your requested in-place
   rewrites, all locally.
+- **activeTab and scripting** — a tab that was already open when Local Nano was
+  installed or updated has no panel in it until you reload. These let your click
+  on the toolbar icon load the panel into that one tab there and then. Access is
+  granted only by your click, only for the tab you clicked on, and is used only
+  to load Local Nano's own bundled script.
 
 ## Clearing your data
 

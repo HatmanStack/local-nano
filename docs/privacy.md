@@ -4,7 +4,7 @@
 
 ## What does leave your machine
 
-- **Model weights, on first use.** When the chat panel is opened for the first time, Transformers.js downloads the configured model from Hugging Face (`huggingface.co` and `cdn-lfs.huggingface.co`). The host permissions for those domains are declared in `manifest.json`. Subsequent loads come from the browser cache.
+- **Model weights, on first use.** When the chat panel is opened for the first time, Transformers.js downloads the configured model from Hugging Face (`huggingface.co`, which redirects weight files to Hugging Face's CDN on `hf.co`). The host permissions for those domains are declared in `manifest.json`. Subsequent loads come from the browser cache.
 - **Whatever the page itself sends.** The extension does not block or interfere with the host page's own network activity.
 
 The ORT runtime files are bundled into `dist/ort/` and loaded locally, so the extension no longer declares a `cdn.jsdelivr.net` host permission and causes no jsdelivr traffic.
@@ -29,9 +29,11 @@ From `manifest.json`:
 | `offscreen`                              | Host the long-lived `LanguageModel` session in a hidden offscreen document. |
 | `alarms`                                 | Schedule the idle resource-release timer (measured from the last generation, so it survives MV3 service-worker eviction) that closes the offscreen document to reclaim VRAM. The alarm only fires a local check; no data leaves the device. |
 | `host_permissions` for `huggingface.co` and `*.huggingface.co` | Download model weights from Hugging Face and its CDN subdomains. |
-| `host_permissions` for `cdn-lfs.huggingface.co` | Download large model files from Hugging Face's LFS CDN. |
+| `host_permissions` for `*.hf.co` | Hugging Face redirects weight downloads to its CDN on `hf.co` (e.g. `us.aws.cdn.hf.co`), a different domain from `huggingface.co`. |
+| `activeTab` | Grants access to the current tab only at the moment you click the toolbar icon or press the shortcut, so the panel can be injected into a tab that was already open before the extension was installed or updated. |
+| `scripting` | Perform that one injection. Used only on your explicit toggle, only in the tab you toggled, and only to load the extension's own bundled content script. |
 
-The content script is declared statically in `manifest.json` with `matches: ["<all_urls>"]` (no `activeTab` or `scripting` permission is needed for a static content-script declaration). That match is required for the assistant to be available on any page, but it also means the extension can read DOM on every page. If that matters to you, narrow it before publishing.
+The content script is declared statically in `manifest.json` with `matches: ["<all_urls>"]`. A declared content script only lands on navigation, so a tab that was already open when the extension was installed or updated has none until it reloads; `activeTab` plus `scripting` let your toggle inject it into that one tab on demand. That match is required for the assistant to be available on any page, but it also means the extension can read DOM on every page. If that matters to you, narrow it before publishing.
 
 ## Clearing history
 

@@ -142,6 +142,9 @@ const chromeMock = {
     query: vi.fn((_q: unknown, cb: (tabs: Array<{ id?: number }>) => void) => cb([{ id: 1 }])),
     sendMessage: vi.fn(),
   },
+  scripting: {
+    executeScript: vi.fn(async (_opts: unknown) => [] as unknown[]),
+  },
   offscreen: {
     createDocument: vi.fn(async (_opts: unknown) => undefined),
     closeDocument: vi.fn(async () => undefined),
@@ -176,6 +179,9 @@ beforeEach(() => {
   chromeMock.action.setTitle.mockImplementation(async (_opts: { title: string }) => undefined);
   chromeMock.tabs.query.mockClear();
   chromeMock.tabs.sendMessage.mockClear();
+  chromeMock.tabs.sendMessage.mockImplementation(() => undefined);
+  chromeMock.scripting.executeScript.mockClear();
+  chromeMock.scripting.executeScript.mockImplementation(async (_opts: unknown) => []);
   chromeMock.offscreen.createDocument.mockClear();
   chromeMock.offscreen.createDocument.mockImplementation(async (_opts: unknown) => undefined);
   chromeMock.offscreen.closeDocument.mockClear();

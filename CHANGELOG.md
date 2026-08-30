@@ -5,6 +5,21 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.8] - 2026-08-30
+
+Fixes the panel not opening at all after a fresh install or an auto-update. A declared content script is only injected on navigation, so every tab that was already open when the extension was installed or updated had no listener in it. The toolbar click's `chrome.tabs.sendMessage` failed with "Could not establish connection. Receiving end does not exist.", that error was deliberately swallowed to keep a mid-load race quiet, and so the click did nothing whatsoever — no panel, no error, no hint that reloading the tab would fix it. Chrome updates extensions in the background, which meant a working install could go silently dead in every open tab without the user touching anything.
+
+### Fixed
+
+- **The toggle now heals a tab that has no content script.** When a toggle send fails because nothing is listening, the service worker injects `dist/content.js` into that tab and retries, so the panel opens on the first click instead of being dropped. Host access comes from `activeTab`, granted only for the toolbar click or keyboard command that triggered it, so no broad host permission is needed. A tab that can never be scripted (`chrome://`, the Web Store, the PDF viewer) still fails quietly — there is no panel to open there. Unrelated send failures are left alone rather than being retried blindly.
+- **The build can no longer ship a mismatched ONNX Runtime.** `build.mjs` copied ORT's `.wasm` binaries from the top-level `onnxruntime-web` devDependency while esbuild bundled ORT's JS glue from the copy nested under `@huggingface/transformers`. Dependabot had walked that pin from `1.26.0-dev.20260416` to `1.26.0` to `1.27.0`, so a clean `npm ci` produced a package whose wasm and glue were different builds — the wasm backend cannot initialize on that pairing, and the model would silently never load. The build now resolves those artifacts through Transformers.js's own resolution root, so the pair cannot split however npm hoists the tree, and `tests/ort-version-match.test.ts` fails the build if the pin ever drifts again.
+- **Model downloads no longer rely on Hugging Face's CDN being CORS-permissive.** `huggingface.co` now redirects weight files to its Xet CDN on `hf.co` (e.g. `us.aws.cdn.hf.co`), which the declared host permissions did not cover — the retired `cdn-lfs.huggingface.co` entry was still there in its place. `https://*.hf.co/*` is now declared and the dead entry dropped.
+
+### Added
+
+- **`activeTab` and `scripting` permissions.** Used only to inject the extension's own bundled content script, only into the tab you just toggled, and only when that tab has no panel in it. No remote or generated code is ever injected.
+- **A re-injection guard in the content script.** Running `dist/content.js` twice in one tab — possible now that the service worker can inject it — builds only one panel instead of stacking a second on top of the first.
+
 ## [0.4.7] - 2026-06-17
 
 Defaults to a small model that loads on the common case, makes gemma an opt-in choice, and makes any load interruptible. The 0.4.6 RAM check could not catch a device with plenty of system RAM but a small GPU memory budget (16 GB RAM, hardware WebGPU, `maxBufferSize` 4096 MiB) where gemma-4-E2B still dies with `VK_ERROR_OUT_OF_DEVICE_MEMORY`. No WebGPU adapter limit predicts that (`maxBufferSize` is a per-buffer ceiling, not usable VRAM; `deviceMemory` is system RAM), so rather than speculatively load the 2B model and hope, the auto-default is now a small model and gemma is selected explicitly.

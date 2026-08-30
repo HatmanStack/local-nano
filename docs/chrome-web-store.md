@@ -53,10 +53,11 @@ Paste one per permission in the dashboard.
 - **`storage`** — Persists per-URL chat history locally via `chrome.storage.local` so a conversation survives navigation and reload. Never synced or transmitted.
 - **`offscreen`** — Hosts the long-lived LLM session in an offscreen document so the model loads once and is shared across tabs instead of reloading on every navigation. WebGPU/WASM inference cannot run in the service worker.
 - **`alarms`** — Schedules an inactivity timer that releases the in-memory model and closes the offscreen document to reclaim memory after a configurable idle period. Backed by `chrome.alarms` so it survives MV3 service-worker eviction; the alarm fires only a local check and accesses no network.
-- **Host permission `https://huggingface.co/*`, `https://*.huggingface.co/*`, `https://cdn-lfs.huggingface.co/*`** — One-time download of the open model weights, cached locally thereafter. This is the extension's only outbound network access. No other hosts are contacted.
+- **Host permission `https://huggingface.co/*`, `https://*.huggingface.co/*`, `https://*.hf.co/*`** — One-time download of the open model weights, cached locally thereafter. `huggingface.co` redirects weight files to Hugging Face's CDN on `hf.co` (e.g. `us.aws.cdn.hf.co`), which is a separate domain and so needs its own entry. This is the extension's only outbound network access. No other hosts are contacted.
 - **Content script on `<all_urls>`** — The assistant panel must be injectable on any page the user opens it on (it's a general-purpose page assistant), and reads the current page's visible text to answer questions about it / applies the user's requested in-place rewrites. Reading happens only within the page's own context; nothing is exfiltrated.
 
-Note: `activeTab` and `scripting` were removed — the declarative `<all_urls>` content script grants the page access the extension actually uses, and nothing calls the `chrome.scripting` API.
+- **`activeTab`** — Grants access to the active tab only when the user invokes the extension (toolbar click or keyboard command). A declared content script is injected only on navigation, so any tab already open when the extension is installed or updated has no panel until it reloads; `activeTab` scopes the fix to the single tab the user just acted on, with no broad host permission.
+- **`scripting`** — Performs that one injection via `chrome.scripting.executeScript`, loading only the extension's own bundled `dist/content.js`, only into the tab the user toggled. No remote or generated code is ever injected.
 
 ## CSP note
 
