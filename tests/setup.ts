@@ -136,7 +136,10 @@ const chromeMock = {
   },
   action: {
     onClicked: { addListener: vi.fn() },
-    setTitle: vi.fn(async (_opts: { title: string }) => undefined),
+    setTitle: vi.fn(async (_opts: { title: string; tabId?: number }) => undefined),
+    getTitle: vi.fn(async (_opts: { tabId?: number }) => 'Toggle Local Nano'),
+    setBadgeText: vi.fn(async (_opts: { text: string; tabId?: number }) => undefined),
+    setBadgeBackgroundColor: vi.fn(async (_opts: { color: string; tabId?: number }) => undefined),
   },
   tabs: {
     query: vi.fn((_q: unknown, cb: (tabs: Array<{ id?: number }>) => void) => cb([{ id: 1 }])),
@@ -176,7 +179,21 @@ beforeEach(() => {
   chromeMock.commands.getAll.mockImplementation(async () => []);
   chromeMock.action.onClicked.addListener.mockClear();
   chromeMock.action.setTitle.mockClear();
-  chromeMock.action.setTitle.mockImplementation(async (_opts: { title: string }) => undefined);
+  chromeMock.action.setTitle.mockImplementation(
+    async (_opts: { title: string; tabId?: number }) => undefined,
+  );
+  chromeMock.action.getTitle.mockClear();
+  chromeMock.action.getTitle.mockImplementation(
+    async (_opts: { tabId?: number }) => 'Toggle Local Nano',
+  );
+  chromeMock.action.setBadgeText.mockClear();
+  chromeMock.action.setBadgeText.mockImplementation(
+    async (_opts: { text: string; tabId?: number }) => undefined,
+  );
+  chromeMock.action.setBadgeBackgroundColor.mockClear();
+  chromeMock.action.setBadgeBackgroundColor.mockImplementation(
+    async (_opts: { color: string; tabId?: number }) => undefined,
+  );
   chromeMock.tabs.query.mockClear();
   chromeMock.tabs.sendMessage.mockClear();
   chromeMock.tabs.sendMessage.mockImplementation(() => undefined);

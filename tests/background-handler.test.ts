@@ -4,6 +4,9 @@ import {
   handleActionClick,
   handleCommand,
   isNoReceiverError,
+  RESTRICTED_BADGE_COLOR,
+  RESTRICTED_BADGE_TEXT,
+  RESTRICTED_TITLE,
   refreshActionTitle,
   TOGGLE_COMMAND,
   TOGGLE_MESSAGE,
@@ -182,5 +185,111 @@ describe('toggling a tab whose content script is missing', () => {
     // Injection was attempted and refused; no retry, and nothing thrown.
     expect(chromeMock.scripting.executeScript).toHaveBeenCalledTimes(1);
     expect(chromeMock.tabs.sendMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * `chrome://` pages, the Web Store, the PDF viewer and a blank new tab can
+ * never be scripted, so the panel has nowhere to open. That is the one failure
+ * the user can actually act on — open a site — so the icon has to say so
+ * rather than swallowing the click.
+ */
+describe('a tab the panel can never open in', () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  function failNextSendWith(message: string): void {
+    chromeMock.tabs.sendMessage.mockImplementationOnce(
+      (_id: number, _msg: unknown, cb?: () => void) => {
+        chromeMock.runtime.lastError = { message };
+        cb?.();
+        chromeMock.runtime.lastError = undefined;
+      },
+    );
+  }
+
+  const NO_RECEIVER = 'Could not establish connection. Receiving end does not exist.';
+
+  it('marks the icon when Chrome refuses the injection', async () => {
+    failNextSendWith(NO_RECEIVER);
+    chromeMock.scripting.executeScript.mockRejectedValueOnce(
+      new Error('Cannot access a chrome:// URL'),
+    );
+    handleActionClick({ id: 7 } as chrome.tabs.Tab);
+    await flush();
+
+    expect(chromeMock.action.setBadgeText).toHaveBeenCalledWith({
+      tabId: 7,
+      text: RESTRICTED_BADGE_TEXT,
+    });
+    expect(chromeMock.action.setBadgeBackgroundColor).toHaveBeenCalledWith({
+      tabId: 7,
+      color: RESTRICTED_BADGE_COLOR,
+    });
+    expect(chromeMock.action.setTitle).toHaveBeenCalledWith({
+      tabId: 7,
+      title: RESTRICTED_TITLE,
+    });
+  });
+
+  it('scopes the marker to that tab, leaving other tabs alone', async () => {
+    failNextSendWith(NO_RECEIVER);
+    chromeMock.scripting.executeScript.mockRejectedValueOnce(new Error('Cannot access'));
+    handleActionClick({ id: 7 } as chrome.tabs.Tab);
+    await flush();
+
+    for (const call of chromeMock.action.setBadgeText.mock.calls) {
+      expect(call[0]).toHaveProperty('tabId', 7);
+    }
+  });
+
+  it('does not mark the icon when the injection succeeded', async () => {
+    failNextSendWith(NO_RECEIVER);
+    handleActionClick({ id: 7 } as chrome.tabs.Tab);
+    await flush();
+
+    expect(chromeMock.action.setBadgeText).not.toHaveBeenCalledWith(
+      expect.objectContaining({ text: RESTRICTED_BADGE_TEXT }),
+    );
+  });
+
+  it('clears the marker once the panel does open in a flagged tab', async () => {
+    chromeMock.action.getTitle.mockImplementation(async () => RESTRICTED_TITLE);
+    handleActionClick({ id: 7 } as chrome.tabs.Tab);
+    // The default sendMessage mock invokes no callback; drive the success path.
+    const cb = chromeMock.tabs.sendMessage.mock.calls[0]?.[2] as (() => void) | undefined;
+    cb?.();
+    await flush();
+
+    expect(chromeMock.action.setBadgeText).toHaveBeenCalledWith({ tabId: 7, text: '' });
+    // Tooltip is restored explicitly, not blanked, so the tab override dies with it.
+    expect(chromeMock.action.setTitle).toHaveBeenCalledWith({
+      tabId: 7,
+      title: 'Toggle Local Nano — set a shortcut at chrome://extensions/shortcuts',
+    });
+  });
+
+  it('leaves a tab it never flagged completely untouched', async () => {
+    // getTitle reports the normal tooltip, so this tab was never restricted.
+    handleActionClick({ id: 7 } as chrome.tabs.Tab);
+    const cb = chromeMock.tabs.sendMessage.mock.calls[0]?.[2] as (() => void) | undefined;
+    cb?.();
+    await flush();
+
+    // No tab-scoped tooltip copy is pinned, so it cannot go stale later.
+    expect(chromeMock.action.setTitle).not.toHaveBeenCalled();
+    expect(chromeMock.action.setBadgeText).not.toHaveBeenCalled();
+  });
+
+  it('clears the marker after a heal-and-retry succeeds', async () => {
+    chromeMock.action.getTitle.mockImplementation(async () => RESTRICTED_TITLE);
+    failNextSendWith(NO_RECEIVER);
+    handleActionClick({ id: 7 } as chrome.tabs.Tab);
+    await flush();
+
+    const retry = chromeMock.tabs.sendMessage.mock.calls.at(-1)?.[2] as (() => void) | undefined;
+    retry?.();
+    await flush();
+
+    expect(chromeMock.action.setBadgeText).toHaveBeenCalledWith({ tabId: 7, text: '' });
   });
 });
