@@ -5,6 +5,18 @@ All notable changes to local-nano will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.9] - 2026-08-30
+
+Tells the user why nothing happened when the panel cannot open in the current tab. 0.4.8 made the toggle inject the content script into tabs that lack it, but Chrome refuses to script its own surfaces — `chrome://` pages, the Web Store, the PDF viewer, a blank new tab — and that refusal was swallowed. Clicking the icon on a fresh empty tab therefore still did nothing at all, with no way to tell that opening a site first would fix it.
+
+### Added
+
+- **The toolbar icon reports a tab the panel cannot run in.** When Chrome refuses the injection, the icon gets a red `!` badge and its tooltip reads "Local Nano only runs on a web page — open a site in this tab, then click again". Both are scoped to that one tab, so other tabs are unaffected, and both clear as soon as the panel does open there. This needs no new permission — it uses the `action` API the toolbar button already relies on.
+
+### Changed
+
+- **The restricted marker is cleared exactly, not on every toggle.** Clearing reads the tab's effective tooltip and only restores it when this extension had actually flagged that tab. Resetting the tooltip on every successful toggle would pin a tab-scoped copy of the current title to each tab, and those copies would then misreport the keyboard binding once it changed — the tooltip is a documented diagnostic for exactly that, so it must not go stale.
+
 ## [0.4.8] - 2026-08-30
 
 Fixes the panel not opening at all after a fresh install or an auto-update. A declared content script is only injected on navigation, so every tab that was already open when the extension was installed or updated had no listener in it. The toolbar click's `chrome.tabs.sendMessage` failed with "Could not establish connection. Receiving end does not exist.", that error was deliberately swallowed to keep a mid-load race quiet, and so the click did nothing whatsoever — no panel, no error, no hint that reloading the tab would fix it. Chrome updates extensions in the background, which meant a working install could go silently dead in every open tab without the user touching anything.
