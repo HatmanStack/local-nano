@@ -12,6 +12,11 @@ updates:
       # tracks Transformers.js, not the npm registry, so bump it only when
       # Transformers.js changes its own onnxruntime-web dependency.
       - dependency-name: onnxruntime-web
+      # held: ops/docs/blockers.md #6 — remove when .nvmrc moves off Node 20 (vitest 5 needs Node 22+)
+      - dependency-name: "vitest"
+        versions: [">=5"]
+      - dependency-name: "@vitest/*"
+        versions: [">=5"]
     groups:
       dev-dependencies:
         dependency-type: development
